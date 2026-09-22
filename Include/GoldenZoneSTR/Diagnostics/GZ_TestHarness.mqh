@@ -3,6 +3,7 @@
 //| GoldenZone STR - Automated Test Harness                           |
 //| Phase 1 (T01-T18): Data Layer + Validator + Time Engine           |
 //| Phase 2 (T19-T23): M5 Structure Engine (swing detection)          |
+//| Phase 3 (T24-T34): Leg Engine + Break Engine                      |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -22,6 +23,10 @@
 #include "..\Time\GZ_Session.mqh"
 #include "..\Structure\GZ_StructureTypes.mqh"
 #include "..\Structure\GZ_SwingEngine.mqh"
+#include "..\Leg\GZ_LegTypes.mqh"
+#include "..\Leg\GZ_ATR.mqh"
+#include "..\Leg\GZ_LegEngine.mqh"
+#include "..\Leg\GZ_BreakEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -558,6 +563,368 @@ public:
                  batch_repeatable?"true":"false", incremental_matches_batch?"true":"false"));
      }
 
+   //--- helper: build a swing fixture directly (Phase 3 tests don't need
+   //--- to run the Swing Engine itself - that is already covered by
+   //--- T19-T23; here we only need well-formed GZ_Swing inputs). --------
+   GZ_Swing MakeSwing(ENUM_GZ_SWING_DIR dir, double price, datetime pivot_t, datetime confirm_t, long id=1)
+     {
+      GZ_Swing s; s.Clear();
+      s.id = id;
+      s.direction = dir;
+      s.price = price;
+      s.pivot_time = pivot_t;
+      s.detection_time = pivot_t;
+      s.confirmation_time = confirm_t;
+      s.pivot_strength = 2;
+      return s;
+     }
+
+   //--- T24: Leg creation baseline (LAST_SWING variant) - LOW then HIGH
+   //--- produces a BULLISH leg with the correct origin/target pair. ------
+   void T24_LegCreationBaseline()
+     {
+      datetime t0 = MakeTime(2026,1,5,10,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,          t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300,    t0+7*300, 2);
+
+      CGZLegEngine engine(m_logger);
+      engine.Init(GZ_LEG_VARIANT_LAST_SWING);
+
+      int idx1=-1;
+      bool created1 = engine.Update(low1, 0.0, false, idx1);
+
+      int idx2=-1;
+      bool created2 = engine.Update(high1, 0.0, false, idx2);
+
+      bool ok = (!created1) && created2 && (idx2>=0);
+      if(ok)
+        {
+         GZ_Leg leg = engine.GetLeg(idx2);
+         ok = (leg.direction==GZ_LEG_BULLISH) &&
+              (MathAbs(leg.origin_swing.price-90.0)<0.00001) &&
+              (MathAbs(leg.target_swing.price-110.0)<0.00001) &&
+              (leg.origin_swing.pivot_time==low1.pivot_time) &&
+              (leg.target_swing.pivot_time==high1.pivot_time);
+        }
+      AddResult("T24", ok, StringFormat("created1=%s created2=%s dir=%s", created1?"true":"false", created2?"true":"false",
+                (created2 && idx2>=0)?engine.GetLeg(idx2).DirectionToString():"-"));
+     }
+
+   //--- T25: Leg direction correctness - HIGH then LOW produces BEARISH. -
+   void T25_LegDirectionBearish()
+     {
+      datetime t0 = MakeTime(2026,1,5,12,0);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 120.0, t0,       t0+2*300, 1);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  100.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine engine(m_logger);
+      engine.Init(GZ_LEG_VARIANT_LAST_SWING);
+
+      int idx1=-1; engine.Update(high1, 0.0, false, idx1);
+      int idx2=-1; bool created2 = engine.Update(low1, 0.0, false, idx2);
+
+      bool ok = created2 && (idx2>=0);
+      if(ok)
+        {
+         GZ_Leg leg = engine.GetLeg(idx2);
+         ok = (leg.direction==GZ_LEG_BEARISH) &&
+              (MathAbs(leg.origin_swing.price-120.0)<0.00001) &&
+              (MathAbs(leg.target_swing.price-100.0)<0.00001);
+        }
+      AddResult("T25", ok, StringFormat("created=%s dir=%s", created2?"true":"false",
+                (created2 && idx2>=0)?engine.GetLeg(idx2).DirectionToString():"-"));
+     }
+
+   //--- T26: No leg created from the very first swing (no opposite swing
+   //--- exists yet) - documented, not fabricated. -------------------------
+   void T26_NoLegOnFirstSwing()
+     {
+      datetime t0 = MakeTime(2026,1,5,9,0);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 50.0, t0, t0+2*300, 1);
+
+      CGZLegEngine engine(m_logger);
+      engine.Init(GZ_LEG_VARIANT_LAST_SWING);
+
+      int idx=-1;
+      bool created = engine.Update(high1, 0.0, false, idx);
+
+      bool ok = (!created) && (idx==-1) && (engine.LegCount()==0);
+      AddResult("T26", ok, StringFormat("created=%s legcount=%d", created?"true":"false", engine.LegCount()));
+     }
+
+   //--- T27: Extreme tracking - only bars at/after target confirmation
+   //--- time count; earlier bars (even with a larger high) must be
+   //--- ignored (no lookahead through pre-target bars). -------------------
+   void T27_ExtremeTrackingNoLookahead()
+     {
+      datetime t0 = MakeTime(2026,1,5,10,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1); // origin
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2); // target, confirms at t0+7*300
+
+      CGZLegEngine engine(m_logger);
+      engine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int idx1=-1; engine.Update(low1, 0.0, false, idx1);
+      int idx2=-1; engine.Update(high1, 0.0, false, idx2);
+
+      // Bar BEFORE target confirmation time, artificially huge high - must
+      // be ignored entirely.
+      MqlRates preBar = MakeBar(t0+6*300, 150,150,149,150);
+      engine.UpdateBar(preBar);
+
+      GZ_Leg afterPre = engine.GetLeg(idx2);
+      bool pre_ignored = (MathAbs(afterPre.extreme_price-110.0)<0.00001);
+
+      // Bars AT/AFTER confirmation, increasing highs.
+      MqlRates b1 = MakeBar(t0+7*300, 111,112,110,111);
+      MqlRates b2 = MakeBar(t0+8*300, 112,116,111,113);
+      MqlRates b3 = MakeBar(t0+9*300, 113,114,112,113); // lower high - must not regress extreme
+      engine.UpdateBar(b1);
+      engine.UpdateBar(b2);
+      engine.UpdateBar(b3);
+
+      GZ_Leg final_ = engine.GetLeg(idx2);
+      bool tracked_ok = (MathAbs(final_.extreme_price-116.0)<0.00001) && (final_.extreme_time==b2.time);
+
+      bool ok = pre_ignored && tracked_ok;
+      AddResult("T27", ok, StringFormat("pre_ignored=%s extreme=%.2f@%s", pre_ignored?"true":"false",
+                final_.extreme_price, TimeToString(final_.extreme_time)));
+     }
+
+   //--- T28: CLOSE break baseline - a wick above the level with a close
+   //--- still below must NOT break; a subsequent close above must. --------
+   void T28_CloseBreakBaseline()
+     {
+      datetime t0 = MakeTime(2026,1,5,10,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngine(m_logger);
+      legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int idx1=-1; legEngine.Update(low1, 0.0, false, idx1);
+      int idx2=-1; legEngine.Update(high1, 0.0, false, idx2);
+      GZ_Leg leg = legEngine.GetLeg(idx2);
+
+      GZ_BreakConfig cfg; cfg.Default(); cfg.mode = GZ_BREAK_CLOSE; cfg.buffer_atr_mult = 0.0;
+      CGZBreakEngine breakEngine(m_logger);
+      breakEngine.Configure(cfg);
+
+      MqlRates wickOnly = MakeBar(t0+7*300, 108,115,107,108); // wick above 110, close below
+      breakEngine.OnBar(wickOnly);
+      bool broke_on_wick = breakEngine.CheckBreak(leg, wickOnly);
+
+      MqlRates closeAbove = MakeBar(t0+8*300, 109,112,108,111); // close above 110
+      breakEngine.OnBar(closeAbove);
+      bool broke_on_close = breakEngine.CheckBreak(leg, closeAbove);
+
+      bool ok = (!broke_on_wick) && broke_on_close && leg.broken &&
+                (leg.break_time==closeAbove.time) && (MathAbs(leg.break_price-111.0)<0.00001);
+      AddResult("T28", ok, StringFormat("broke_on_wick=%s broke_on_close=%s break_price=%.2f",
+                broke_on_wick?"true":"false", broke_on_close?"true":"false", leg.break_price));
+     }
+
+   //--- T29: WICK break variant - a wick above the level is sufficient,
+   //--- even though the bar's close stays below. ---------------------------
+   void T29_WickBreakVariant()
+     {
+      datetime t0 = MakeTime(2026,1,5,11,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngine(m_logger);
+      legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int idx1=-1; legEngine.Update(low1, 0.0, false, idx1);
+      int idx2=-1; legEngine.Update(high1, 0.0, false, idx2);
+      GZ_Leg leg = legEngine.GetLeg(idx2);
+
+      GZ_BreakConfig cfg; cfg.Default(); cfg.mode = GZ_BREAK_WICK; cfg.buffer_atr_mult = 0.0;
+      CGZBreakEngine breakEngine(m_logger);
+      breakEngine.Configure(cfg);
+
+      MqlRates wickBar = MakeBar(t0+7*300, 108,111,107,108); // high clears 110, close does not
+      breakEngine.OnBar(wickBar);
+      bool broke = breakEngine.CheckBreak(leg, wickBar);
+
+      bool ok = broke && leg.broken && (MathAbs(leg.break_price-111.0)<0.00001);
+      AddResult("T29", ok, StringFormat("broke=%s break_price=%.2f", broke?"true":"false", leg.break_price));
+     }
+
+   //--- T30: ATR-scaled break buffer suppresses a break until price clears
+   //--- level+buffer, not just level. ---------------------------------------
+   void T30_BreakBufferAtr()
+     {
+      datetime t0 = MakeTime(2026,1,5,12,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2); // level=110
+
+      CGZLegEngine legEngine(m_logger);
+      legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int idx1=-1; legEngine.Update(low1, 0.0, false, idx1);
+      int idx2=-1; legEngine.Update(high1, 0.0, false, idx2);
+      GZ_Leg leg = legEngine.GetLeg(idx2);
+
+      GZ_BreakConfig cfg; cfg.Default(); cfg.mode = GZ_BREAK_CLOSE; cfg.atr_period = 3; cfg.buffer_atr_mult = 1.0;
+      CGZBreakEngine breakEngine(m_logger);
+      breakEngine.Configure(cfg);
+
+      // Warm up ATR with 3 bars of constant True Range = 2.0 (high-low=2,
+      // flat closes) -> ATR becomes exactly 2.0 once ready.
+      MqlRates w1 = MakeBar(t0+7*300,  100,101,99,100);
+      MqlRates w2 = MakeBar(t0+8*300,  100,101,99,100);
+      MqlRates w3 = MakeBar(t0+9*300,  100,101,99,100);
+      breakEngine.OnBar(w1); breakEngine.CheckBreak(leg, w1);
+      breakEngine.OnBar(w2); breakEngine.CheckBreak(leg, w2);
+      breakEngine.OnBar(w3); breakEngine.CheckBreak(leg, w3);
+      bool atr_ready = breakEngine.AtrReady();
+      bool atr_correct = MathAbs(breakEngine.CurrentAtr()-2.0)<0.00001;
+
+      // Close at 110.5: clears raw level (110) but NOT level+ATR buffer (112).
+      MqlRates notEnough = MakeBar(t0+10*300, 110,111,109,110.5);
+      breakEngine.OnBar(notEnough);
+      bool broke_early = breakEngine.CheckBreak(leg, notEnough);
+
+      // Close at 112.5: clears level+buffer (112).
+      MqlRates enough = MakeBar(t0+11*300, 111,113,110,112.5);
+      breakEngine.OnBar(enough);
+      bool broke_late = breakEngine.CheckBreak(leg, enough);
+
+      bool ok = atr_ready && atr_correct && (!broke_early) && broke_late && leg.broken;
+      AddResult("T30", ok, StringFormat("atr_ready=%s atr=%.4f broke_early=%s broke_late=%s",
+                atr_ready?"true":"false", breakEngine.CurrentAtr(), broke_early?"true":"false", broke_late?"true":"false"));
+     }
+
+   //--- T31: ATR calculation correctness on a known, hand-computable
+   //--- True Range sequence. -----------------------------------------------
+   void T31_AtrCorrectness()
+     {
+      datetime t0 = MakeTime(2026,1,5,13,0);
+      // Bar1: no prev close -> TR = high-low = 2
+      MqlRates b1 = MakeBar(t0,        100,102,100,101);
+      // Bar2: TR = max(high-low, |high-prevclose|, |low-prevclose|)
+      //         = max(102-99=3? ...) constructed to give TR = 4 exactly
+      MqlRates b2 = MakeBar(t0+300,    101,105,101,103); // high-low=4, |105-101|=4, |101-101|=0 -> TR=4
+      // Bar3: TR = 6
+      MqlRates b3 = MakeBar(t0+600,    103,109,103,105); // high-low=6, |109-103|=6 -> TR=6
+
+      CGZAtr atr;
+      atr.Init(3);
+      bool ready_before = atr.IsReady();
+      atr.Update(b1);
+      atr.Update(b2);
+      bool ready_mid = atr.IsReady();
+      atr.Update(b3);
+      bool ready_after = atr.IsReady();
+
+      double expected = (2.0+4.0+6.0)/3.0; // = 4.0
+      bool ok = (!ready_before) && (!ready_mid) && ready_after && (MathAbs(atr.Value()-expected)<0.00001);
+      AddResult("T31", ok, StringFormat("ready_after=%s atr=%.4f expected=%.4f", ready_after?"true":"false", atr.Value(), expected));
+     }
+
+   //--- T32: Leg variant MIN_DISTANCE picks a different origin than the
+   //--- LAST_SWING baseline would, when the last confirmed opposite swing
+   //--- is farther in price than an earlier one. ---------------------------
+   void T32_LegVariantMinDistance()
+     {
+      datetime t0 = MakeTime(2026,1,5,14,0);
+      GZ_Swing lowA = MakeSwing(GZ_SWING_LOW, 98.0, t0,          t0+2*300, 1);  // older, closer in price
+      GZ_Swing lowB = MakeSwing(GZ_SWING_LOW, 70.0, t0+3*300,    t0+5*300, 2);  // last confirmed, farther
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 100.0, t0+8*300, t0+10*300, 3);
+
+      CGZLegEngine baseline(m_logger);
+      baseline.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int bi1=-1; baseline.Update(lowA, 0.0, false, bi1);
+      int bi2=-1; baseline.Update(lowB, 0.0, false, bi2);
+      int bi3=-1; baseline.Update(high1, 0.0, false, bi3);
+      GZ_Leg baselineLeg = baseline.GetLeg(bi3);
+
+      CGZLegEngine minDist(m_logger);
+      minDist.Init(GZ_LEG_VARIANT_MIN_DISTANCE);
+      int mi1=-1; minDist.Update(lowA, 0.0, false, mi1);
+      int mi2=-1; minDist.Update(lowB, 0.0, false, mi2);
+      int mi3=-1; minDist.Update(high1, 0.0, false, mi3);
+      GZ_Leg minDistLeg = minDist.GetLeg(mi3);
+
+      bool ok = (MathAbs(baselineLeg.origin_swing.price-70.0)<0.00001) &&
+                (MathAbs(minDistLeg.origin_swing.price-98.0)<0.00001);
+      AddResult("T32", ok, StringFormat("baseline_origin=%.2f min_distance_origin=%.2f",
+                baselineLeg.origin_swing.price, minDistLeg.origin_swing.price));
+     }
+
+   //--- T33: Determinism - two identical Leg+Break runs over the same
+   //--- swing/bar sequence produce identical Leg records. -------------------
+   void T33_LegBreakDeterminism()
+     {
+      datetime t0 = MakeTime(2026,1,5,15,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+      MqlRates b1 = MakeBar(t0+7*300, 111,112,110,111);
+      MqlRates b2 = MakeBar(t0+8*300, 112,116,111,113);
+
+      GZ_BreakConfig cfg; cfg.Default();
+
+      CGZLegEngine legA(m_logger); legA.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkA(m_logger); brkA.Configure(cfg);
+      int aI1=-1; legA.Update(low1,0.0,false,aI1);
+      int aI2=-1; legA.Update(high1,0.0,false,aI2);
+      legA.UpdateBar(b1); brkA.OnBar(b1);
+      GZ_Leg lA = legA.GetLeg(aI2); brkA.CheckBreak(lA,b1); legA.SetLeg(aI2,lA);
+      legA.UpdateBar(b2); brkA.OnBar(b2);
+      lA = legA.GetLeg(aI2); brkA.CheckBreak(lA,b2); legA.SetLeg(aI2,lA);
+
+      CGZLegEngine legB(m_logger); legB.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkB(m_logger); brkB.Configure(cfg);
+      int bI1=-1; legB.Update(low1,0.0,false,bI1);
+      int bI2=-1; legB.Update(high1,0.0,false,bI2);
+      legB.UpdateBar(b1); brkB.OnBar(b1);
+      GZ_Leg lB = legB.GetLeg(bI2); brkB.CheckBreak(lB,b1); legB.SetLeg(bI2,lB);
+      legB.UpdateBar(b2); brkB.OnBar(b2);
+      lB = legB.GetLeg(bI2); brkB.CheckBreak(lB,b2); legB.SetLeg(bI2,lB);
+
+      GZ_Leg finalA = legA.GetLeg(aI2);
+      GZ_Leg finalB = legB.GetLeg(bI2);
+
+      bool ok = (finalA.direction==finalB.direction) &&
+                (MathAbs(finalA.extreme_price-finalB.extreme_price)<0.00001) &&
+                (finalA.extreme_time==finalB.extreme_time) &&
+                (finalA.broken==finalB.broken) &&
+                (finalA.break_time==finalB.break_time) &&
+                (MathAbs(finalA.break_price-finalB.break_price)<0.00001);
+      AddResult("T33", ok, StringFormat("brokenA=%s brokenB=%s extremeA=%.2f extremeB=%.2f",
+                finalA.broken?"true":"false", finalB.broken?"true":"false", finalA.extreme_price, finalB.extreme_price));
+     }
+
+   //--- T34: No lookahead - break must not be confirmed on any bar before
+   //--- the actual breaking bar, only on the exact bar that clears it. -----
+   void T34_BreakNoLookahead()
+     {
+      datetime t0 = MakeTime(2026,1,5,16,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int i1=-1; legEngine.Update(low1,0.0,false,i1);
+      int i2=-1; legEngine.Update(high1,0.0,false,i2);
+      GZ_Leg leg = legEngine.GetLeg(i2);
+
+      GZ_BreakConfig cfg; cfg.Default();
+      CGZBreakEngine breakEngine(m_logger); breakEngine.Configure(cfg);
+
+      MqlRates approach1 = MakeBar(t0+7*300, 105,108,104,106);
+      MqlRates approach2 = MakeBar(t0+8*300, 106,109,105,108);
+      MqlRates approach3 = MakeBar(t0+9*300, 108,110,107,109); // still not closed above 110
+      MqlRates breakBar  = MakeBar(t0+10*300,109,113,108,112); // closes above 110
+
+      bool premature = false;
+      breakEngine.OnBar(approach1); if(breakEngine.CheckBreak(leg, approach1)) premature = true;
+      breakEngine.OnBar(approach2); if(breakEngine.CheckBreak(leg, approach2)) premature = true;
+      breakEngine.OnBar(approach3); if(breakEngine.CheckBreak(leg, approach3)) premature = true;
+      breakEngine.OnBar(breakBar);
+      bool confirmed_on_time = breakEngine.CheckBreak(leg, breakBar);
+
+      bool ok = (!premature) && confirmed_on_time && leg.broken && (leg.break_time==breakBar.time);
+      AddResult("T34", ok, StringFormat("premature=%s confirmed_on_time=%s break_time=%s",
+                premature?"true":"false", confirmed_on_time?"true":"false", TimeToString(leg.break_time)));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -585,6 +952,17 @@ public:
       T21_NoLookahead();
       T22_PivotStrengthVariants();
       T23_SwingDeterminism();
+      T24_LegCreationBaseline();
+      T25_LegDirectionBearish();
+      T26_NoLegOnFirstSwing();
+      T27_ExtremeTrackingNoLookahead();
+      T28_CloseBreakBaseline();
+      T29_WickBreakVariant();
+      T30_BreakBufferAtr();
+      T31_AtrCorrectness();
+      T32_LegVariantMinDistance();
+      T33_LegBreakDeterminism();
+      T34_BreakNoLookahead();
      }
 
    int               PassCount() const
