@@ -1,6 +1,8 @@
 //+------------------------------------------------------------------+
 //| GZ_TestHarness.mqh                                                 |
-//| GoldenZone STR - Phase 1 - Automated Test Harness (T01-T18)       |
+//| GoldenZone STR - Automated Test Harness                           |
+//| Phase 1 (T01-T18): Data Layer + Validator + Time Engine           |
+//| Phase 2 (T19-T23): M5 Structure Engine (swing detection)          |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -18,6 +20,8 @@
 #include "..\Time\GZ_TimeEngine.mqh"
 #include "..\Time\GZ_DST.mqh"
 #include "..\Time\GZ_Session.mqh"
+#include "..\Structure\GZ_StructureTypes.mqh"
+#include "..\Structure\GZ_SwingEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -393,6 +397,167 @@ public:
       AddResult("T18", ok, "two identical BuildContext calls must produce identical output");
      }
 
+   //--- helper: bar from explicit high/low, open=close=midpoint (keeps
+   //--- OHLC trivially valid: High>=max(o,c), Low<=min(o,c)) -------------
+   MqlRates MakeHL(datetime t, double high, double low)
+     {
+      double mid = (high+low)/2.0;
+      return MakeBar(t, mid, high, low, mid);
+     }
+
+   //--- T19: Simple pivot HIGH detection (baseline strength=2) -----------
+   void T19_SwingHighDetection()
+     {
+      datetime t0 = MakeTime(2026,1,5,10,0);
+      MqlRates rates[];
+      ArrayResize(rates,5);
+      rates[0]=MakeHL(t0+0*300,   100,90);
+      rates[1]=MakeHL(t0+1*300,   103,93);
+      rates[2]=MakeHL(t0+2*300,   110,95);  // pivot high
+      rates[3]=MakeHL(t0+3*300,   104,94);
+      rates[4]=MakeHL(t0+4*300,   101,91);
+
+      CGZSwingEngine engine(m_logger);
+      engine.Init(2);
+      GZ_Swing swings[];
+      int n = engine.DetectAll(rates, swings);
+
+      bool ok = (n==1) && (swings[0].direction==GZ_SWING_HIGH) &&
+                (MathAbs(swings[0].price-110)<0.00001) &&
+                (swings[0].pivot_time==rates[2].time) &&
+                (swings[0].confirmation_time==rates[4].time);
+      AddResult("T19", ok, StringFormat("found=%d dir=%s price=%.2f pivot=%s confirm=%s",
+                 n, n>0?swings[0].DirectionToString():"-", n>0?swings[0].price:0.0,
+                 n>0?TimeToString(swings[0].pivot_time):"-", n>0?TimeToString(swings[0].confirmation_time):"-"));
+     }
+
+   //--- T20: Simple pivot LOW detection (baseline strength=2) ------------
+   void T20_SwingLowDetection()
+     {
+      datetime t0 = MakeTime(2026,1,5,11,0);
+      MqlRates rates[];
+      ArrayResize(rates,5);
+      rates[0]=MakeHL(t0+0*300,   110,100);
+      rates[1]=MakeHL(t0+1*300,   108,97);
+      rates[2]=MakeHL(t0+2*300,   105,90);  // pivot low
+      rates[3]=MakeHL(t0+3*300,   107,96);
+      rates[4]=MakeHL(t0+4*300,   109,99);
+
+      CGZSwingEngine engine(m_logger);
+      engine.Init(2);
+      GZ_Swing swings[];
+      int n = engine.DetectAll(rates, swings);
+
+      bool ok = (n==1) && (swings[0].direction==GZ_SWING_LOW) &&
+                (MathAbs(swings[0].price-90)<0.00001) &&
+                (swings[0].pivot_time==rates[2].time) &&
+                (swings[0].confirmation_time==rates[4].time);
+      AddResult("T20", ok, StringFormat("found=%d dir=%s price=%.2f pivot=%s confirm=%s",
+                 n, n>0?swings[0].DirectionToString():"-", n>0?swings[0].price:0.0,
+                 n>0?TimeToString(swings[0].pivot_time):"-", n>0?TimeToString(swings[0].confirmation_time):"-"));
+     }
+
+   //--- T21: No lookahead - the pivot must not be confirmed before its
+   //--- right-side confirmation bar has actually been fed to the engine.
+   void T21_NoLookahead()
+     {
+      datetime t0 = MakeTime(2026,1,5,10,0);
+      MqlRates rates[];
+      ArrayResize(rates,5);
+      rates[0]=MakeHL(t0+0*300,   100,90);
+      rates[1]=MakeHL(t0+1*300,   103,93);
+      rates[2]=MakeHL(t0+2*300,   110,95);  // pivot high, cannot be known yet
+      rates[3]=MakeHL(t0+3*300,   104,94);
+      rates[4]=MakeHL(t0+4*300,   101,91);  // 2nd right-side bar -> confirms rates[2]
+
+      CGZSwingEngine engine(m_logger);
+      engine.Init(2);
+
+      bool premature_confirm = false;
+      GZ_Swing s;
+      for(int i=0;i<4;i++)  // feed bars 0..3 - must NOT confirm anything yet
+        {
+         if(engine.Update(rates[i], s))
+            premature_confirm = true;
+        }
+      bool confirmed_on_time = engine.Update(rates[4], s); // 5th bar -> confirms
+
+      bool ok = (!premature_confirm) && confirmed_on_time &&
+                (s.direction==GZ_SWING_HIGH) && (s.pivot_time==rates[2].time) &&
+                (s.confirmation_time==rates[4].time);
+      AddResult("T21", ok, StringFormat("premature=%s confirmed_on_5th_bar=%s pivot=%s confirm=%s",
+                 premature_confirm?"true":"false", confirmed_on_time?"true":"false",
+                 TimeToString(s.pivot_time), TimeToString(s.confirmation_time)));
+     }
+
+   //--- T22: Pivot strength changes results - architecture supports the
+   //--- roadmap's research range (1..5) via configuration, not hard-coding.
+   void T22_PivotStrengthVariants()
+     {
+      datetime t0 = MakeTime(2026,1,5,12,0);
+      MqlRates rates[];
+      ArrayResize(rates,6);
+      double highs[6] = {100,103,101,105,102,100};
+      double lows[6]  = {50,49,48,47,46,45}; // strictly decreasing: never a low pivot at any strength here
+      for(int i=0;i<6;i++)
+         rates[i]=MakeHL(t0+i*300, highs[i], lows[i]);
+
+      CGZSwingEngine e1(m_logger); e1.Init(1);
+      GZ_Swing s1[];
+      int n1 = e1.DetectAll(rates, s1);
+
+      CGZSwingEngine e2(m_logger); e2.Init(2);
+      GZ_Swing s2[];
+      int n2 = e2.DetectAll(rates, s2);
+
+      bool ok = (n1==2) && (s1[0].pivot_time==rates[1].time) && (s1[1].pivot_time==rates[3].time) &&
+                (n2==1) && (s2[0].pivot_time==rates[3].time);
+      AddResult("T22", ok, StringFormat("strength1_count=%d strength2_count=%d (expected 2 then 1)", n1, n2));
+     }
+
+   //--- T23: Determinism - identical data/config produces identical swings,
+   //--- and the incremental (live-safe) API agrees with the batch API.
+   void T23_SwingDeterminism()
+     {
+      datetime t0 = MakeTime(2026,1,5,13,0);
+      MqlRates rates[];
+      ArrayResize(rates,5);
+      rates[0]=MakeHL(t0+0*300,   100,90);
+      rates[1]=MakeHL(t0+1*300,   103,93);
+      rates[2]=MakeHL(t0+2*300,   110,95);
+      rates[3]=MakeHL(t0+3*300,   104,94);
+      rates[4]=MakeHL(t0+4*300,   101,91);
+
+      CGZSwingEngine eA(m_logger); eA.Init(2);
+      GZ_Swing swingsA[];
+      int nA = eA.DetectAll(rates, swingsA);
+
+      CGZSwingEngine eB(m_logger); eB.Init(2);
+      GZ_Swing swingsB[];
+      int nB = eB.DetectAll(rates, swingsB);
+
+      bool batch_repeatable = (nA==nB) && (nA==1) &&
+                              (swingsA[0].price==swingsB[0].price) &&
+                              (swingsA[0].pivot_time==swingsB[0].pivot_time) &&
+                              (swingsA[0].confirmation_time==swingsB[0].confirmation_time);
+
+      CGZSwingEngine eC(m_logger); eC.Init(2);
+      GZ_Swing incremental_result; incremental_result.Clear(); bool got_incremental=false;
+      for(int i=0;i<ArraySize(rates);i++)
+        {
+         GZ_Swing s;
+         if(eC.Update(rates[i], s)) { incremental_result=s; got_incremental=true; }
+        }
+      bool incremental_matches_batch = got_incremental && batch_repeatable &&
+                              (incremental_result.price==swingsA[0].price) &&
+                              (incremental_result.pivot_time==swingsA[0].pivot_time) &&
+                              (incremental_result.confirmation_time==swingsA[0].confirmation_time);
+
+      bool ok = batch_repeatable && incremental_matches_batch;
+      AddResult("T23", ok, StringFormat("batch_repeatable=%s incremental_matches_batch=%s",
+                 batch_repeatable?"true":"false", incremental_matches_batch?"true":"false"));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -415,6 +580,11 @@ public:
       T16_OvernightSession();
       T17_DateRange();
       T18_Determinism();
+      T19_SwingHighDetection();
+      T20_SwingLowDetection();
+      T21_NoLookahead();
+      T22_PivotStrengthVariants();
+      T23_SwingDeterminism();
      }
 
    int               PassCount() const

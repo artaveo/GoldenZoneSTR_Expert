@@ -22,9 +22,14 @@ Data Layer + Data Validator + Time Engine. No strategy logic, no live trading.
 - Builds Broker/UTC/New-York time contexts with correct US DST handling.
 - Evaluates a configurable session window using the `[start, end)` rule.
 - Runs 18 deterministic, synthetic-data self-tests (T01–T18) and reports PASS/FAIL for each.
-- Prints and saves a full Phase 1 completion report.
-- Does **not** place any trades, and does **not** implement any Phase 2+ strategy logic
-  (swing/leg/break/fibonacci/entry/exit). It stops after the report.
+- **Phase 2:** detects M5 swing highs/lows with a configurable pivot strength
+  (`InpPivotStrength`, baseline 2), with no lookahead — a swing is only ever confirmed once
+  that many bars have closed on its right side. Runs 5 more deterministic self-tests
+  (T19–T23) covering high/low detection, no-lookahead, pivot-strength variants and
+  determinism. Diagnostic only in this EA — not yet consumed by any leg/break logic.
+- Prints and saves a full Phase 1+2 completion report.
+- Does **not** place any trades, and does **not** implement any Phase 3+ strategy logic
+  (leg/break/fibonacci/entry/exit/filters). It stops after the report.
 
 ## Before trusting the output
 

@@ -22,4 +22,9 @@
 
 #define GZ_PROJECT_VERSION      "GZ-P1-SPEC v1.0"
 
+// Phase 2 - M5 Structure Engine: baseline pivot strength per roadmap.
+// Research variants (1..5) are exposed as an EA input, not hard-coded.
+#define GZ_DEFAULT_PIVOT_STRENGTH  2
+#define GZ_PROJECT_VERSION_P2      "GZ-P2-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__

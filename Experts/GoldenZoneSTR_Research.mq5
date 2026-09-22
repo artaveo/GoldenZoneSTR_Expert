@@ -1,20 +1,23 @@
 //+------------------------------------------------------------------+
 //|                                    GoldenZoneSTR_Research.mq5    |
 //|                                                                    |
-//| GoldenZone STR - Phase 1 Research EA                              |
-//| Data Layer + Data Validator + Time Engine                         |
+//| GoldenZone STR - Phase 1 + Phase 2 Research EA                    |
+//| Phase 1: Data Layer + Data Validator + Time Engine                |
+//| Phase 2: M5 Structure Engine (swing/pivot detection)               |
 //|                                                                    |
 //| SCOPE: This EA implements ONLY Phase 1 (Data/Validator/Time/      |
-//| Session/Diagnostics/TestHarness). It contains NO swing, leg,      |
-//| break, fibonacci, entry, exit or trade-management logic, and it   |
-//| places NO live orders. On init it loads historical data, runs     |
-//| validation, runs the deterministic T01-T18 test harness, and      |
-//| prints a Phase 1 completion report. Then it stops - it does not   |
-//| trade and does not proceed to Phase 2 logic.                      |
+//| Session/Diagnostics/TestHarness) and Phase 2 (M5 swing/pivot      |
+//| detection). It contains NO leg, break, fibonacci, entry, exit,    |
+//| filter or trade-management logic (Phase 3+), and it places NO     |
+//| live orders. On init it loads historical data, runs validation,   |
+//| runs swing detection diagnostically over the loaded M5 data,      |
+//| runs the deterministic T01-T23 test harness, and prints a         |
+//| completion report. Then it stops - it does not trade and does     |
+//| not proceed to Phase 3 (Leg/Break Engine) logic.                  |
 //+------------------------------------------------------------------+
 #property copyright "GoldenZone STR"
-#property version   "1.00"
-#property description "Phase 1: Data Layer + Data Validator + Time Engine (research/diagnostic only, no trading)"
+#property version   "1.10"
+#property description "Phase 1+2: Data/Validator/Time Engine + M5 Structure (Swing) Engine (research/diagnostic only, no trading)"
 
 #include <GoldenZoneSTR\Core\GZ_Types.mqh>
 #include <GoldenZoneSTR\Core\GZ_Config.mqh>
@@ -24,6 +27,8 @@
 #include <GoldenZoneSTR\Data\GZ_DatasetInfo.mqh>
 #include <GoldenZoneSTR\Time\GZ_TimeEngine.mqh>
 #include <GoldenZoneSTR\Time\GZ_Session.mqh>
+#include <GoldenZoneSTR\Structure\GZ_StructureTypes.mqh>
+#include <GoldenZoneSTR\Structure\GZ_SwingEngine.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
@@ -50,6 +55,9 @@ input bool                InpSessionInclude     = true;
 input bool                InpVerboseLogging     = false;
 input bool                InpLoadM15            = false;
 
+//--- Phase 2: M5 Structure Engine ---------------------------------------------
+input int                 InpPivotStrength      = 2;      // baseline=2 per roadmap; research range 1-5
+
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
 CGZDataProvider   g_provider(GetPointer(g_logger));
@@ -57,9 +65,14 @@ CGZDataValidator  g_validator(GetPointer(g_logger));
 CGZTimeEngine     g_time_engine(GetPointer(g_logger));
 CGZSessionEngine  g_session_engine;
 CGZTestHarness    g_harness(GetPointer(g_logger));
+CGZSwingEngine    g_swing_engine(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;
+
+//--- Phase 2 diagnostic results (M5 swing detection over the loaded range) ----
+GZ_Swing          g_swings[];
+int               g_swing_count = 0;
 
 //+------------------------------------------------------------------+
 //| Build and print/save the Phase 1 completion report                |
@@ -68,15 +81,17 @@ void BuildAndEmitReport()
   {
    string report = "";
    report += "===================================================\n";
-   report += " GoldenZone STR - PHASE 1 COMPLETION REPORT\n";
-   report += " Spec version: " + GZ_PROJECT_VERSION + "\n";
+   report += " GoldenZone STR - PHASE 1 + PHASE 2 COMPLETION REPORT\n";
+   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + "\n";
    report += " Generated (terminal local time, diagnostic only): " + TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS) + "\n";
    report += "===================================================\n\n";
 
    report += "--- Implementation ---\n";
-   report += "Files: GZ_Types, GZ_Config, GZ_Constants, GZ_DataProvider, GZ_DataValidator,\n";
+   report += "Phase 1 files: GZ_Types, GZ_Config, GZ_Constants, GZ_DataProvider, GZ_DataValidator,\n";
    report += "       GZ_DatasetInfo, GZ_TimeEngine, GZ_DST, GZ_Session, GZ_Logger, GZ_TestHarness\n";
-   report += "Interfaces: GZ_TimeContext (consumed by later phases), CGZDatasetInfo\n\n";
+   report += "Phase 2 files: GZ_StructureTypes, GZ_SwingEngine\n";
+   report += "Interfaces: GZ_TimeContext, CGZDatasetInfo (Phase 1), GZ_Swing / CGZSwingEngine (Phase 2,\n";
+   report += "            consumed by later phases; Update() is live-safe, DetectAll() is research-batch)\n\n";
 
    report += "--- Data Validation: M1 ---\n";
    report += StringFormat("Symbol=%s Bars=%d First=%s Last=%s\n",
@@ -103,7 +118,15 @@ void BuildAndEmitReport()
               InpSessionStartHour, InpSessionStartMinute, InpSessionEndHour, InpSessionEndMinute,
               InpSessionInclude?"INCLUDE":"EXCLUDE");
 
-   report += "--- Automated Test Results (T01-T18, synthetic/deterministic) ---\n";
+   report += "--- Phase 2: M5 Structure Engine (Swing Detection) ---\n";
+   report += StringFormat("PivotStrength=%d (baseline=2; research range 1-5 supported via input)\n",
+              InpPivotStrength);
+   report += StringFormat("M5 bars scanned=%d  Swings confirmed=%d\n", g_info_m5.total_bars, g_swing_count);
+   report += "No lookahead: each swing is only ever produced after PivotStrength bars have\n";
+   report += "closed on its right side (see T21). No leg/break/fib/entry logic consumes this\n";
+   report += "output yet - deferred to Phase 3.\n\n";
+
+   report += "--- Automated Test Results (T01-T23: T01-T18 Phase 1, T19-T23 Phase 2) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -114,9 +137,12 @@ void BuildAndEmitReport()
    report += StringFormat("\nTOTAL: %d PASS / %d FAIL (of %d)\n\n", pass, fail, g_harness.ResultCount());
 
    report += "--- Known Limitations / Deferred Work ---\n";
-   report += "DEFERRED TO PHASE 2: Swing/Leg/Break/Fibonacci/Entry/Exit/Filters - not implemented, by design.\n";
+   report += "DEFERRED TO PHASE 3: Leg Engine, Break Engine - not implemented, by design.\n";
+   report += "DEFERRED TO PHASE 4+: Fibonacci, Setup State Machine, Entry/Exit, Filters, Simulator.\n";
    report += "Weekend-gap classification uses a Saturday-presence heuristic; broker-specific holiday\n";
-   report += "calendars are not modeled in Phase 1 and would need broker session data if required later.\n\n";
+   report += "calendars are not modeled and would need broker session data if required later.\n";
+   report += "Phase 2 swing detection is diagnostic-only in this report; it is not yet consumed by\n";
+   report += "any leg/break logic (that consumption is Phase 3's job).\n\n";
 
    report += "--- User Verification Required ---\n";
    report += "USER TEST REQUIRED #1: Compile this project in MetaEditor and attach the EA to a chart\n";
@@ -128,25 +154,25 @@ void BuildAndEmitReport()
    string final_status;
    bool data_ok = (g_info_m1.total_bars>0 && g_info_m5.total_bars>0);
    if(fail>0)
-      final_status = "PHASE 1 BLOCKED (automated test failure - see detail above)";
+      final_status = "PHASE 1+2 BLOCKED (automated test failure - see detail above)";
    else if(!data_ok)
-      final_status = "PHASE 1 BLOCKED (historical data unavailable for requested symbol/range)";
+      final_status = "PHASE 1+2 BLOCKED (historical data unavailable for requested symbol/range)";
    else if(!InpBrokerOffsetKnown)
-      final_status = "PHASE 1 BLOCKED (broker UTC offset not yet verified by user)";
+      final_status = "PHASE 1+2 BLOCKED (broker UTC offset not yet verified by user)";
    else
-      final_status = "PHASE 1 BLOCKED (pending user compilation/run confirmation in MetaEditor/MT5)";
+      final_status = "PHASE 1+2 BLOCKED (pending user compilation/run confirmation in MetaEditor/MT5)";
 
    report += "--- Final Status ---\n" + final_status + "\n";
    report += "===================================================\n";
 
    Print(report);
 
-   int handle = FileOpen("GZ_Phase1_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   int handle = FileOpen("GZ_Phase1_2_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle!=INVALID_HANDLE)
      {
       FileWriteString(handle, report);
       FileClose(handle);
-      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_Report.txt");
+      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_Report.txt");
      }
    else
      {
@@ -177,7 +203,7 @@ int OnInit()
       InpBrokerOffsetKnown ? "true" : "false"));
 
    g_logger.EnableVerbose(InpVerboseLogging);
-   g_logger.Info("Init", "GoldenZone STR Phase 1 starting up (research/diagnostic mode - no trading).");
+   g_logger.Info("Init", "GoldenZone STR Phase 1+2 starting up (research/diagnostic mode - no trading).");
 
    //--- Time engine configuration -----------------------------------------
    GZ_TimeConfig time_cfg;
@@ -254,13 +280,35 @@ int OnInit()
                     TimeToString(m1[mid].time), idx, idx>=0?TimeToString(m5[idx].time):"none"));
      }
 
+   //--- Phase 2: M5 Structure Engine (swing/pivot detection) ------------------
+   // Diagnostic only - detects swings over the already-loaded, already-
+   // validated M5 range and logs a summary. No leg/break/fib/entry/exit
+   // logic consumes this output yet (deferred to Phase 3+).
+   g_swing_engine.Init(InpPivotStrength);
+   g_swing_count = 0;
+   if(n5>0)
+     {
+      g_swing_count = g_swing_engine.DetectAll(m5, g_swings);
+      g_logger.Info("Structure", StringFormat("M5 swing detection: strength=%d bars=%d swings=%d",
+                    InpPivotStrength, n5, g_swing_count));
+      int show = (g_swing_count<5) ? g_swing_count : 5;
+      for(int i=0;i<show;i++)
+         g_logger.Info("Structure", StringFormat("  Swing #%d id=%d %s price=%.5f pivot=%s confirm=%s",
+                       i+1, (int)g_swings[i].id, g_swings[i].DirectionToString(), g_swings[i].price,
+                       TimeToString(g_swings[i].pivot_time), TimeToString(g_swings[i].confirmation_time)));
+      if(g_swing_count>show)
+         g_logger.Info("Structure", StringFormat("  ... and %d more swing(s)", g_swing_count-show));
+     }
+   else
+      g_logger.Warning("Structure", "No M5 data loaded - swing detection skipped.");
+
    //--- Run deterministic automated test harness (synthetic data) -------------
    g_harness.RunAll();
 
    //--- Report ------------------------------------------------------------------
    BuildAndEmitReport();
 
-   g_logger.Info("Init", "Phase 1 diagnostics complete. STOPPING - not proceeding to Phase 2 logic.");
+   g_logger.Info("Init", "Phase 1+2 diagnostics complete. STOPPING - not proceeding to Phase 3 (Leg/Break Engine) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.
@@ -272,7 +320,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   g_logger.Info("Deinit", "GoldenZone STR Phase 1 EA removed.");
+   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2 EA removed.");
   }
 
 //+------------------------------------------------------------------+
