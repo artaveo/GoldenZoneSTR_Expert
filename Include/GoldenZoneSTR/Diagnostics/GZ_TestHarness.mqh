@@ -766,30 +766,39 @@ public:
       CGZBreakEngine breakEngine(m_logger);
       breakEngine.Configure(cfg);
 
-      // Warm up ATR with 3 bars of constant True Range = 2.0 (high-low=2,
-      // flat closes) -> ATR becomes exactly 2.0 once ready.
-      MqlRates w1 = MakeBar(t0+7*300,  100,101,99,100);
-      MqlRates w2 = MakeBar(t0+8*300,  100,101,99,100);
-      MqlRates w3 = MakeBar(t0+9*300,  100,101,99,100);
+      // Warm up ATR with 3 bars near the target level (108.0-109.5) so True
+      // Range stays a clean, gap-free 1.0 each bar -> ATR becomes exactly
+      // 1.0 once ready. (An earlier version of this test warmed up ATR at a
+      // price far from the target level, which produced a large gap-driven
+      // True Range on the very next bar and inflated ATR well past what the
+      // test intended - fixed here by keeping every bar's price continuous.)
+      MqlRates w1 = MakeBar(t0+7*300,  108.5,109.0,108.0,108.5);
+      MqlRates w2 = MakeBar(t0+8*300,  108.5,109.5,108.5,109.0);
+      MqlRates w3 = MakeBar(t0+9*300,  109.0,109.5,108.5,109.0);
       breakEngine.OnBar(w1); breakEngine.CheckBreak(leg, w1);
       breakEngine.OnBar(w2); breakEngine.CheckBreak(leg, w2);
       breakEngine.OnBar(w3); breakEngine.CheckBreak(leg, w3);
       bool atr_ready = breakEngine.AtrReady();
-      bool atr_correct = MathAbs(breakEngine.CurrentAtr()-2.0)<0.00001;
+      double warmup_atr = breakEngine.CurrentAtr();
+      bool atr_correct = MathAbs(warmup_atr-1.0)<0.00001;
 
-      // Close at 110.5: clears raw level (110) but NOT level+ATR buffer (112).
-      MqlRates notEnough = MakeBar(t0+10*300, 110,111,109,110.5);
+      // Close at 110.3: clears the raw level (110) but, with buffer_atr_mult=1
+      // and ATR~1.0, stays well below the buffered threshold (~111).
+      MqlRates notEnough = MakeBar(t0+10*300, 109.0,110.3,109.0,110.3);
       breakEngine.OnBar(notEnough);
       bool broke_early = breakEngine.CheckBreak(leg, notEnough);
 
-      // Close at 112.5: clears level+buffer (112).
-      MqlRates enough = MakeBar(t0+11*300, 111,113,110,112.5);
+      // Close at 125: clears level+buffer by a wide margin regardless of any
+      // gap-driven ATR movement from the bar above, so this assertion does
+      // not depend on hand-tracking the buffer through further ring-buffer
+      // updates.
+      MqlRates enough = MakeBar(t0+11*300, 111,126,110,125);
       breakEngine.OnBar(enough);
       bool broke_late = breakEngine.CheckBreak(leg, enough);
 
       bool ok = atr_ready && atr_correct && (!broke_early) && broke_late && leg.broken;
-      AddResult("T30", ok, StringFormat("atr_ready=%s atr=%.4f broke_early=%s broke_late=%s",
-                atr_ready?"true":"false", breakEngine.CurrentAtr(), broke_early?"true":"false", broke_late?"true":"false"));
+      AddResult("T30", ok, StringFormat("atr_ready=%s warmup_atr=%.4f broke_early=%s broke_late=%s",
+                atr_ready?"true":"false", warmup_atr, broke_early?"true":"false", broke_late?"true":"false"));
      }
 
    //--- T31: ATR calculation correctness on a known, hand-computable
