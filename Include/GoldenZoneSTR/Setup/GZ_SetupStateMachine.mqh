@@ -56,6 +56,15 @@ private:
       return -1;
      }
 
+   int FindById(long setup_id) const
+     {
+      int n = ArraySize(m_setups);
+      for(int i=0;i<n;i++)
+         if(m_setups[i].id==setup_id)
+            return i;
+      return -1;
+     }
+
    void CancelSetup(int idx, ENUM_GZ_SETUP_CANCEL_REASON reason, datetime t)
      {
       if(idx<0 || idx>=ArraySize(m_setups))
@@ -224,6 +233,44 @@ public:
             CancelSetup(i, GZ_CANCEL_INVALID_DATA, t);
             return;
            }
+     }
+
+   //--- Phase 5 (Entry Engine) hook: cancel a setup whose price action
+   //--- has fully invalidated its retracement (penetrated past the
+   //--- leg's 100% origin level before ever entering) - see
+   //--- GZ_EntryEngine.mqh. This wires up the GZ_CANCEL_INVALID_
+   //--- PENETRATION reason that GZ_SetupTypes.mqh reserved and
+   //--- explicitly deferred to Phase 5. Returns false if the setup id
+   //--- is unknown or already terminal (never overrides an existing
+   //--- terminal outcome - same guarantee as every other cancel path).
+   bool              CancelForInvalidPenetration(long setup_id, datetime t)
+     {
+      int idx = FindById(setup_id);
+      if(idx<0 || m_setups[idx].IsTerminal())
+         return false;
+      CancelSetup(idx, GZ_CANCEL_INVALID_PENETRATION, t);
+      return true;
+     }
+
+   //--- Phase 5 (Entry Engine) hook: mark a setup as ENTERED once the
+   //--- Entry Engine has produced a fill for it. Wires up the
+   //--- GZ_SETUP_ENTERED stub state that GZ_SetupTypes.mqh explicitly
+   //--- deferred to Phase 5 ("deciding when a setup is actually
+   //--- entered is the Entry Engine's job"). Reuses `terminal_time`
+   //--- for the entry time (ENTERED is terminal per IsTerminal()) -
+   //--- no new field needed. Returns false if the setup id is unknown
+   //--- or already terminal.
+   bool              MarkEntered(long setup_id, datetime t)
+     {
+      int idx = FindById(setup_id);
+      if(idx<0 || m_setups[idx].IsTerminal())
+         return false;
+      m_setups[idx].state         = GZ_SETUP_ENTERED;
+      m_setups[idx].terminal_time = t;
+      if(m_logger!=NULL)
+         m_logger.Info("Setup", StringFormat("Setup #%d (%s) ENTERED at=%s",
+                       (int)m_setups[idx].id, m_setups[idx].leg.DirectionToString(), TimeToString(t)));
+      return true;
      }
   };
 

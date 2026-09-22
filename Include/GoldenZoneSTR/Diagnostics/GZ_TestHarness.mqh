@@ -5,6 +5,7 @@
 //| Phase 2 (T19-T23): M5 Structure Engine (swing detection)          |
 //| Phase 3 (T24-T34): Leg Engine + Break Engine                      |
 //| Phase 4 (T35-T45): Fibonacci Engine + Setup State Machine         |
+//| Phase 5 (T46-T54): Entry Engine + Historical Trade Simulator      |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -31,6 +32,9 @@
 #include "..\Setup\GZ_SetupTypes.mqh"
 #include "..\Setup\GZ_FibEngine.mqh"
 #include "..\Setup\GZ_SetupStateMachine.mqh"
+#include "..\Entry\GZ_EntryTypes.mqh"
+#include "..\Entry\GZ_EntryEngine.mqh"
+#include "..\Entry\GZ_TradeSimulator.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -1269,6 +1273,346 @@ public:
       AddResult("T45", ok, StringFormat("stateA=%s stateB=%s", finalA.StateToString(), finalB.StateToString()));
      }
 
+   //--- helper: build a CGZSetupStateMachine with exactly one setup already
+   //--- at WAITING_ENTRY, replaying the same fixture as T39/T40 (leg
+   //--- origin=90 target=110, break bar drives extreme to 112, zone=
+   //--- [92.2,105.4] at ratios [0.30,0.90], WAITING_ENTRY set by a touch
+   //--- bar whose range [95,100] sits inside that zone). At the default
+   //--- entry_fib_ratio=0.618 the entry level price is 112-0.618*22=98.404.
+   //--- Returns the setup id; `out_waiting_time` is the touch bar's time.
+   long BuildWaitingEntryFixture(CGZSetupStateMachine &sm, datetime t0, datetime &out_waiting_time)
+     {
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int i1=-1; legEngine.Update(low1,0.0,false,i1);
+      int i2=-1; legEngine.Update(high1,0.0,false,i2);
+
+      sm.Init(0.30,0.90);
+      int si = sm.OnLegCreated(legEngine.GetLeg(i2));
+
+      GZ_BreakConfig cfg; cfg.Default();
+      CGZBreakEngine breakEngine(m_logger); breakEngine.Configure(cfg);
+      MqlRates breakBar = MakeBar(t0+8*300, 109,112,108,111);
+      legEngine.UpdateBar(breakBar);
+      GZ_Leg legAfter = legEngine.GetLeg(i2);
+      breakEngine.OnBar(breakBar);
+      breakEngine.CheckBreak(legAfter, breakBar);
+      legEngine.SetLeg(i2, legAfter);
+      sm.OnLegBroken(legAfter);
+
+      MqlRates touchBar = MakeBar(t0+9*300, 98,100,95,99);
+      sm.OnBar(touchBar, true, false);
+
+      out_waiting_time = touchBar.time;
+      return sm.GetSetup(si).id;
+     }
+
+   //--- T46: TOUCH baseline - fires the instant an M1 bar penetrates the
+   //--- entry level (penetration=0 -> exact touch suffices), fills at the
+   //--- actual observed price (bar.low for a BULLISH setup). ----------------
+   void T46_EntryTouchTriggersAndFills()
+     {
+      datetime t0 = MakeTime(2026,1,7,9,0);
+      CGZSetupStateMachine sm(m_logger);
+      datetime waitTime;
+      long setupId = BuildWaitingEntryFixture(sm, t0, waitTime);
+
+      GZ_EntryConfig cfg; cfg.Default(); // TOUCH, ratio=0.618, penetration=0
+      CGZEntryEngine entryEngine(m_logger); entryEngine.Init(cfg);
+
+      MqlRates m1bar = MakeBar(waitTime+60, 99.0,99.5,98.0,98.2);
+      entryEngine.OnBar(sm, m1bar, true, 0.0, false);
+
+      GZ_Setup s = sm.GetSetup(0);
+      double expectedEntryLevel = 98.404; // extreme=112, origin=90, ratio=0.618
+      bool ok = (s.state==GZ_SETUP_ENTERED) && (s.terminal_time==m1bar.time) && (entryEngine.TradeCount()==1);
+      if(ok)
+        {
+         GZ_Trade tr = entryEngine.GetTrade(0);
+         ok = (tr.setup_id==setupId) && (MathAbs(tr.entry_price-98.0)<0.0001) &&
+              (tr.direction==GZ_LEG_BULLISH) && (MathAbs(tr.fib_level-0.618)<0.0001) &&
+              (tr.entry_model==GZ_ENTRY_TOUCH) && (MathAbs(tr.slippage_assumption-(expectedEntryLevel-98.0))<0.001);
+        }
+      AddResult("T46", ok, StringFormat("state=%s trades=%d", s.StateToString(), entryEngine.TradeCount()));
+     }
+
+   //--- T47: LIMIT fills exactly at the configured entry level (zero
+   //--- slippage by construction); TOUCH fills at the actual touched price
+   //--- (non-zero slippage) - same bar, same fixture, two entry models. -----
+   void T47_LimitFillsExactlyAtLevelNoSlippage()
+     {
+      datetime t0 = MakeTime(2026,1,7,10,0);
+      CGZSetupStateMachine smTouch(m_logger); datetime wtT; BuildWaitingEntryFixture(smTouch, t0, wtT);
+      CGZSetupStateMachine smLimit(m_logger); datetime wtL; BuildWaitingEntryFixture(smLimit, t0+100000, wtL);
+
+      GZ_EntryConfig cfgTouch; cfgTouch.Default(); cfgTouch.model=GZ_ENTRY_TOUCH;
+      GZ_EntryConfig cfgLimit; cfgLimit.Default(); cfgLimit.model=GZ_ENTRY_LIMIT;
+      CGZEntryEngine eTouch(m_logger); eTouch.Init(cfgTouch);
+      CGZEntryEngine eLimit(m_logger); eLimit.Init(cfgLimit);
+
+      MqlRates barTouch = MakeBar(wtT+60, 99.0,99.5,98.0,98.2);
+      MqlRates barLimit = MakeBar(wtL+60, 99.0,99.5,98.0,98.2);
+      eTouch.OnBar(smTouch, barTouch, true, 0.0, false);
+      eLimit.OnBar(smLimit, barLimit, true, 0.0, false);
+
+      bool ok = (eTouch.TradeCount()==1) && (eLimit.TradeCount()==1);
+      if(ok)
+        {
+         GZ_Trade trTouch = eTouch.GetTrade(0);
+         GZ_Trade trLimit = eLimit.GetTrade(0);
+         ok = (MathAbs(trTouch.entry_price-98.0)<0.0001) && (MathAbs(trLimit.entry_price-98.404)<0.0001) &&
+              (trTouch.slippage_assumption>0.0001) && (trLimit.slippage_assumption<0.0001);
+        }
+      AddResult("T47", ok, "TOUCH fills at the observed price (slippage>0); LIMIT fills exactly at the entry level (slippage=0)");
+     }
+
+   //--- T48: penetration buffer (ATR-scaled) - a touch short of the required
+   //--- buffer does not trigger; ATR-not-ready with a buffer requested does
+   //--- not guess and does not trigger; a touch clearing the buffer triggers
+   //--- and fills at the actual observed price. -----------------------------
+   void T48_PenetrationBufferRequired()
+     {
+      datetime t0 = MakeTime(2026,1,7,11,0);
+      GZ_EntryConfig cfg; cfg.Default(); cfg.penetration_atr_mult=0.05; // atr=2.0 -> buffer=0.1, threshold=98.404-0.1=98.304
+
+      CGZSetupStateMachine smA(m_logger); datetime wtA; BuildWaitingEntryFixture(smA, t0, wtA);
+      CGZEntryEngine eA(m_logger); eA.Init(cfg);
+      MqlRates barA = MakeBar(wtA+60, 98.5,98.6,98.35,98.4); // low=98.35 > 98.304 -> below buffer, no entry
+      eA.OnBar(smA, barA, true, 2.0, true);
+      bool noEntryA = (smA.GetSetup(0).state==GZ_SETUP_WAITING_ENTRY) && (eA.TradeCount()==0);
+
+      CGZSetupStateMachine smB(m_logger); datetime wtB; BuildWaitingEntryFixture(smB, t0+10000, wtB);
+      CGZEntryEngine eB(m_logger); eB.Init(cfg);
+      MqlRates barB = MakeBar(wtB+60, 91,92,90.5,91); // extreme low, but ATR not ready -> must not guess
+      eB.OnBar(smB, barB, true, 0.0, false);
+      bool noEntryB = (smB.GetSetup(0).state==GZ_SETUP_WAITING_ENTRY) && (eB.TradeCount()==0);
+
+      CGZSetupStateMachine smC(m_logger); datetime wtC; BuildWaitingEntryFixture(smC, t0+20000, wtC);
+      CGZEntryEngine eC(m_logger); eC.Init(cfg);
+      MqlRates barC = MakeBar(wtC+60, 98.3,98.35,98.20,98.25); // low=98.20 <= 98.304 -> clears buffer
+      eC.OnBar(smC, barC, true, 2.0, true);
+      bool enteredC = (smC.GetSetup(0).state==GZ_SETUP_ENTERED) && (eC.TradeCount()==1) &&
+                      (MathAbs(eC.GetTrade(0).entry_price-98.20)<0.0001);
+
+      bool ok = noEntryA && noEntryB && enteredC;
+      AddResult("T48", ok, StringFormat("subThreshold_blocked=%s atrNotReady_blocked=%s fullBuffer_entered=%s",
+                noEntryA?"true":"false", noEntryB?"true":"false", enteredC?"true":"false"));
+     }
+
+   //--- T49: CLOSE_CONFIRMATION requires N=2 truly CONSECUTIVE M5 closes
+   //--- beyond the entry level; a broken streak resets the counter. ---------
+   void T49_CloseConfirmationRequiresConsecutiveCloses()
+     {
+      datetime t0 = MakeTime(2026,1,7,12,0);
+      CGZSetupStateMachine sm(m_logger); datetime waitTime; BuildWaitingEntryFixture(sm, t0, waitTime);
+
+      GZ_EntryConfig cfg; cfg.Default(); cfg.model=GZ_ENTRY_CLOSE_CONFIRMATION; cfg.confirmation_candles=2;
+      CGZEntryEngine entryEngine(m_logger); entryEngine.Init(cfg);
+
+      MqlRates bar1 = MakeBar(waitTime+300,  98.5,99.2,98.4,99.0); // close=99.0>=98.404 -> streak=1
+      MqlRates bar2 = MakeBar(waitTime+600,  99.0,99.1,97.8,98.0); // close=98.0<98.404  -> streak resets to 0
+      MqlRates bar3 = MakeBar(waitTime+900,  98.0,99.6,97.9,99.5); // close=99.5>=98.404 -> streak=1
+      MqlRates bar4 = MakeBar(waitTime+1200, 99.5,99.8,99.4,99.6); // close=99.6>=98.404 -> streak=2 -> ENTER
+
+      entryEngine.OnBar(sm, bar1, false, 0.0, false);
+      bool stillWaiting1 = (sm.GetSetup(0).state==GZ_SETUP_WAITING_ENTRY) && (entryEngine.TradeCount()==0);
+      entryEngine.OnBar(sm, bar2, false, 0.0, false);
+      bool stillWaiting2 = (sm.GetSetup(0).state==GZ_SETUP_WAITING_ENTRY) && (entryEngine.TradeCount()==0);
+      entryEngine.OnBar(sm, bar3, false, 0.0, false);
+      bool stillWaiting3 = (sm.GetSetup(0).state==GZ_SETUP_WAITING_ENTRY) && (entryEngine.TradeCount()==0);
+      entryEngine.OnBar(sm, bar4, false, 0.0, false);
+      bool entered = (sm.GetSetup(0).state==GZ_SETUP_ENTERED) && (entryEngine.TradeCount()==1) &&
+                     (MathAbs(entryEngine.GetTrade(0).entry_price-99.6)<0.0001);
+
+      bool ok = stillWaiting1 && stillWaiting2 && stillWaiting3 && entered;
+      AddResult("T49", ok, StringFormat("afterBar1=%s afterBar2(reset)=%s afterBar3=%s afterBar4(entered)=%s",
+                stillWaiting1?"waiting":"?", stillWaiting2?"waiting":"?", stillWaiting3?"waiting":"?", entered?"entered":"?"));
+     }
+
+   //--- T50: M1_CONFIRMATION - identical consecutive-close logic to T49,
+   //--- but driven by M1 bars (is_m1_bar=true) instead of M5. ---------------
+   void T50_M1ConfirmationRequiresConsecutiveM1Closes()
+     {
+      datetime t0 = MakeTime(2026,1,7,13,0);
+      CGZSetupStateMachine sm(m_logger); datetime waitTime; BuildWaitingEntryFixture(sm, t0, waitTime);
+
+      GZ_EntryConfig cfg; cfg.Default(); cfg.model=GZ_ENTRY_M1_CONFIRMATION; cfg.confirmation_candles=2;
+      CGZEntryEngine entryEngine(m_logger); entryEngine.Init(cfg);
+
+      MqlRates bar1 = MakeBar(waitTime+60,  98.5,99.2,98.4,99.0); // confirms -> streak=1
+      MqlRates bar2 = MakeBar(waitTime+120, 99.0,99.1,97.8,98.0); // fails    -> streak resets
+      MqlRates bar3 = MakeBar(waitTime+180, 98.0,99.6,97.9,99.5); // confirms -> streak=1
+      MqlRates bar4 = MakeBar(waitTime+240, 99.5,99.8,99.4,99.6); // confirms -> streak=2 -> ENTER
+
+      entryEngine.OnBar(sm, bar1, true, 0.0, false);
+      entryEngine.OnBar(sm, bar2, true, 0.0, false);
+      bool stillWaiting = (sm.GetSetup(0).state==GZ_SETUP_WAITING_ENTRY) && (entryEngine.TradeCount()==0);
+      entryEngine.OnBar(sm, bar3, true, 0.0, false);
+      entryEngine.OnBar(sm, bar4, true, 0.0, false);
+      bool entered = (sm.GetSetup(0).state==GZ_SETUP_ENTERED) && (entryEngine.TradeCount()==1) &&
+                     (MathAbs(entryEngine.GetTrade(0).entry_price-99.6)<0.0001) &&
+                     (entryEngine.GetTrade(0).entry_model==GZ_ENTRY_M1_CONFIRMATION);
+
+      bool ok = stillWaiting && entered;
+      AddResult("T50", ok, StringFormat("streak_reset_respected=%s entered=%s", stillWaiting?"true":"false", entered?"true":"false"));
+     }
+
+   //--- T51: a bar that fully erases the leg (price reaches the 100% origin
+   //--- level) before ever being entered cancels the setup with INVALID_
+   //--- PENETRATION and produces no trade. ----------------------------------
+   void T51_InvalidPenetrationCancelsSetup()
+     {
+      datetime t0 = MakeTime(2026,1,7,14,0);
+      CGZSetupStateMachine sm(m_logger); datetime waitTime; BuildWaitingEntryFixture(sm, t0, waitTime);
+
+      GZ_EntryConfig cfg; cfg.Default();
+      CGZEntryEngine entryEngine(m_logger); entryEngine.Init(cfg);
+
+      MqlRates m1bar = MakeBar(waitTime+60, 90.5,91.0,89.5,90.0); // low=89.5 <= origin(90.0) -> fully erased
+      entryEngine.OnBar(sm, m1bar, true, 0.0, false);
+
+      GZ_Setup s = sm.GetSetup(0);
+      bool ok = (s.state==GZ_SETUP_CANCELLED) && (s.cancel_reason==GZ_CANCEL_INVALID_PENETRATION) &&
+                (s.terminal_time==m1bar.time) && (entryEngine.TradeCount()==0);
+      AddResult("T51", ok, StringFormat("state=%s/%s trades=%d", s.StateToString(), s.CancelReasonToString(), entryEngine.TradeCount()));
+     }
+
+   //--- T52: a setup that is FIB_ACTIVE but has NOT yet reached WAITING_ENTRY
+   //--- (Phase 4's M5 zone-touch gate never fired) must never be entered,
+   //--- even if an M1 bar's price already crosses the entry level. ----------
+   void T52_NoEntryBeforeWaitingEntryGate()
+     {
+      datetime t0 = MakeTime(2026,1,7,14,30);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int i1=-1; legEngine.Update(low1,0.0,false,i1);
+      int i2=-1; legEngine.Update(high1,0.0,false,i2);
+
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      int si = sm.OnLegCreated(legEngine.GetLeg(i2));
+
+      GZ_BreakConfig cfg; cfg.Default();
+      CGZBreakEngine breakEngine(m_logger); breakEngine.Configure(cfg);
+      MqlRates breakBar = MakeBar(t0+8*300, 109,112,108,111);
+      legEngine.UpdateBar(breakBar);
+      GZ_Leg legAfter = legEngine.GetLeg(i2);
+      breakEngine.OnBar(breakBar);
+      breakEngine.CheckBreak(legAfter, breakBar);
+      legEngine.SetLeg(i2, legAfter);
+      sm.OnLegBroken(legAfter); // -> FIB_ACTIVE only, NO touch bar fed -> never reaches WAITING_ENTRY
+
+      GZ_EntryConfig ecfg; ecfg.Default();
+      CGZEntryEngine entryEngine(m_logger); entryEngine.Init(ecfg);
+
+      MqlRates m1bar = MakeBar(breakBar.time+300+60, 98.5,98.6,98.0,98.2); // low=98.0 crosses the entry level
+      entryEngine.OnBar(sm, m1bar, true, 0.0, false);
+
+      GZ_Setup s = sm.GetSetup(si);
+      bool ok = (s.state==GZ_SETUP_FIB_ACTIVE) && (entryEngine.TradeCount()==0);
+      AddResult("T52", ok, StringFormat("state=%s trades=%d (must stay FIB_ACTIVE)", s.StateToString(), entryEngine.TradeCount()));
+     }
+
+   //--- T53: CGZTradeSimulator's M1/M5 ordering - an M1 bar temporally
+   //--- inside the M5 candle that itself produces WAITING_ENTRY must NOT be
+   //--- able to trigger entry from that same candle's not-yet-closed
+   //--- result; the first M1 bar in the FOLLOWING M5 candle's window (after
+   //--- that structure update has actually closed) correctly does. ----------
+   void T53_SimulatorNoLookaheadAcrossM1M5Boundary()
+     {
+      datetime t0 = MakeTime(2026,1,7,15,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+      GZ_Swing swings[]; ArrayResize(swings,2); swings[0]=low1; swings[1]=high1;
+
+      MqlRates m5[]; ArrayResize(m5,5);
+      m5[0]=MakeBar(t0+2*300,  90,90.5,89.5,90);
+      m5[1]=MakeBar(t0+7*300, 109,110.5,108.5,110);
+      m5[2]=MakeBar(t0+8*300, 109,112,108,111);     // break: close=111>110
+      m5[3]=MakeBar(t0+9*300, 98,100,95,99);        // T: touches zone [92.2,105.4] -> WAITING_ENTRY
+      m5[4]=MakeBar(t0+10*300, 99,100,98,99);       // next M5 candle (neutral)
+
+      datetime T = t0+9*300;
+      MqlRates m1[]; ArrayResize(m1,2);
+      m1[0]=MakeBar(T+120,    98.5,98.6,98.0,98.2); // inside T's OWN forming candle - must NOT trigger
+      m1[1]=MakeBar(T+300+60, 98.5,98.6,98.0,98.2); // inside the NEXT candle - must trigger
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      GZ_BreakConfig bcfg; bcfg.Default();
+      CGZBreakEngine breakEngine(m_logger); breakEngine.Configure(bcfg);
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      GZ_EntryConfig ecfg; ecfg.Default();
+      CGZEntryEngine entryEngine(m_logger); entryEngine.Init(ecfg);
+      CGZTimeEngine timeEngine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); timeEngine.Configure(tcfg);
+      CGZSessionEngine sessionEngine;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+
+      CGZTradeSimulator sim(m_logger);
+      sim.Run(m1, m5, swings, 2, legEngine, breakEngine, sm, entryEngine, timeEngine, sessionEngine, profile, false);
+
+      bool ok = (entryEngine.TradeCount()==1) && (entryEngine.GetTrade(0).entry_time==m1[1].time) &&
+                (MathAbs(entryEngine.GetTrade(0).entry_price-98.0)<0.0001);
+      AddResult("T53", ok, StringFormat("trades=%d (must be exactly 1, from the post-close M1 bar only)", entryEngine.TradeCount()));
+     }
+
+   //--- T54: Determinism - two independent CGZTradeSimulator runs over the
+   //--- same M1/M5/swings data and configuration produce identical trades. -
+   void T54_SimulatorDeterminism()
+     {
+      datetime t0 = MakeTime(2026,1,7,16,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+      GZ_Swing swings[]; ArrayResize(swings,2); swings[0]=low1; swings[1]=high1;
+
+      MqlRates m5[]; ArrayResize(m5,5);
+      m5[0]=MakeBar(t0+2*300,  90,90.5,89.5,90);
+      m5[1]=MakeBar(t0+7*300, 109,110.5,108.5,110);
+      m5[2]=MakeBar(t0+8*300, 109,112,108,111);
+      m5[3]=MakeBar(t0+9*300, 98,100,95,99);
+      m5[4]=MakeBar(t0+10*300, 99,100,98,99);
+
+      datetime T = t0+9*300;
+      MqlRates m1[]; ArrayResize(m1,1);
+      m1[0]=MakeBar(T+300+60, 98.5,98.6,98.0,98.2);
+
+      GZ_TimeConfig tcfg; tcfg.Default();
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_EntryConfig ecfg; ecfg.Default();
+      GZ_BreakConfig bcfg; bcfg.Default();
+
+      CGZLegEngine legA(m_logger); legA.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkA(m_logger); brkA.Configure(bcfg);
+      CGZSetupStateMachine smA(m_logger); smA.Init(0.30,0.90);
+      CGZEntryEngine entA(m_logger); entA.Init(ecfg);
+      CGZTimeEngine timeA(m_logger); timeA.Configure(tcfg);
+      CGZSessionEngine sessA;
+      CGZTradeSimulator simA(m_logger);
+      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, timeA, sessA, profile, false);
+
+      CGZLegEngine legB(m_logger); legB.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkB(m_logger); brkB.Configure(bcfg);
+      CGZSetupStateMachine smB(m_logger); smB.Init(0.30,0.90);
+      CGZEntryEngine entB(m_logger); entB.Init(ecfg);
+      CGZTimeEngine timeB(m_logger); timeB.Configure(tcfg);
+      CGZSessionEngine sessB;
+      CGZTradeSimulator simB(m_logger);
+      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, timeB, sessB, profile, false);
+
+      bool ok = (entA.TradeCount()==entB.TradeCount()) && (entA.TradeCount()==1);
+      if(ok)
+        {
+         GZ_Trade a = entA.GetTrade(0);
+         GZ_Trade b = entB.GetTrade(0);
+         ok = (a.entry_time==b.entry_time) && (MathAbs(a.entry_price-b.entry_price)<0.00001) &&
+              (a.setup_id==b.setup_id) && (MathAbs(a.fib_level-b.fib_level)<0.00001) &&
+              (MathAbs(a.slippage_assumption-b.slippage_assumption)<0.00001);
+        }
+      AddResult("T54", ok, StringFormat("tradesA=%d tradesB=%d", entA.TradeCount(), entB.TradeCount()));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -1318,6 +1662,15 @@ public:
       T43_SessionEndCancels();
       T44_DataEndCancelsRemaining();
       T45_SetupDeterminism();
+      T46_EntryTouchTriggersAndFills();
+      T47_LimitFillsExactlyAtLevelNoSlippage();
+      T48_PenetrationBufferRequired();
+      T49_CloseConfirmationRequiresConsecutiveCloses();
+      T50_M1ConfirmationRequiresConsecutiveM1Closes();
+      T51_InvalidPenetrationCancelsSetup();
+      T52_NoEntryBeforeWaitingEntryGate();
+      T53_SimulatorNoLookaheadAcrossM1M5Boundary();
+      T54_SimulatorDeterminism();
      }
 
    int               PassCount() const

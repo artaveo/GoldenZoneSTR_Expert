@@ -47,4 +47,16 @@
 #define GZ_DEFAULT_FIB_ZONE_MAX_RATIO  0.90
 #define GZ_PROJECT_VERSION_P4          "GZ-P4-ROADMAP v1.0"
 
+// Phase 5 - Entry Engine + Historical Trade Simulator.
+// Baseline entry model = TOUCH (roadmap). entry_fib_ratio: no explicit
+// roadmap baseline stated for the single trigger level within the watched
+// zone - 0.618 used as the conventional default (documented, not silently
+// assumed; see GZ_EntryTypes.mqh design note 1), fully configurable.
+// Confirmation candles: research range 1-3 (roadmap). Penetration baseline
+// = 0 ATR; research grid: 0.02/0.05/0.10/0.15 (roadmap).
+#define GZ_DEFAULT_ENTRY_FIB_RATIO         0.618
+#define GZ_DEFAULT_CONFIRMATION_CANDLES    1
+#define GZ_DEFAULT_ENTRY_PENETRATION_ATR   0.0
+#define GZ_PROJECT_VERSION_P5              "GZ-P5-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__
