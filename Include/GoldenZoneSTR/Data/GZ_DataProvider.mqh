@@ -57,10 +57,45 @@ public:
       int copied = CopyRates(symbol, tf, start, end, rates);
       if(copied<=0)
         {
+         // Capture the error code immediately - before any other API call
+         // (including the SeriesInfoInteger() diagnostics below) can
+         // overwrite it via GetLastError().
+         int last_error = GetLastError();
+
+         // Additional standard-MQL5 diagnostics: distinguishes "terminal
+         // simply doesn't have this history yet" from other CopyRates
+         // failure modes, without guessing at what LastError means.
+         long     series_bars     = SeriesInfoInteger(symbol, tf, SERIES_BARS_COUNT);
+         datetime series_first    = (datetime)SeriesInfoInteger(symbol, tf, SERIES_FIRSTDATE);
+         datetime terminal_first  = (datetime)SeriesInfoInteger(symbol, tf, SERIES_TERMINAL_FIRSTDATE);
+         bool     series_synced   = (bool)SeriesInfoInteger(symbol, tf, SERIES_SYNCHRONIZED);
+
+         string diag = StringFormat(
+            "CopyRates FAILED\n"+
+            "Symbol=%s\n"+
+            "Timeframe=%s\n"+
+            "Start=%s\n"+
+            "End=%s\n"+
+            "CopyRatesResult=%d\n"+
+            "LastError=%d\n"+
+            "SeriesBarsInTerminal=%d\n"+
+            "SeriesFirstDate=%s\n"+
+            "TerminalFirstDate=%s\n"+
+            "SeriesSynchronized=%s",
+            symbol, EnumToString(tf),
+            TimeToString(start, TIME_DATE|TIME_MINUTES),
+            TimeToString(end,   TIME_DATE|TIME_MINUTES),
+            copied, last_error,
+            series_bars,
+            TimeToString(series_first,   TIME_DATE|TIME_MINUTES),
+            TimeToString(terminal_first, TIME_DATE|TIME_MINUTES),
+            series_synced ? "true" : "false");
+
          if(m_logger!=NULL)
-            m_logger.Warning("DataProvider",
-               StringFormat("CopyRates returned %d bars for %s (start=%s end=%s). Data may be unavailable.",
-                             copied, symbol, TimeToString(start), TimeToString(end)));
+            m_logger.Warning("DataProvider", diag);
+         else
+            Print("[GZ][DataProvider][CopyRates FAILED]\n", diag);
+
          return 0;
         }
 
