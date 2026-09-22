@@ -64,6 +64,7 @@ public:
       // TRACE 1: proves Load() itself was entered, and with what args -
       // unconditional, independent of CGZLogger, printed before anything
       // else in the function (including the argument-validation checks).
+      Print("[GZ][BUILD] GZ_DataProvider_RUNTIME_MARKER_20260922_V3");
       Print("[GZ][TRACE][DataProvider] BUILD MARKER = ", GZ_DP_BUILD_MARKER);
       Print("[GZ][TRACE][DataProvider] ENTER Load");
       Print("Symbol=", symbol);

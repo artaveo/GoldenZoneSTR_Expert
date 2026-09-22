@@ -157,6 +157,23 @@ void BuildAndEmitReport()
 //+------------------------------------------------------------------+
 int OnInit()
   {
+   // Runtime marker: proves the EA currently attached/running is compiled
+   // from THIS source file. Printed first, before anything else, and via
+   // raw Print() (not CGZLogger) so nothing upstream can suppress it.
+   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260922_V3");
+
+   // Runtime Inputs marker: prints the ACTUAL live values of the inputs
+   // this specific EA instance is running with (per-attachment values from
+   // the MT5 "Inputs" tab, not the source-file defaults) - directly
+   // independent of CGZLogger.
+   Print(StringFormat(
+      "[GZ][RUNTIME INPUTS] Symbol=%s RangeStart=%s RangeEnd=%s BrokerOffset=%d BrokerOffsetKnown=%s",
+      InpSymbol,
+      TimeToString(InpRangeStart, TIME_DATE|TIME_MINUTES),
+      TimeToString(InpRangeEnd,   TIME_DATE|TIME_MINUTES),
+      InpBrokerUtcOffsetHrs,
+      InpBrokerOffsetKnown ? "true" : "false"));
+
    g_logger.EnableVerbose(InpVerboseLogging);
    g_logger.Info("Init", "GoldenZone STR Phase 1 starting up (research/diagnostic mode - no trading).");
 
