@@ -10,6 +10,12 @@
 
 #include "..\Diagnostics\GZ_Logger.mqh"
 
+// Build marker: printed unconditionally on every Load() call. If this exact
+// string is NOT seen in the Experts log after attaching/recompiling the EA,
+// MT5 is running a stale compiled .ex5 that does not contain this source
+// file's current code - recompiling (F7) in MetaEditor is required.
+#define GZ_DP_BUILD_MARKER "DP_DIAG_20260922_V3"
+
 class CGZDataProvider
   {
 private:
@@ -51,6 +57,20 @@ public:
    //--- Load bars for [start,end] inclusive, chronological order -------
    int Load(string symbol, ENUM_TIMEFRAMES tf, datetime start, datetime end, MqlRates &rates[])
      {
+      string tf_name_early = TfLabel(tf);
+      string start_str_early = TimeToString(start, TIME_DATE|TIME_MINUTES);
+      string end_str_early   = TimeToString(end,   TIME_DATE|TIME_MINUTES);
+
+      // TRACE 1: proves Load() itself was entered, and with what args -
+      // unconditional, independent of CGZLogger, printed before anything
+      // else in the function (including the argument-validation checks).
+      Print("[GZ][TRACE][DataProvider] BUILD MARKER = ", GZ_DP_BUILD_MARKER);
+      Print("[GZ][TRACE][DataProvider] ENTER Load");
+      Print("Symbol=", symbol);
+      Print("Timeframe=", tf_name_early);
+      Print("Start=", start_str_early);
+      Print("End=", end_str_early);
+
       ArrayResize(rates,0);
       if(symbol=="" )
         {
@@ -69,11 +89,21 @@ public:
       string start_str  = TimeToString(start, TIME_DATE|TIME_MINUTES);
       string end_str    = TimeToString(end,   TIME_DATE|TIME_MINUTES);
 
+      // TRACE 2: proves execution reached the line immediately before the
+      // actual CopyRates() call (i.e. did not return early above).
+      Print("[GZ][TRACE][DataProvider] BEFORE CopyRates | Symbol=", symbol,
+            " Timeframe=", tf_name, " Start=", start_str, " End=", end_str);
+
       int copied = CopyRates(symbol, tf, start, end, rates);
 
       // Capture the error code IMMEDIATELY after CopyRates() - before any
       // other API call (SeriesInfoInteger included) can overwrite it.
       int last_error = GetLastError();
+
+      // TRACE 3: proves CopyRates() actually returned, with its raw result
+      // and the LastError captured at that exact moment.
+      Print("[GZ][TRACE][DataProvider] AFTER CopyRates | Result=", copied,
+            " LastError=", last_error);
 
       if(copied<=0)
         {
@@ -141,10 +171,16 @@ public:
      }
 
    int LoadM1(string symbol, datetime start, datetime end, MqlRates &rates[])
-     { return Load(symbol, PERIOD_M1, start, end, rates); }
+     {
+      Print("[GZ][TRACE][DataProvider] LoadM1() called -> forwarding to Load(PERIOD_M1)");
+      return Load(symbol, PERIOD_M1, start, end, rates);
+     }
 
    int LoadM5(string symbol, datetime start, datetime end, MqlRates &rates[])
-     { return Load(symbol, PERIOD_M5, start, end, rates); }
+     {
+      Print("[GZ][TRACE][DataProvider] LoadM5() called -> forwarding to Load(PERIOD_M5)");
+      return Load(symbol, PERIOD_M5, start, end, rates);
+     }
 
    int LoadM15(string symbol, datetime start, datetime end, MqlRates &rates[])
      { return Load(symbol, PERIOD_M15, start, end, rates); }

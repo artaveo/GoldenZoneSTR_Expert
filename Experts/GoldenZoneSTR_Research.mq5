@@ -173,6 +173,7 @@ int OnInit()
 
    //--- Load historical data ------------------------------------------------
    MqlRates m1[], m5[], m15[];
+   Print("[GZ][TRACE][Init] Reached data-loading section - about to call LoadM1/LoadM5 for Symbol=", InpSymbol);
    int n1 = g_provider.LoadM1(InpSymbol, InpRangeStart, InpRangeEnd, m1);
    int n5 = g_provider.LoadM5(InpSymbol, InpRangeStart, InpRangeEnd, m5);
    int n15 = 0;
