@@ -30,8 +30,10 @@
 //--- Inputs -----------------------------------------------------------------
 input string             InpSymbol            = "XAUUSD";
 //input datetime            InpRangeStart         = D'2026.01.01 00:00';
-input datetime            InpRangeStart         = D'2026.01.12 00:00';
-input datetime            InpRangeEnd           = D'2026.03.31 23:59';
+//input datetime            InpRangeStart         = D'2026.01.12 00:00';
+//input datetime            InpRangeEnd           = D'2026.03.31 23:59';
+input datetime InpRangeStart = D'2026.06.12 00:00';
+input datetime InpRangeEnd   = D'2026.06.13 00:00';
 
 input ENUM_GZ_TIME_MODE  InpTimeMode          = GZ_TIME_BROKER;
 input ENUM_GZ_DST_MODE   InpDstMode           = GZ_DST_AUTO;
