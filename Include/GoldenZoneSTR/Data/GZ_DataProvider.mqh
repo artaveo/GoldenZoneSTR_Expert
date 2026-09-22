@@ -95,6 +95,20 @@ public:
       Print("[GZ][TRACE][DataProvider] BEFORE CopyRates | Symbol=", symbol,
             " Timeframe=", tf_name, " Start=", start_str, " End=", end_str);
 
+      // HistoryDiag step 1: series state BEFORE the first CopyRates() call.
+      // Read-only diagnostic - does not alter Load()'s behavior.
+      long     pre_series_bars    = SeriesInfoInteger(symbol, tf, SERIES_BARS_COUNT);
+      datetime pre_series_first   = (datetime)SeriesInfoInteger(symbol, tf, SERIES_FIRSTDATE);
+      bool     pre_series_synced  = (bool)SeriesInfoInteger(symbol, tf, SERIES_SYNCHRONIZED);
+      Print("[GZ][HistoryDiag] BEFORE_REQUEST");
+      Print("Symbol=", symbol);
+      Print("Timeframe=", tf_name);
+      Print("RequestedStart=", start_str);
+      Print("RequestedEnd=", end_str);
+      Print("SeriesBars=", pre_series_bars);
+      Print("SeriesFirstDate=", TimeToString(pre_series_first, TIME_DATE|TIME_MINUTES));
+      Print("SeriesSynchronized=", (pre_series_synced ? "true" : "false"));
+
       int copied = CopyRates(symbol, tf, start, end, rates);
 
       // Capture the error code IMMEDIATELY after CopyRates() - before any
@@ -116,41 +130,104 @@ public:
          datetime terminal_first  = (datetime)SeriesInfoInteger(symbol, tf, SERIES_TERMINAL_FIRSTDATE);
          bool     series_synced   = (bool)SeriesInfoInteger(symbol, tf, SERIES_SYNCHRONIZED);
 
-         // (A) GUARANTEED-VISIBLE diagnostic: raw Print(), one field per
-         // line, called unconditionally. This does NOT go through
-         // CGZLogger at all, so it cannot be lost to a NULL logger
-         // pointer, a min-level filter, or any future logger change.
-         Print("[GZ][DataProvider][CopyRates FAILED]");
-         Print("Symbol=", symbol);
-         Print("Timeframe=", tf_name);
-         Print("Start=", start_str);
-         Print("End=", end_str);
-         Print("CopyRatesResult=", copied);
-         Print("LastError=", last_error);
-         Print("SeriesBarsInTerminal=", series_bars);
-         Print("SeriesFirstDate=", TimeToString(series_first, TIME_DATE|TIME_MINUTES));
-         Print("TerminalFirstDate=", TimeToString(terminal_first, TIME_DATE|TIME_MINUTES));
-         Print("SeriesSynchronized=", (series_synced ? "true" : "false"));
+         // HistoryDiag step 3: log the raw error code. 4401 is recorded
+         // purely as ERR_HISTORY_NOT_FOUND for evidence - this is NOT a
+         // conclusion that history is actually unavailable; that is
+         // exactly what the retry below is meant to help distinguish.
+         Print("[GZ][HistoryDiag] Initial failure | CopyRatesResult=", copied,
+               " LastError=", last_error,
+               (last_error==4401 ? " (ERR_HISTORY_NOT_FOUND)" : ""));
 
-         // (B) Same information again through the structured logger, kept
-         // ONLY as a secondary/formatted copy for consistency with the
-         // rest of the system's log style - (A) above is the one this
-         // diagnostic actually depends on.
-         if(m_logger!=NULL)
+         // HistoryDiag step 3 (warm-up/retry): bounded, deterministic - at
+         // most 3 attempts, ~300ms apart. This does NOT become a general
+         // caching/history-manager mechanism; it exists only so this
+         // diagnostic can tell "history not synced yet" apart from
+         // "history genuinely unavailable for this range".
+         const int GZ_HISTORY_MAX_RETRIES   = 3;
+         const int GZ_HISTORY_RETRY_DELAY_MS = 300;
+
+         for(int attempt=1; attempt<=GZ_HISTORY_MAX_RETRIES && copied<=0; attempt++)
            {
-            string diag = StringFormat(
-               "CopyRates FAILED | Symbol=%s Timeframe=%s Start=%s End=%s "+
-               "CopyRatesResult=%d LastError=%d SeriesBarsInTerminal=%d "+
-               "SeriesFirstDate=%s TerminalFirstDate=%s SeriesSynchronized=%s",
-               symbol, tf_name, start_str, end_str, copied, last_error,
-               series_bars,
-               TimeToString(series_first,TIME_DATE|TIME_MINUTES),
-               TimeToString(terminal_first,TIME_DATE|TIME_MINUTES),
-               series_synced?"true":"false");
-            m_logger.Warning("DataProvider", diag);
+            Sleep(GZ_HISTORY_RETRY_DELAY_MS);
+
+            long     rt_series_bars   = SeriesInfoInteger(symbol, tf, SERIES_BARS_COUNT);
+            datetime rt_series_first  = (datetime)SeriesInfoInteger(symbol, tf, SERIES_FIRSTDATE);
+            bool     rt_series_synced = (bool)SeriesInfoInteger(symbol, tf, SERIES_SYNCHRONIZED);
+
+            Print("[GZ][HistoryDiag] RETRY ", attempt);
+            Print("SeriesBars=", rt_series_bars);
+            Print("SeriesFirstDate=", TimeToString(rt_series_first, TIME_DATE|TIME_MINUTES));
+            Print("SeriesSynchronized=", (rt_series_synced ? "true" : "false"));
+
+            copied = CopyRates(symbol, tf, start, end, rates);
+
+            // Capture immediately after this retry's CopyRates() - nothing
+            // else runs between the call and this line, same rule as the
+            // first attempt above.
+            last_error = GetLastError();
+
+            Print("CopyRatesResult=", copied);
+            Print("LastError=", last_error);
+
+            // keep the failure-branch diagnostics in sync with the latest
+            // attempt, so the FAILED block below (if reached) reports the
+            // final state rather than the original one.
+            series_bars    = rt_series_bars;
+            series_first   = rt_series_first;
+            series_synced  = rt_series_synced;
            }
 
-         return 0;
+         if(copied>0)
+           {
+            // Retry succeeded - fall through to the SAME success path used
+            // by a normal first-attempt success below (EnsureChronological,
+            // success logging, return copied). No success logic duplicated.
+            Print("[GZ][HistoryDiag] RETRY_SUCCESS");
+           }
+         else
+           {
+            Print("[GZ][HistoryDiag] RETRY_EXHAUSTED");
+
+            // Re-read terminal_first once more for the final report (the
+            // other three fields above were already kept in sync per retry).
+            terminal_first = (datetime)SeriesInfoInteger(symbol, tf, SERIES_TERMINAL_FIRSTDATE);
+
+            // (A) GUARANTEED-VISIBLE diagnostic: raw Print(), one field per
+            // line, called unconditionally. This does NOT go through
+            // CGZLogger at all, so it cannot be lost to a NULL logger
+            // pointer, a min-level filter, or any future logger change.
+            Print("[GZ][DataProvider][CopyRates FAILED]");
+            Print("Symbol=", symbol);
+            Print("Timeframe=", tf_name);
+            Print("Start=", start_str);
+            Print("End=", end_str);
+            Print("CopyRatesResult=", copied);
+            Print("LastError=", last_error);
+            Print("SeriesBarsInTerminal=", series_bars);
+            Print("SeriesFirstDate=", TimeToString(series_first, TIME_DATE|TIME_MINUTES));
+            Print("TerminalFirstDate=", TimeToString(terminal_first, TIME_DATE|TIME_MINUTES));
+            Print("SeriesSynchronized=", (series_synced ? "true" : "false"));
+
+            // (B) Same information again through the structured logger, kept
+            // ONLY as a secondary/formatted copy for consistency with the
+            // rest of the system's log style - (A) above is the one this
+            // diagnostic actually depends on.
+            if(m_logger!=NULL)
+              {
+               string diag = StringFormat(
+                  "CopyRates FAILED | Symbol=%s Timeframe=%s Start=%s End=%s "+
+                  "CopyRatesResult=%d LastError=%d SeriesBarsInTerminal=%d "+
+                  "SeriesFirstDate=%s TerminalFirstDate=%s SeriesSynchronized=%s",
+                  symbol, tf_name, start_str, end_str, copied, last_error,
+                  series_bars,
+                  TimeToString(series_first,TIME_DATE|TIME_MINUTES),
+                  TimeToString(terminal_first,TIME_DATE|TIME_MINUTES),
+                  series_synced?"true":"false");
+               m_logger.Warning("DataProvider", diag);
+              }
+
+            return 0;
+           }
         }
 
       EnsureChronological(rates);
