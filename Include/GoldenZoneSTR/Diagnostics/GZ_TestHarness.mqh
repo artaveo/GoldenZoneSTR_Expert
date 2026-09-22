@@ -6,6 +6,7 @@
 //| Phase 3 (T24-T34): Leg Engine + Break Engine                      |
 //| Phase 4 (T35-T45): Fibonacci Engine + Setup State Machine         |
 //| Phase 5 (T46-T54): Entry Engine + Historical Trade Simulator      |
+//| Phase 6 (T55-T64): Exit Engine (SL/TP/BE)                         |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -35,6 +36,8 @@
 #include "..\Entry\GZ_EntryTypes.mqh"
 #include "..\Entry\GZ_EntryEngine.mqh"
 #include "..\Entry\GZ_TradeSimulator.mqh"
+#include "..\Exit\GZ_ExitTypes.mqh"
+#include "..\Exit\GZ_ExitEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -1546,12 +1549,14 @@ public:
       CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
       GZ_EntryConfig ecfg; ecfg.Default();
       CGZEntryEngine entryEngine(m_logger); entryEngine.Init(ecfg);
+      GZ_ExitConfig xcfg; xcfg.Default();
+      CGZExitEngine exitEngine(m_logger); exitEngine.Init(xcfg);
       CGZTimeEngine timeEngine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); timeEngine.Configure(tcfg);
       CGZSessionEngine sessionEngine;
       GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
 
       CGZTradeSimulator sim(m_logger);
-      sim.Run(m1, m5, swings, 2, legEngine, breakEngine, sm, entryEngine, timeEngine, sessionEngine, profile, false);
+      sim.Run(m1, m5, swings, 2, legEngine, breakEngine, sm, entryEngine, exitEngine, timeEngine, sessionEngine, profile, false, false);
 
       bool ok = (entryEngine.TradeCount()==1) && (entryEngine.GetTrade(0).entry_time==m1[1].time) &&
                 (MathAbs(entryEngine.GetTrade(0).entry_price-98.0)<0.0001);
@@ -1587,19 +1592,22 @@ public:
       CGZBreakEngine brkA(m_logger); brkA.Configure(bcfg);
       CGZSetupStateMachine smA(m_logger); smA.Init(0.30,0.90);
       CGZEntryEngine entA(m_logger); entA.Init(ecfg);
+      GZ_ExitConfig xcfg; xcfg.Default();
+      CGZExitEngine extA(m_logger); extA.Init(xcfg);
       CGZTimeEngine timeA(m_logger); timeA.Configure(tcfg);
       CGZSessionEngine sessA;
       CGZTradeSimulator simA(m_logger);
-      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, timeA, sessA, profile, false);
+      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, extA, timeA, sessA, profile, false, false);
 
       CGZLegEngine legB(m_logger); legB.Init(GZ_LEG_VARIANT_LAST_SWING);
       CGZBreakEngine brkB(m_logger); brkB.Configure(bcfg);
       CGZSetupStateMachine smB(m_logger); smB.Init(0.30,0.90);
       CGZEntryEngine entB(m_logger); entB.Init(ecfg);
+      CGZExitEngine extB(m_logger); extB.Init(xcfg);
       CGZTimeEngine timeB(m_logger); timeB.Configure(tcfg);
       CGZSessionEngine sessB;
       CGZTradeSimulator simB(m_logger);
-      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, timeB, sessB, profile, false);
+      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, extB, timeB, sessB, profile, false, false);
 
       bool ok = (entA.TradeCount()==entB.TradeCount()) && (entA.TradeCount()==1);
       if(ok)
@@ -1611,6 +1619,318 @@ public:
               (MathAbs(a.slippage_assumption-b.slippage_assumption)<0.00001);
         }
       AddResult("T54", ok, StringFormat("tradesA=%d tradesB=%d", entA.TradeCount(), entB.TradeCount()));
+     }
+
+   //--- helper: build a GZ_Trade directly (Phase 6 exit tests don't need
+   //--- to run the full Setup/Entry pipeline - that is already covered by
+   //--- T38-T54; here we only need well-formed GZ_Trade/GZ_Leg inputs). ---
+   GZ_Trade MakeTrade(long id, long setup_id, ENUM_GZ_LEG_DIR dir, double entry_price, datetime t, ENUM_GZ_ENTRY_MODEL model=GZ_ENTRY_TOUCH)
+     {
+      GZ_Trade tr; tr.Clear();
+      tr.id = id; tr.setup_id = setup_id; tr.direction = dir; tr.entry_price = entry_price;
+      tr.entry_time = t; tr.entry_model = model; tr.fib_level = 0.618;
+      return tr;
+     }
+
+   GZ_Leg MakeLegForExit(ENUM_GZ_LEG_DIR dir, double origin_price)
+     {
+      GZ_Leg leg; leg.Clear();
+      leg.id = 1; leg.direction = dir; leg.origin_swing.price = origin_price;
+      return leg;
+     }
+
+   //--- T55: STRUCTURE SL (baseline, zero buffer) = leg origin price exactly;
+   //--- TP computed at the configured R-multiple, for BOTH directions. ------
+   void T55_ExitStructureSLAndTP()
+     {
+      GZ_ExitConfig cfg; cfg.Default(); // STRUCTURE, buffer=0, tp=2.0R
+
+      CGZExitEngine eBull(m_logger); eBull.Init(cfg);
+      GZ_Trade trBull = MakeTrade(1, 1, GZ_LEG_BULLISH, 98.0, MakeTime(2026,1,8,9,0));
+      GZ_Leg legBull = MakeLegForExit(GZ_LEG_BULLISH, 90.0);
+      eBull.OnTradeEntered(trBull, legBull, 0.0, false);
+      GZ_TradeExit exBull = eBull.GetExit(0);
+      // sl=90, initial_risk=8, tp=98+2*8=114
+      bool okBull = (MathAbs(exBull.sl_price-90.0)<0.0001) && (MathAbs(exBull.initial_risk-8.0)<0.0001) &&
+                    (MathAbs(exBull.tp_price-114.0)<0.0001) && (exBull.sl_model_used==GZ_SL_STRUCTURE);
+
+      CGZExitEngine eBear(m_logger); eBear.Init(cfg);
+      GZ_Trade trBear = MakeTrade(2, 2, GZ_LEG_BEARISH, 100.0, MakeTime(2026,1,8,9,0));
+      GZ_Leg legBear = MakeLegForExit(GZ_LEG_BEARISH, 110.0);
+      eBear.OnTradeEntered(trBear, legBear, 0.0, false);
+      GZ_TradeExit exBear = eBear.GetExit(0);
+      // sl=110, initial_risk=10, tp=100-2*10=80
+      bool okBear = (MathAbs(exBear.sl_price-110.0)<0.0001) && (MathAbs(exBear.initial_risk-10.0)<0.0001) &&
+                    (MathAbs(exBear.tp_price-80.0)<0.0001);
+
+      bool ok = okBull && okBear;
+      AddResult("T55", ok, StringFormat("bull sl=%.2f tp=%.2f | bear sl=%.2f tp=%.2f",
+                exBull.sl_price, exBull.tp_price, exBear.sl_price, exBear.tp_price));
+     }
+
+   //--- T56: ATR SL model uses entry price +/- atr_mult*ATR when ATR is
+   //--- ready; falls back to STRUCTURE/zero-buffer (documented, not a
+   //--- guess) when it is not. ------------------------------------------------
+   void T56_ExitAtrSLWithFallback()
+     {
+      GZ_ExitConfig cfg; cfg.Default(); cfg.sl_model = GZ_SL_ATR; cfg.sl_atr_mult = 1.5;
+
+      CGZExitEngine eReady(m_logger); eReady.Init(cfg);
+      GZ_Trade tr1 = MakeTrade(1, 1, GZ_LEG_BULLISH, 100.0, MakeTime(2026,1,8,10,0));
+      GZ_Leg leg1 = MakeLegForExit(GZ_LEG_BULLISH, 90.0);
+      eReady.OnTradeEntered(tr1, leg1, 2.0, true); // atr=2.0 -> sl=100-1.5*2=97
+      GZ_TradeExit ex1 = eReady.GetExit(0);
+      bool okReady = (ex1.sl_model_used==GZ_SL_ATR) && (MathAbs(ex1.sl_price-97.0)<0.0001);
+
+      CGZExitEngine eFallback(m_logger); eFallback.Init(cfg);
+      GZ_Trade tr2 = MakeTrade(2, 2, GZ_LEG_BULLISH, 100.0, MakeTime(2026,1,8,10,0));
+      GZ_Leg leg2 = MakeLegForExit(GZ_LEG_BULLISH, 90.0);
+      eFallback.OnTradeEntered(tr2, leg2, 0.0, false); // ATR not ready -> fallback
+      GZ_TradeExit ex2 = eFallback.GetExit(0);
+      bool okFallback = (ex2.sl_model_used==GZ_SL_STRUCTURE) && (MathAbs(ex2.sl_price-90.0)<0.0001);
+
+      bool ok = okReady && okFallback;
+      AddResult("T56", ok, StringFormat("atr_ready_sl=%.2f fallback_sl=%.2f (fallback must equal leg origin=90.00)",
+                ex1.sl_price, ex2.sl_price));
+     }
+
+   //--- T57: price reaches TP before SL - trade closes TP_HIT at the TP
+   //--- price, realized_r matches the configured R-multiple. -----------------
+   void T57_TpHitExit()
+     {
+      GZ_ExitConfig cfg; cfg.Default(); // tp=2.0R
+      CGZExitEngine exitEngine(m_logger); exitEngine.Init(cfg);
+      GZ_Trade tr = MakeTrade(1, 1, GZ_LEG_BULLISH, 98.0, MakeTime(2026,1,8,11,0));
+      GZ_Leg leg = MakeLegForExit(GZ_LEG_BULLISH, 90.0); // sl=90, tp=114
+      exitEngine.OnTradeEntered(tr, leg, 0.0, false);
+
+      MqlRates barNoTouch = MakeBar(MakeTime(2026,1,8,11,1), 99,101,97,100);
+      exitEngine.OnBar(barNoTouch, true, false);
+      bool stillOpen = (exitEngine.GetExit(0).is_open);
+
+      MqlRates barTp = MakeBar(MakeTime(2026,1,8,11,2), 110,115,109,112); // high=115>=114
+      exitEngine.OnBar(barTp, true, false);
+      GZ_TradeExit ex = exitEngine.GetExit(0);
+
+      bool ok = stillOpen && (!ex.is_open) && (ex.exit_reason==GZ_EXIT_TP_HIT) &&
+                (MathAbs(ex.exit_price-114.0)<0.0001) && (MathAbs(ex.realized_r-2.0)<0.0001);
+      AddResult("T57", ok, StringFormat("reason=%s exit_price=%.2f R=%.3f", ex.ExitReasonToString(), ex.exit_price, ex.realized_r));
+     }
+
+   //--- T58: price reaches SL - trade closes SL_HIT at the SL price,
+   //--- realized_r is exactly -1.0 (one full unit of initial risk lost). ----
+   void T58_SlHitExit()
+     {
+      GZ_ExitConfig cfg; cfg.Default();
+      CGZExitEngine exitEngine(m_logger); exitEngine.Init(cfg);
+      GZ_Trade tr = MakeTrade(1, 1, GZ_LEG_BULLISH, 98.0, MakeTime(2026,1,8,12,0));
+      GZ_Leg leg = MakeLegForExit(GZ_LEG_BULLISH, 90.0); // sl=90
+      exitEngine.OnTradeEntered(tr, leg, 0.0, false);
+
+      MqlRates barSl = MakeBar(MakeTime(2026,1,8,12,1), 92,93,89,90.5); // low=89<=90
+      exitEngine.OnBar(barSl, true, false);
+      GZ_TradeExit ex = exitEngine.GetExit(0);
+
+      bool ok = (!ex.is_open) && (ex.exit_reason==GZ_EXIT_SL_HIT) &&
+                (MathAbs(ex.exit_price-90.0)<0.0001) && (MathAbs(ex.realized_r-(-1.0))<0.0001);
+      AddResult("T58", ok, StringFormat("reason=%s exit_price=%.2f R=%.3f", ex.ExitReasonToString(), ex.exit_price, ex.realized_r));
+     }
+
+   //--- T59: break-even arms once price moves be_trigger_r in favor, moving
+   //--- the active stop to entry; a later bar returning to that stop closes
+   //--- the trade as BREAK_EVEN (not SL_HIT), realized_r ~ 0. -----------------
+   void T59_BreakEvenArmThenExit()
+     {
+      GZ_ExitConfig cfg; cfg.Default(); cfg.be_trigger_r = 1.0; cfg.be_level_mode = GZ_BE_LEVEL_ENTRY;
+      CGZExitEngine exitEngine(m_logger); exitEngine.Init(cfg);
+      GZ_Trade tr = MakeTrade(1, 1, GZ_LEG_BULLISH, 98.0, MakeTime(2026,1,8,13,0));
+      GZ_Leg leg = MakeLegForExit(GZ_LEG_BULLISH, 90.0); // sl=90, initial_risk=8, BE trigger price=98+8=106
+      exitEngine.OnTradeEntered(tr, leg, 0.0, false);
+
+      MqlRates barArm = MakeBar(MakeTime(2026,1,8,13,1), 100,107,99,105); // high=107>=106 -> arms BE
+      exitEngine.OnBar(barArm, true, false);
+      GZ_TradeExit afterArm = exitEngine.GetExit(0);
+      bool armed = afterArm.is_open && afterArm.be_triggered && (MathAbs(afterArm.be_new_sl_price-98.0)<0.0001) &&
+                   (MathAbs(afterArm.sl_price-98.0)<0.0001);
+
+      MqlRates barReturn = MakeBar(MakeTime(2026,1,8,13,2), 102,103,97,98); // low=97<=98(new sl)
+      exitEngine.OnBar(barReturn, true, false);
+      GZ_TradeExit ex = exitEngine.GetExit(0);
+      bool exited = (!ex.is_open) && (ex.exit_reason==GZ_EXIT_BREAK_EVEN) && (MathAbs(ex.exit_price-98.0)<0.0001) &&
+                    (MathAbs(ex.realized_r)<0.0001);
+
+      bool ok = armed && exited;
+      AddResult("T59", ok, StringFormat("armed=%s reason=%s R=%.3f", armed?"true":"false", ex.ExitReasonToString(), ex.realized_r));
+     }
+
+   //--- T60: a single bar's range touches BOTH SL and TP - intrabar_conflict
+   //--- is recorded regardless of policy, and the configured policy actually
+   //--- changes which outcome wins (SL_FIRST vs TP_FIRST, same bar). ---------
+   void T60_IntrabarConflictPolicy()
+     {
+      MqlRates wideBar = MakeBar(MakeTime(2026,1,8,14,1), 100,115,89,105); // low=89<=sl(90), high=115>=tp(114)
+
+      GZ_ExitConfig cfgSlFirst; cfgSlFirst.Default(); cfgSlFirst.intrabar_conflict_policy = GZ_CONFLICT_SL_FIRST;
+      CGZExitEngine eSl(m_logger); eSl.Init(cfgSlFirst);
+      GZ_Trade tr1 = MakeTrade(1, 1, GZ_LEG_BULLISH, 98.0, MakeTime(2026,1,8,14,0));
+      GZ_Leg leg1 = MakeLegForExit(GZ_LEG_BULLISH, 90.0);
+      eSl.OnTradeEntered(tr1, leg1, 0.0, false);
+      eSl.OnBar(wideBar, true, false);
+      GZ_TradeExit exSl = eSl.GetExit(0);
+
+      GZ_ExitConfig cfgTpFirst; cfgTpFirst.Default(); cfgTpFirst.intrabar_conflict_policy = GZ_CONFLICT_TP_FIRST;
+      CGZExitEngine eTp(m_logger); eTp.Init(cfgTpFirst);
+      GZ_Trade tr2 = MakeTrade(2, 2, GZ_LEG_BULLISH, 98.0, MakeTime(2026,1,8,14,0));
+      GZ_Leg leg2 = MakeLegForExit(GZ_LEG_BULLISH, 90.0);
+      eTp.OnTradeEntered(tr2, leg2, 0.0, false);
+      eTp.OnBar(wideBar, true, false);
+      GZ_TradeExit exTp = eTp.GetExit(0);
+
+      bool ok = exSl.intrabar_conflict && exTp.intrabar_conflict &&
+                (exSl.exit_reason==GZ_EXIT_SL_HIT) && (MathAbs(exSl.exit_price-90.0)<0.0001) &&
+                (exTp.exit_reason==GZ_EXIT_TP_HIT) && (MathAbs(exTp.exit_price-114.0)<0.0001);
+      AddResult("T60", ok, StringFormat("SL_FIRST->%s@%.2f  TP_FIRST->%s@%.2f (both flagged intrabar_conflict)",
+                exSl.ExitReasonToString(), exSl.exit_price, exTp.ExitReasonToString(), exTp.exit_price));
+     }
+
+   //--- T61: force_session_exit closes an open trade at the bar's close the
+   //--- instant price moves outside the session window (and only then -
+   //--- SL/TP still take priority when they also apply, see header). --------
+   void T61_SessionExit()
+     {
+      GZ_ExitConfig cfg; cfg.Default();
+      CGZExitEngine exitEngine(m_logger); exitEngine.Init(cfg);
+      GZ_Trade tr = MakeTrade(1, 1, GZ_LEG_BULLISH, 98.0, MakeTime(2026,1,8,15,0));
+      GZ_Leg leg = MakeLegForExit(GZ_LEG_BULLISH, 90.0); // sl=90, tp=114
+      exitEngine.OnTradeEntered(tr, leg, 0.0, false);
+
+      MqlRates bar = MakeBar(MakeTime(2026,1,8,15,1), 99,100,98,99); // touches neither sl nor tp
+      exitEngine.OnBar(bar, false, true); // outside session, force_session_exit=true
+      GZ_TradeExit ex = exitEngine.GetExit(0);
+
+      bool ok = (!ex.is_open) && (ex.exit_reason==GZ_EXIT_SESSION_EXIT) && (MathAbs(ex.exit_price-99.0)<0.0001);
+      AddResult("T61", ok, StringFormat("reason=%s exit_price=%.2f", ex.ExitReasonToString(), ex.exit_price));
+     }
+
+   //--- T62: a trade still open when the data range ends is force-closed at
+   //--- the given last-known price with reason DATA_END. --------------------
+   void T62_DataEndForceClose()
+     {
+      GZ_ExitConfig cfg; cfg.Default();
+      CGZExitEngine exitEngine(m_logger); exitEngine.Init(cfg);
+      GZ_Trade tr = MakeTrade(1, 1, GZ_LEG_BULLISH, 98.0, MakeTime(2026,1,8,16,0));
+      GZ_Leg leg = MakeLegForExit(GZ_LEG_BULLISH, 90.0);
+      exitEngine.OnTradeEntered(tr, leg, 0.0, false);
+
+      datetime endTime = MakeTime(2026,1,8,18,0);
+      exitEngine.OnDataEnd(endTime, 101.5);
+      GZ_TradeExit ex = exitEngine.GetExit(0);
+
+      bool ok = (!ex.is_open) && (ex.exit_reason==GZ_EXIT_DATA_END) && (ex.exit_time==endTime) &&
+                (MathAbs(ex.exit_price-101.5)<0.0001);
+      AddResult("T62", ok, StringFormat("reason=%s exit_price=%.2f", ex.ExitReasonToString(), ex.exit_price));
+     }
+
+   //--- T63: realized_r sign convention is correct for BOTH directions on
+   //--- BOTH outcomes (TP_HIT positive, SL_HIT negative) - not just the
+   //--- BULLISH case T57/T58 already covered. --------------------------------
+   void T63_InitialRiskAndRealizedRSign()
+     {
+      GZ_ExitConfig cfg; cfg.Default(); // tp=2.0R
+
+      CGZExitEngine eTp(m_logger); eTp.Init(cfg);
+      GZ_Trade trTp = MakeTrade(1, 1, GZ_LEG_BEARISH, 100.0, MakeTime(2026,1,8,17,0));
+      GZ_Leg legTp = MakeLegForExit(GZ_LEG_BEARISH, 110.0); // sl=110, initial_risk=10, tp=80
+      eTp.OnTradeEntered(trTp, legTp, 0.0, false);
+      MqlRates barTp = MakeBar(MakeTime(2026,1,8,17,1), 85,86,79,80); // low=79<=80
+      eTp.OnBar(barTp, true, false);
+      GZ_TradeExit exTp = eTp.GetExit(0);
+      bool okTp = (exTp.exit_reason==GZ_EXIT_TP_HIT) && (MathAbs(exTp.realized_r-2.0)<0.0001);
+
+      CGZExitEngine eSl(m_logger); eSl.Init(cfg);
+      GZ_Trade trSl = MakeTrade(2, 2, GZ_LEG_BEARISH, 100.0, MakeTime(2026,1,8,17,0));
+      GZ_Leg legSl = MakeLegForExit(GZ_LEG_BEARISH, 110.0);
+      eSl.OnTradeEntered(trSl, legSl, 0.0, false);
+      MqlRates barSl = MakeBar(MakeTime(2026,1,8,17,1), 105,111,104,110); // high=111>=110
+      eSl.OnBar(barSl, true, false);
+      GZ_TradeExit exSl = eSl.GetExit(0);
+      bool okSl = (exSl.exit_reason==GZ_EXIT_SL_HIT) && (MathAbs(exSl.realized_r-(-1.0))<0.0001);
+
+      bool ok = okTp && okSl;
+      AddResult("T63", ok, StringFormat("BEARISH TP_HIT R=%.3f  BEARISH SL_HIT R=%.3f", exTp.realized_r, exSl.realized_r));
+     }
+
+   //--- T64: full-pipeline determinism through the Phase 6-updated
+   //--- CGZTradeSimulator - two independent runs over identical M1/M5/
+   //--- swings data and configuration produce identical trades AND
+   //--- identical exits. ------------------------------------------------------
+   void T64_ExitDeterminism()
+     {
+      datetime t0 = MakeTime(2026,1,8,18,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+      GZ_Swing swings[]; ArrayResize(swings,2); swings[0]=low1; swings[1]=high1;
+
+      MqlRates m5[]; ArrayResize(m5,6);
+      m5[0]=MakeBar(t0+2*300,  90,90.5,89.5,90);
+      m5[1]=MakeBar(t0+7*300, 109,110.5,108.5,110);
+      m5[2]=MakeBar(t0+8*300, 109,112,108,111);     // break: close=111>110
+      m5[3]=MakeBar(t0+9*300, 98,100,95,99);        // T: touches zone [92.2,105.4] -> WAITING_ENTRY
+      m5[4]=MakeBar(t0+10*300, 99,100,98,99);       // next M5 candle (neutral)
+      m5[5]=MakeBar(t0+11*300, 99,100,98,99);       // trailing neutral candle
+
+      datetime T = t0+9*300;
+      MqlRates m1[]; ArrayResize(m1,2);
+      m1[0]=MakeBar(T+300+60,  98.5,98.6,98.0,98.2); // triggers TOUCH entry, low=98.0<=entry(98.404)
+      m1[1]=MakeBar(T+600+60, 115.0,116.0,114.5,115.5); // well past TP (leg origin=90 -> sl=90, tp per config)
+
+      GZ_TimeConfig tcfg; tcfg.Default();
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_EntryConfig ecfg; ecfg.Default();
+      GZ_BreakConfig bcfg; bcfg.Default();
+      GZ_ExitConfig xcfg; xcfg.Default(); // sl=structure(origin=90), tp=2.0R
+
+      CGZLegEngine legA(m_logger); legA.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkA(m_logger); brkA.Configure(bcfg);
+      CGZSetupStateMachine smA(m_logger); smA.Init(0.30,0.90);
+      CGZEntryEngine entA(m_logger); entA.Init(ecfg);
+      CGZExitEngine extA(m_logger); extA.Init(xcfg);
+      CGZTimeEngine timeA(m_logger); timeA.Configure(tcfg);
+      CGZSessionEngine sessA;
+      CGZTradeSimulator simA(m_logger);
+      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, extA, timeA, sessA, profile, false, false);
+
+      CGZLegEngine legB(m_logger); legB.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkB(m_logger); brkB.Configure(bcfg);
+      CGZSetupStateMachine smB(m_logger); smB.Init(0.30,0.90);
+      CGZEntryEngine entB(m_logger); entB.Init(ecfg);
+      CGZExitEngine extB(m_logger); extB.Init(xcfg);
+      CGZTimeEngine timeB(m_logger); timeB.Configure(tcfg);
+      CGZSessionEngine sessB;
+      CGZTradeSimulator simB(m_logger);
+      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, extB, timeB, sessB, profile, false, false);
+
+      bool ok = (extA.ExitCount()==extB.ExitCount()) && (extA.ExitCount()==1) && (entA.TradeCount()==entB.TradeCount());
+      if(ok)
+        {
+         GZ_TradeExit a = extA.GetExit(0);
+         GZ_TradeExit b = extB.GetExit(0);
+         ok = (a.exit_time==b.exit_time) && (a.exit_reason==b.exit_reason) &&
+              (MathAbs(a.exit_price-b.exit_price)<0.00001) && (MathAbs(a.realized_r-b.realized_r)<0.00001) &&
+              (MathAbs(a.sl_price-b.sl_price)<0.00001) && (MathAbs(a.tp_price-b.tp_price)<0.00001);
+        }
+      // Also verify the EXITED propagation (GZ_SetupStateMachine::MarkExited(),
+      // wired up via CGZTradeSimulator's final pass - see its Run() header).
+      if(ok)
+        {
+         int n = smA.SetupCount();
+         bool foundExited = false;
+         for(int i=0;i<n;i++)
+            if(smA.GetSetup(i).id==extA.GetExit(0).setup_id && smA.GetSetup(i).state==GZ_SETUP_EXITED)
+               foundExited = true;
+         ok = foundExited;
+        }
+      AddResult("T64", ok, StringFormat("exitsA=%d exitsB=%d", extA.ExitCount(), extB.ExitCount()));
      }
 
    //--- Run everything ----------------------------------------------------------------
@@ -1671,6 +1991,16 @@ public:
       T52_NoEntryBeforeWaitingEntryGate();
       T53_SimulatorNoLookaheadAcrossM1M5Boundary();
       T54_SimulatorDeterminism();
+      T55_ExitStructureSLAndTP();
+      T56_ExitAtrSLWithFallback();
+      T57_TpHitExit();
+      T58_SlHitExit();
+      T59_BreakEvenArmThenExit();
+      T60_IntrabarConflictPolicy();
+      T61_SessionExit();
+      T62_DataEndForceClose();
+      T63_InitialRiskAndRealizedRSign();
+      T64_ExitDeterminism();
      }
 
    int               PassCount() const

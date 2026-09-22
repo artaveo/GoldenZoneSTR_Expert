@@ -272,6 +272,30 @@ public:
                        (int)m_setups[idx].id, m_setups[idx].leg.DirectionToString(), TimeToString(t)));
       return true;
      }
+
+   //--- Phase 6 (Exit Engine) hook: mark a setup as EXITED once its trade
+   //--- has closed (any GZ_ExitReason). Wires up the GZ_SETUP_EXITED stub
+   //--- state that GZ_SetupTypes.mqh explicitly deferred to Phase 6
+   //--- ("exit is the Exit Engine's job"). IsTerminal() already treats
+   //--- ENTERED as terminal (see CancelSetup's guard), so this transition
+   //--- deliberately checks state==GZ_SETUP_ENTERED directly rather than
+   //--- going through CancelSetup - EXITED is only ever reachable from
+   //--- ENTERED, never a cancellation. Reuses `terminal_time` again, now
+   //--- holding the exit time. Returns false if the setup id is unknown
+   //--- or not currently ENTERED (e.g. called twice for the same setup -
+   //--- safe no-op, never overwrites).
+   bool              MarkExited(long setup_id, datetime t)
+     {
+      int idx = FindById(setup_id);
+      if(idx<0 || m_setups[idx].state!=GZ_SETUP_ENTERED)
+         return false;
+      m_setups[idx].state         = GZ_SETUP_EXITED;
+      m_setups[idx].terminal_time = t;
+      if(m_logger!=NULL)
+         m_logger.Info("Setup", StringFormat("Setup #%d (%s) EXITED at=%s",
+                       (int)m_setups[idx].id, m_setups[idx].leg.DirectionToString(), TimeToString(t)));
+      return true;
+     }
   };
 
 #endif // __GZ_SETUP_STATE_MACHINE_MQH__

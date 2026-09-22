@@ -1,29 +1,31 @@
 //+------------------------------------------------------------------+
 //|                                    GoldenZoneSTR_Research.mq5    |
 //|                                                                    |
-//| GoldenZone STR - Phase 1+2+3+4+5 Research EA                      |
+//| GoldenZone STR - Phase 1+2+3+4+5+6 Research EA                    |
 //| Phase 1: Data Layer + Data Validator + Time Engine                |
 //| Phase 2: M5 Structure Engine (swing/pivot detection)               |
 //| Phase 3: Leg Engine + Break Engine                                 |
 //| Phase 4: Fibonacci Engine + Setup State Machine                    |
 //| Phase 5: Entry Engine + Historical Trade Simulator                 |
+//| Phase 6: Exit Engine (SL/TP/BE)                                    |
 //|                                                                    |
 //| SCOPE: This EA implements ONLY Phase 1 (Data/Validator/Time/      |
 //| Session/Diagnostics/TestHarness), Phase 2 (M5 swing/pivot         |
 //| detection), Phase 3 (Leg Engine + Break Engine), Phase 4           |
-//| (Fibonacci Engine + Setup State Machine) and Phase 5 (Entry Engine |
-//| + Historical Trade Simulator). It contains NO exit, SL/TP/BE,     |
-//| filter or trade-management logic (Phase 6+), and it places NO     |
-//| live orders. On init it loads historical M1+M5 data, runs         |
-//| validation, runs swing detection, replays the M1/M5 data through  |
-//| the Leg/Break/Setup/Entry engines via CGZTradeSimulator, runs the |
-//| deterministic T01-T54 test harness, and prints a completion       |
+//| (Fibonacci Engine + Setup State Machine), Phase 5 (Entry Engine + |
+//| Historical Trade Simulator) and Phase 6 (Exit Engine: SL/TP/BE).  |
+//| It contains NO MAE/MFE, event-ledger, metrics, filter or          |
+//| experiment-runner logic (Phase 7+), and it places NO live orders. |
+//| On init it loads historical M1+M5 data, runs validation, runs     |
+//| swing detection, replays the M1/M5 data through the Leg/Break/    |
+//| Setup/Entry/Exit engines via CGZTradeSimulator, runs the           |
+//| deterministic T01-T64 test harness, and prints a completion       |
 //| report. Then it stops - it does not trade and does not proceed to |
-//| Phase 6 (Exit Engine: SL/TP/BE) logic.                             |
+//| Phase 7 (MAE/MFE + R-Path + Event Ledger) logic.                   |
 //+------------------------------------------------------------------+
 #property copyright "GoldenZone STR"
-#property version   "1.40"
-#property description "Phase 1+2+3+4+5: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator (research/diagnostic only, no trading)"
+#property version   "1.50"
+#property description "Phase 1+2+3+4+5+6: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE (research/diagnostic only, no trading)"
 
 #include <GoldenZoneSTR\Core\GZ_Types.mqh>
 #include <GoldenZoneSTR\Core\GZ_Config.mqh>
@@ -45,6 +47,8 @@
 #include <GoldenZoneSTR\Entry\GZ_EntryTypes.mqh>
 #include <GoldenZoneSTR\Entry\GZ_EntryEngine.mqh>
 #include <GoldenZoneSTR\Entry\GZ_TradeSimulator.mqh>
+#include <GoldenZoneSTR\Exit\GZ_ExitTypes.mqh>
+#include <GoldenZoneSTR\Exit\GZ_ExitEngine.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
@@ -89,6 +93,20 @@ input double               InpEntryFibRatio      = 0.618;  // single fib ratio t
 input int                  InpConfirmationCandles= 1;       // research range 1-3; used only by CLOSE_CONFIRMATION / M1_CONFIRMATION
 input double               InpEntryPenetrationAtrMult = 0.0; // research grid: 0/0.02/0.05/0.10/0.15 ATR
 
+//--- Phase 6: Exit Engine (SL/TP/BE) -------------------------------------------
+input ENUM_GZ_SL_MODEL    InpSlModel            = GZ_SL_STRUCTURE; // baseline=STRUCTURE (Leg Origin +/- buffer); research: ATR
+input double               InpSlBufferAtrMult    = 0.0;   // STRUCTURE model only; ATR multiples beyond the leg origin
+input double               InpSlAtrMult          = 1.5;   // ATR model only; SL distance from entry, in ATR multiples
+input double               InpTpRMultiple        = 2.0;   // research grid 0.5R-5R, extensible above
+input double               InpBeTriggerR         = 0.0;   // 0.0 = OFF; research grid 0.25R-5R
+input ENUM_GZ_BE_LEVEL_MODE InpBeLevelMode       = GZ_BE_LEVEL_ENTRY; // ENTRY or ENTRY_OFFSET
+input double               InpBeLevelOffsetR     = 0.0;   // used only when InpBeLevelMode==ENTRY_OFFSET
+input ENUM_GZ_INTRABAR_CONFLICT_POLICY InpIntrabarConflictPolicy = GZ_CONFLICT_SL_FIRST; // baseline=SL_FIRST (conservative)
+input bool                 InpForceSessionExit   = false;  // if true, open trades are force-closed (SESSION_EXIT) once
+                                                             // price moves outside the session window (independent of
+                                                             // InpApplySessionFilter, which only governs Phase 4 setup
+                                                             // cancellation before entry - see GZ_ExitEngine.mqh)
+
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
 CGZDataProvider   g_provider(GetPointer(g_logger));
@@ -101,6 +119,7 @@ CGZLegEngine      g_leg_engine(GetPointer(g_logger));
 CGZBreakEngine    g_break_engine(GetPointer(g_logger));
 CGZSetupStateMachine g_setup_sm(GetPointer(g_logger));
 CGZEntryEngine    g_entry_engine(GetPointer(g_logger));
+CGZExitEngine     g_exit_engine(GetPointer(g_logger));
 CGZTradeSimulator g_trade_simulator(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
@@ -120,6 +139,9 @@ int               g_setup_count = 0;
 //--- Phase 5 diagnostic results (entry/trade generation over the loaded range)
 int               g_trade_count = 0;
 
+//--- Phase 6 diagnostic results (exit management over the loaded range) -------
+int               g_exit_count = 0;
+
 //+------------------------------------------------------------------+
 //| Build and print/save the Phase 1 completion report                |
 //+------------------------------------------------------------------+
@@ -127,8 +149,8 @@ void BuildAndEmitReport()
   {
    string report = "";
    report += "===================================================\n";
-   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 COMPLETION REPORT\n";
-   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + "\n";
+   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 + PHASE 6 COMPLETION REPORT\n";
+   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + " | " + GZ_PROJECT_VERSION_P6 + "\n";
    report += " Generated (terminal local time, diagnostic only): " + TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS) + "\n";
    report += "===================================================\n\n";
 
@@ -139,13 +161,14 @@ void BuildAndEmitReport()
    report += "Phase 3 files: GZ_LegTypes, GZ_ATR, GZ_LegEngine, GZ_BreakEngine\n";
    report += "Phase 4 files: GZ_SetupTypes, GZ_FibEngine, GZ_SetupStateMachine\n";
    report += "Phase 5 files: GZ_EntryTypes, GZ_EntryEngine, GZ_TradeSimulator\n";
+   report += "Phase 6 files: GZ_ExitTypes, GZ_ExitEngine\n";
    report += "Interfaces: GZ_TimeContext, CGZDatasetInfo (Phase 1), GZ_Swing / CGZSwingEngine (Phase 2),\n";
    report += "            GZ_Leg / CGZLegEngine / CGZBreakEngine (Phase 3), GZ_Setup / CGZFibEngine /\n";
    report += "            CGZSetupStateMachine (Phase 4), GZ_Trade / CGZEntryEngine / CGZTradeSimulator\n";
-   report += "            (Phase 5) - all consumed by later phases; Update()/UpdateBar()/OnBar()/\n";
-   report += "            CheckBreak()/OnLegCreated()/OnLegBroken()/MarkEntered()/\n";
-   report += "            CancelForInvalidPenetration() are live-safe, DetectAll()/CGZTradeSimulator.Run()\n";
-   report += "            are research-batch\n\n";
+   report += "            (Phase 5), GZ_TradeExit / CGZExitEngine (Phase 6) - all consumed by later\n";
+   report += "            phases; Update()/UpdateBar()/OnBar()/CheckBreak()/OnLegCreated()/\n";
+   report += "            OnLegBroken()/MarkEntered()/CancelForInvalidPenetration()/OnTradeEntered()\n";
+   report += "            are live-safe, DetectAll()/CGZTradeSimulator.Run() are research-batch\n\n";
 
    report += "--- Data Validation: M1 ---\n";
    report += StringFormat("Symbol=%s Bars=%d First=%s Last=%s\n",
@@ -199,8 +222,8 @@ void BuildAndEmitReport()
               g_setup_sm.CountTerminalByReason(GZ_CANCEL_SESSION_END), g_setup_sm.CountTerminalByReason(GZ_CANCEL_DATA_END));
    report += "At most one non-terminal setup per direction is ever left standing after a new leg\n";
    report += "is created (see T41); an opposite-direction break cancels whatever is still open on\n";
-   report += "the other side (see T42). ENTERED is now assigned by Phase 5's Entry Engine below;\n";
-   report += "EXITED remains a stub state - deferred to Phase 6 (Exit Engine).\n\n";
+   report += "the other side (see T42). ENTERED is assigned by Phase 5's Entry Engine; EXITED is now\n";
+   report += "assigned by Phase 6's Exit Engine (see below) whenever a trade closes.\n\n";
 
    report += "--- Phase 5: Entry Engine + Historical Trade Simulator ---\n";
    report += StringFormat("EntryModel=%s FibRatio=%.3f ConfirmationCandles=%d PenetrationAtrMult=%.2f\n",
@@ -215,7 +238,24 @@ void BuildAndEmitReport()
    report += "initial_risk is a reserved 0.0 placeholder - it requires a stop-loss price, which is\n";
    report += "explicitly Phase 6 (Exit Engine) scope (see GZ_EntryTypes.mqh design note 2).\n\n";
 
-   report += "--- Automated Test Results (T01-T54: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5) ---\n";
+   report += "--- Phase 6: Exit Engine (SL/TP/BE) ---\n";
+   report += StringFormat("SlModel=%s SlBufferAtrMult=%.2f SlAtrMult=%.2f TpRMultiple=%.2fR BeTriggerR=%.2fR BeLevelMode=%s BeLevelOffsetR=%.2f ConflictPolicy=%s ForceSessionExit=%s\n",
+              EnumToString(InpSlModel), InpSlBufferAtrMult, InpSlAtrMult, InpTpRMultiple, InpBeTriggerR,
+              EnumToString(InpBeLevelMode), InpBeLevelOffsetR, EnumToString(InpIntrabarConflictPolicy), InpForceSessionExit?"true":"false");
+   report += StringFormat("Exits=%d  Still open=%d  TP_HIT=%d  SL_HIT=%d  BREAK_EVEN=%d  SESSION_EXIT=%d  DATA_END=%d\n",
+              g_exit_count, g_exit_engine.OpenCount(), g_exit_engine.CountByReason(GZ_EXIT_TP_HIT),
+              g_exit_engine.CountByReason(GZ_EXIT_SL_HIT), g_exit_engine.CountByReason(GZ_EXIT_BREAK_EVEN),
+              g_exit_engine.CountByReason(GZ_EXIT_SESSION_EXIT), g_exit_engine.CountByReason(GZ_EXIT_DATA_END));
+   report += "Granularity: exit management (SL/TP/BE) runs at M1 (execution) granularity for every\n";
+   report += "trade regardless of its entry model's own granularity (see GZ_ExitEngine.mqh).\n";
+   report += "Same-bar ordering (documented, not Roadmap-specified): SL/TP hit checked before BE\n";
+   report += "arming, BE arming before SESSION_EXIT, on any one bar (see T57-T61 and header notes).\n";
+   report += "Intrabar SL/TP conflict (both touched on one bar) is always recorded (intrabar_conflict)\n";
+   report += "regardless of which policy resolves it (see T60). ENTERED->EXITED is now wired up on\n";
+   report += "every closed trade (see T64). realized_r is the trade's terminal R-multiple only - the\n";
+   report += "full R-multiple path / running MAE/MFE is explicitly Phase 7 scope, not implemented here.\n\n";
+
+   report += "--- Automated Test Results (T01-T64: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -226,18 +266,20 @@ void BuildAndEmitReport()
    report += StringFormat("\nTOTAL: %d PASS / %d FAIL (of %d)\n\n", pass, fail, g_harness.ResultCount());
 
    report += "--- Known Limitations / Deferred Work ---\n";
-   report += "DEFERRED TO PHASE 6: Exit Engine (SL/TP/BE) - not implemented, by design. initial_risk\n";
-   report += "on every GZ_Trade is a reserved 0.0 placeholder until a stop-loss price exists.\n";
-   report += "DEFERRED TO PHASE 7+: MAE/MFE, Event Ledger, Metrics, Filters, Experiment Runner.\n";
+   report += "DEFERRED TO PHASE 7: MAE/MFE, R-multiple path, Event Ledger, Metrics, Filters,\n";
+   report += "Experiment Runner - not implemented, by design. realized_r on GZ_TradeExit is the\n";
+   report += "terminal outcome only, not a running path.\n";
    report += "Weekend-gap classification uses a Saturday-presence heuristic; broker-specific holiday\n";
    report += "calendars are not modeled and would need broker session data if required later.\n";
-   report += "A setup that reaches ENTERED simply stays there (EXITED is still a stub) until Phase 6\n";
-   report += "adds exit logic. SESSION_END cancellation only fires when InpApplySessionFilter=true\n";
-   report += "(default false, since the Roadmap does not state whether every setup should be\n";
-   report += "session-scoped by default). Spread assumption is the historical bar's own recorded\n";
-   report += "spread (points), not a separate configurable spread model (see GZ_EntryTypes.mqh).\n";
-   report += "entry_fib_ratio (default 0.618) is a single configurable trigger level within the\n";
-   report += "Phase 4 watched zone - no Roadmap baseline is stated for it (see design note 1).\n\n";
+   report += "SESSION_END (Phase 4, pre-entry setup cancellation) only fires when\n";
+   report += "InpApplySessionFilter=true; SESSION_EXIT (Phase 6, open-trade force-close) only fires\n";
+   report += "when InpForceSessionExit=true - the two are independent flags on purpose (default both\n";
+   report += "false), since the Roadmap does not state either should be on by default. Spread\n";
+   report += "assumption is the historical bar's own recorded spread (points), not a separate\n";
+   report += "configurable spread model (see GZ_EntryTypes.mqh). entry_fib_ratio (default 0.618),\n";
+   report += "sl_atr_mult (default 1.5) and tp_r_multiple (default 2.0) are single configurable\n";
+   report += "values with no stated Roadmap baseline - documented conventional defaults, not silently\n";
+   report += "assumed (see each type file's design notes).\n\n";
 
    report += "--- User Verification Required ---\n";
    report += "USER TEST REQUIRED #1: Compile this project in MetaEditor and attach the EA to a chart\n";
@@ -249,28 +291,28 @@ void BuildAndEmitReport()
    string final_status;
    bool data_ok = (g_info_m1.total_bars>0 && g_info_m5.total_bars>0);
    if(fail>0)
-      final_status = "PHASE 1+2+3+4+5 BLOCKED (automated test failure - see detail above)";
+      final_status = "PHASE 1+2+3+4+5+6 BLOCKED (automated test failure - see detail above)";
    else if(!data_ok)
-      final_status = "PHASE 1+2+3+4+5 BLOCKED (historical data unavailable for requested symbol/range)";
+      final_status = "PHASE 1+2+3+4+5+6 BLOCKED (historical data unavailable for requested symbol/range)";
    else if(!InpBrokerOffsetKnown)
-      final_status = "PHASE 1+2+3+4+5 BLOCKED (broker UTC offset not yet verified by user)";
+      final_status = "PHASE 1+2+3+4+5+6 BLOCKED (broker UTC offset not yet verified by user)";
    else
       // This report is only ever printed by the EA's own OnInit() running
       // inside MT5, so reaching this branch already proves compile+attach
       // succeeded - there is nothing further to "wait" on.
-      final_status = "PHASE 1+2+3+4+5 COMPLETE";
+      final_status = "PHASE 1+2+3+4+5+6 COMPLETE";
 
    report += "--- Final Status ---\n" + final_status + "\n";
    report += "===================================================\n";
 
    Print(report);
 
-   int handle = FileOpen("GZ_Phase1_2_3_4_5_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle!=INVALID_HANDLE)
      {
       FileWriteString(handle, report);
       FileClose(handle);
-      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_Report.txt");
+      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_Report.txt");
      }
    else
      {
@@ -286,7 +328,7 @@ int OnInit()
    // Runtime marker: proves the EA currently attached/running is compiled
    // from THIS source file. Printed first, before anything else, and via
    // raw Print() (not CGZLogger) so nothing upstream can suppress it.
-   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260922_V6_PHASE5");
+   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260922_V7_PHASE6");
 
    // Runtime Inputs marker: prints the ACTUAL live values of the inputs
    // this specific EA instance is running with (per-attachment values from
@@ -301,7 +343,7 @@ int OnInit()
       InpBrokerOffsetKnown ? "true" : "false"));
 
    g_logger.EnableVerbose(InpVerboseLogging);
-   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5 starting up (research/diagnostic mode - no trading).");
+   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6 starting up (research/diagnostic mode - no trading).");
 
    //--- Time engine configuration -----------------------------------------
    GZ_TimeConfig time_cfg;
@@ -401,7 +443,7 @@ int OnInit()
       g_logger.Warning("Structure", "No M5 data loaded - swing detection skipped.");
 
    //--- Phase 3+4: Leg Engine + Break Engine + Setup State Machine (diagnostic
-   //--- and Phase 5 entry decision, only). CGZTradeSimulator replays the
+   //--- and Phase 5/6 entry/exit decision, only). CGZTradeSimulator replays the
    //--- already-loaded, already-validated M1+M5 bars and the already-
    //--- confirmed swings (Phase 2) in strict chronological order, with M1
    //--- execution granularity nested inside M5 structure granularity and NO
@@ -428,15 +470,27 @@ int OnInit()
    entry_cfg.penetration_atr_mult = InpEntryPenetrationAtrMult;
    g_entry_engine.Init(entry_cfg);
 
+   GZ_ExitConfig exit_cfg; exit_cfg.Default();
+   exit_cfg.sl_model                = InpSlModel;
+   exit_cfg.sl_buffer_atr_mult      = InpSlBufferAtrMult;
+   exit_cfg.sl_atr_mult             = InpSlAtrMult;
+   exit_cfg.tp_r_multiple           = InpTpRMultiple;
+   exit_cfg.be_trigger_r            = InpBeTriggerR;
+   exit_cfg.be_level_mode           = InpBeLevelMode;
+   exit_cfg.be_level_offset_r       = InpBeLevelOffsetR;
+   exit_cfg.intrabar_conflict_policy= InpIntrabarConflictPolicy;
+   g_exit_engine.Init(exit_cfg);
+
    g_leg_count = 0;
    g_broken_leg_count = 0;
    g_setup_count = 0;
    g_trade_count = 0;
+   g_exit_count = 0;
    if(n5>0)
      {
       g_trade_simulator.Run(m1, m5, g_swings, g_swing_count,
-                             g_leg_engine, g_break_engine, g_setup_sm, g_entry_engine,
-                             g_time_engine, g_session_engine, session_profile, InpApplySessionFilter);
+                             g_leg_engine, g_break_engine, g_setup_sm, g_entry_engine, g_exit_engine,
+                             g_time_engine, g_session_engine, session_profile, InpApplySessionFilter, InpForceSessionExit);
 
       g_leg_count = g_leg_engine.LegCount();
       for(int j=0;j<g_leg_count;j++)
@@ -444,6 +498,7 @@ int OnInit()
             g_broken_leg_count++;
       g_setup_count = g_setup_sm.SetupCount();
       g_trade_count = g_entry_engine.TradeCount();
+      g_exit_count = g_exit_engine.ExitCount();
 
       g_logger.Info("Leg", StringFormat("Phase 3: legs created=%d broken=%d open=%d (variant=%s break=%s buffer_atr=%.2f atr_period=%d)",
                     g_leg_count, g_broken_leg_count, g_leg_count-g_broken_leg_count,
@@ -494,9 +549,27 @@ int OnInit()
         }
       if(g_trade_count>show_trades)
          g_logger.Info("Entry", StringFormat("  ... and %d more trade(s)", g_trade_count-show_trades));
+
+      g_logger.Info("Exit", StringFormat(
+         "Phase 6: exits=%d open=%d TP_HIT=%d SL_HIT=%d BREAK_EVEN=%d SESSION_EXIT=%d DATA_END=%d (sl_model=%s tp=%.2fR be_trigger=%.2fR conflict_policy=%s)",
+         g_exit_count, g_exit_engine.OpenCount(),
+         g_exit_engine.CountByReason(GZ_EXIT_TP_HIT), g_exit_engine.CountByReason(GZ_EXIT_SL_HIT),
+         g_exit_engine.CountByReason(GZ_EXIT_BREAK_EVEN), g_exit_engine.CountByReason(GZ_EXIT_SESSION_EXIT),
+         g_exit_engine.CountByReason(GZ_EXIT_DATA_END),
+         EnumToString(InpSlModel), InpTpRMultiple, InpBeTriggerR, EnumToString(InpIntrabarConflictPolicy)));
+      int show_exits = (g_exit_count<5) ? g_exit_count : 5;
+      for(int j=0;j<show_exits;j++)
+        {
+         GZ_TradeExit ex = g_exit_engine.GetExit(j);
+         g_logger.Info("Exit", StringFormat("  Exit #%d trade=#%d %s sl=%.5f tp=%.5f reason=%s exit=%.5f R=%.3f be=%s at=%s",
+                       (int)ex.trade_id, (int)ex.setup_id, ex.DirectionToString(), ex.sl_price, ex.tp_price,
+                       ex.ExitReasonToString(), ex.exit_price, ex.realized_r, ex.be_triggered?"true":"false", TimeToString(ex.exit_time)));
+        }
+      if(g_exit_count>show_exits)
+         g_logger.Info("Exit", StringFormat("  ... and %d more exit(s)", g_exit_count-show_exits));
      }
    else
-      g_logger.Warning("Leg", "No M5 data loaded - leg/break/setup/entry detection skipped.");
+      g_logger.Warning("Leg", "No M5 data loaded - leg/break/setup/entry/exit detection skipped.");
 
    //--- Run deterministic automated test harness (synthetic data) -------------
    g_harness.RunAll();
@@ -504,7 +577,7 @@ int OnInit()
    //--- Report ------------------------------------------------------------------
    BuildAndEmitReport();
 
-   g_logger.Info("Init", "Phase 1+2+3+4+5 diagnostics complete. STOPPING - not proceeding to Phase 6 (Exit Engine: SL/TP/BE) logic.");
+   g_logger.Info("Init", "Phase 1+2+3+4+5+6 diagnostics complete. STOPPING - not proceeding to Phase 7 (MAE/MFE + R-Path + Event Ledger) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.
@@ -516,7 +589,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5 EA removed.");
+   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6 EA removed.");
   }
 
 //+------------------------------------------------------------------+

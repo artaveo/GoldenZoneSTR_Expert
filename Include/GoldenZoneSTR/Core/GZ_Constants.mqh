@@ -59,4 +59,19 @@
 #define GZ_DEFAULT_ENTRY_PENETRATION_ATR   0.0
 #define GZ_PROJECT_VERSION_P5              "GZ-P5-ROADMAP v1.0"
 
+// Phase 6 - Exit Engine (SL/TP/BE).
+// SL baseline model = STRUCTURE (roadmap lists it first); buffer baseline
+// = 0 ATR (mirrors the Break Engine's own buffer default). ATR SL model's
+// multiple and TP's R-multiple have no stated Roadmap baseline - 1.5 and
+// 2.0 used as conventional defaults (documented, not silently assumed,
+// same pattern as GZ_DEFAULT_ATR_PERIOD in Phase 3). BE baseline = OFF
+// (roadmap's own "OFF" grid value). Intrabar SL/TP conflict baseline =
+// SL_FIRST (conservative - assumes the worse outcome when the true
+// intrabar order cannot be known from OHLC alone).
+#define GZ_DEFAULT_SL_BUFFER_ATR      0.0
+#define GZ_DEFAULT_SL_ATR_MULT        1.5
+#define GZ_DEFAULT_TP_R_MULTIPLE      2.0
+#define GZ_DEFAULT_BE_TRIGGER_R       0.0
+#define GZ_PROJECT_VERSION_P6         "GZ-P6-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__
