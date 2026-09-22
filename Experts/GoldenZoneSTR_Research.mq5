@@ -50,11 +50,11 @@ input bool                InpLoadM15            = false;
 
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
-CGZDataProvider   g_provider(NULL);
-CGZDataValidator  g_validator(NULL);
-CGZTimeEngine     g_time_engine(NULL);
+CGZDataProvider   g_provider(GetPointer(g_logger));
+CGZDataValidator  g_validator(GetPointer(g_logger));
+CGZTimeEngine     g_time_engine(GetPointer(g_logger));
 CGZSessionEngine  g_session_engine;
-CGZTestHarness    g_harness(NULL);
+CGZTestHarness    g_harness(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;

@@ -36,6 +36,15 @@ private:
          m_logger.Debug("DataProvider","Reversed array to enforce chronological order");
      }
 
+   //--- readable timeframe label, e.g. PERIOD_M1 -> "M1" ------------------
+   string TfLabel(ENUM_TIMEFRAMES tf) const
+     {
+      string s = EnumToString(tf);
+      if(StringFind(s,"PERIOD_")==0)
+         return StringSubstr(s,7);
+      return s;
+     }
+
 public:
                      CGZDataProvider(CGZLogger *logger=NULL) { m_logger=logger; }
 
@@ -46,60 +55,84 @@ public:
       if(symbol=="" )
         {
          if(m_logger!=NULL) m_logger.Error("DataProvider","Empty symbol supplied");
+         Print("[GZ][DataProvider][ERROR] Empty symbol supplied");
          return 0;
         }
       if(end!=0 && start!=0 && end<start)
         {
          if(m_logger!=NULL) m_logger.Error("DataProvider","end < start in requested range");
+         Print("[GZ][DataProvider][ERROR] end < start in requested range");
          return 0;
         }
 
+      string tf_name    = TfLabel(tf);
+      string start_str  = TimeToString(start, TIME_DATE|TIME_MINUTES);
+      string end_str    = TimeToString(end,   TIME_DATE|TIME_MINUTES);
+
       int copied = CopyRates(symbol, tf, start, end, rates);
+
+      // Capture the error code IMMEDIATELY after CopyRates() - before any
+      // other API call (SeriesInfoInteger included) can overwrite it.
+      int last_error = GetLastError();
+
       if(copied<=0)
         {
-         // Capture the error code immediately - before any other API call
-         // (including the SeriesInfoInteger() diagnostics below) can
-         // overwrite it via GetLastError().
-         int last_error = GetLastError();
-
-         // Additional standard-MQL5 diagnostics: distinguishes "terminal
-         // simply doesn't have this history yet" from other CopyRates
-         // failure modes, without guessing at what LastError means.
+         // Standard-MQL5 series diagnostics. Their own possible internal
+         // errors are irrelevant here - the real last_error was already
+         // captured above, before these ran.
          long     series_bars     = SeriesInfoInteger(symbol, tf, SERIES_BARS_COUNT);
          datetime series_first    = (datetime)SeriesInfoInteger(symbol, tf, SERIES_FIRSTDATE);
          datetime terminal_first  = (datetime)SeriesInfoInteger(symbol, tf, SERIES_TERMINAL_FIRSTDATE);
          bool     series_synced   = (bool)SeriesInfoInteger(symbol, tf, SERIES_SYNCHRONIZED);
 
-         string diag = StringFormat(
-            "CopyRates FAILED\n"+
-            "Symbol=%s\n"+
-            "Timeframe=%s\n"+
-            "Start=%s\n"+
-            "End=%s\n"+
-            "CopyRatesResult=%d\n"+
-            "LastError=%d\n"+
-            "SeriesBarsInTerminal=%d\n"+
-            "SeriesFirstDate=%s\n"+
-            "TerminalFirstDate=%s\n"+
-            "SeriesSynchronized=%s",
-            symbol, EnumToString(tf),
-            TimeToString(start, TIME_DATE|TIME_MINUTES),
-            TimeToString(end,   TIME_DATE|TIME_MINUTES),
-            copied, last_error,
-            series_bars,
-            TimeToString(series_first,   TIME_DATE|TIME_MINUTES),
-            TimeToString(terminal_first, TIME_DATE|TIME_MINUTES),
-            series_synced ? "true" : "false");
+         // (A) GUARANTEED-VISIBLE diagnostic: raw Print(), one field per
+         // line, called unconditionally. This does NOT go through
+         // CGZLogger at all, so it cannot be lost to a NULL logger
+         // pointer, a min-level filter, or any future logger change.
+         Print("[GZ][DataProvider][CopyRates FAILED]");
+         Print("Symbol=", symbol);
+         Print("Timeframe=", tf_name);
+         Print("Start=", start_str);
+         Print("End=", end_str);
+         Print("CopyRatesResult=", copied);
+         Print("LastError=", last_error);
+         Print("SeriesBarsInTerminal=", series_bars);
+         Print("SeriesFirstDate=", TimeToString(series_first, TIME_DATE|TIME_MINUTES));
+         Print("TerminalFirstDate=", TimeToString(terminal_first, TIME_DATE|TIME_MINUTES));
+         Print("SeriesSynchronized=", (series_synced ? "true" : "false"));
 
+         // (B) Same information again through the structured logger, kept
+         // ONLY as a secondary/formatted copy for consistency with the
+         // rest of the system's log style - (A) above is the one this
+         // diagnostic actually depends on.
          if(m_logger!=NULL)
+           {
+            string diag = StringFormat(
+               "CopyRates FAILED | Symbol=%s Timeframe=%s Start=%s End=%s "+
+               "CopyRatesResult=%d LastError=%d SeriesBarsInTerminal=%d "+
+               "SeriesFirstDate=%s TerminalFirstDate=%s SeriesSynchronized=%s",
+               symbol, tf_name, start_str, end_str, copied, last_error,
+               series_bars,
+               TimeToString(series_first,TIME_DATE|TIME_MINUTES),
+               TimeToString(terminal_first,TIME_DATE|TIME_MINUTES),
+               series_synced?"true":"false");
             m_logger.Warning("DataProvider", diag);
-         else
-            Print("[GZ][DataProvider][CopyRates FAILED]\n", diag);
+           }
 
          return 0;
         }
 
       EnsureChronological(rates);
+
+      // Symmetric success diagnostic - same guaranteed-visible pattern as
+      // the failure case above, so a successful timeframe (e.g. M5) and a
+      // failing one (e.g. M1) produce directly comparable log blocks.
+      Print("[GZ][DataProvider][CopyRates OK]");
+      Print("Symbol=", symbol);
+      Print("Timeframe=", tf_name);
+      Print("Bars=", copied);
+      Print("First=", TimeToString(rates[0].time, TIME_DATE|TIME_MINUTES));
+      Print("Last=", TimeToString(rates[copied-1].time, TIME_DATE|TIME_MINUTES));
 
       if(m_logger!=NULL)
          m_logger.Info("DataProvider", StringFormat("Loaded %d bars for %s [%s .. %s]",
