@@ -1,26 +1,28 @@
 //+------------------------------------------------------------------+
 //|                                    GoldenZoneSTR_Research.mq5    |
 //|                                                                    |
-//| GoldenZone STR - Phase 1 + Phase 2 + Phase 3 Research EA          |
+//| GoldenZone STR - Phase 1 + Phase 2 + Phase 3 + Phase 4 Research EA |
 //| Phase 1: Data Layer + Data Validator + Time Engine                |
 //| Phase 2: M5 Structure Engine (swing/pivot detection)               |
 //| Phase 3: Leg Engine + Break Engine                                 |
+//| Phase 4: Fibonacci Engine + Setup State Machine                    |
 //|                                                                    |
 //| SCOPE: This EA implements ONLY Phase 1 (Data/Validator/Time/      |
 //| Session/Diagnostics/TestHarness), Phase 2 (M5 swing/pivot         |
-//| detection) and Phase 3 (Leg Engine + Break Engine). It contains   |
-//| NO fibonacci, setup-state-machine, entry, exit, filter or trade-  |
-//| management logic (Phase 4+), and it places NO live orders. On     |
-//| init it loads historical data, runs validation, runs swing        |
-//| detection, runs leg/break detection diagnostically over the       |
-//| loaded M5 data, runs the deterministic T01-T34 test harness, and  |
+//| detection), Phase 3 (Leg Engine + Break Engine) and Phase 4        |
+//| (Fibonacci Engine + Setup State Machine). It contains NO entry,   |
+//| exit, filter or trade-management logic (Phase 5+), and it places  |
+//| NO live orders. On init it loads historical data, runs validation,|
+//| runs swing detection, runs leg/break detection, runs the setup    |
+//| lifecycle (fib zone + cancellation) diagnostically over the       |
+//| loaded M5 data, runs the deterministic T01-T45 test harness, and  |
 //| prints a completion report. Then it stops - it does not trade and |
-//| does not proceed to Phase 4 (Fibonacci/Setup State Machine)       |
+//| does not proceed to Phase 5 (Entry Engine + Trade Simulator)      |
 //| logic.                                                             |
 //+------------------------------------------------------------------+
 #property copyright "GoldenZone STR"
-#property version   "1.20"
-#property description "Phase 1+2+3: Data/Validator/Time Engine + M5 Structure (Swing) Engine + Leg/Break Engine (research/diagnostic only, no trading)"
+#property version   "1.30"
+#property description "Phase 1+2+3+4: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine (research/diagnostic only, no trading)"
 
 #include <GoldenZoneSTR\Core\GZ_Types.mqh>
 #include <GoldenZoneSTR\Core\GZ_Config.mqh>
@@ -36,16 +38,17 @@
 #include <GoldenZoneSTR\Leg\GZ_ATR.mqh>
 #include <GoldenZoneSTR\Leg\GZ_LegEngine.mqh>
 #include <GoldenZoneSTR\Leg\GZ_BreakEngine.mqh>
+#include <GoldenZoneSTR\Setup\GZ_SetupTypes.mqh>
+#include <GoldenZoneSTR\Setup\GZ_FibEngine.mqh>
+#include <GoldenZoneSTR\Setup\GZ_SetupStateMachine.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
 //--- Inputs -----------------------------------------------------------------
 input string             InpSymbol            = "XAUUSD";
-//input datetime            InpRangeStart         = D'2026.01.01 00:00';
-//input datetime            InpRangeStart         = D'2026.01.12 00:00';
-//input datetime            InpRangeEnd           = D'2026.03.31 23:59';
-input datetime InpRangeStart = D'2026.06.12 00:00';
-input datetime InpRangeEnd   = D'2026.06.13 00:00';
+input string             InpSymbol            = "XAUUSD";
+input datetime            InpRangeStart         = D'2026.01.01 00:00';
+input datetime            InpRangeEnd            = D'2026.06.13 00:00';
 
 input ENUM_GZ_TIME_MODE  InpTimeMode          = GZ_TIME_BROKER;
 input ENUM_GZ_DST_MODE   InpDstMode           = GZ_DST_AUTO;
@@ -71,6 +74,12 @@ input ENUM_GZ_BREAK_MODE  InpBreakMode          = GZ_BREAK_CLOSE;             //
 input double               InpBreakBufferAtrMult = 0.0;    // research grid: 0/0.05/0.10/0.15/0.20/0.30/0.50
 input int                 InpAtrPeriod          = 14;      // research grid: 5/10/14/20/30 (no roadmap baseline stated)
 
+//--- Phase 4: Fibonacci Engine + Setup State Machine --------------------------
+input double               InpFibZoneMinRatio    = 0.30;   // research grid 0.30-0.90; architecture extensible to 0.01 steps
+input double               InpFibZoneMaxRatio    = 0.90;
+input bool                 InpApplySessionFilter = false;  // if true, a setup is cancelled (SESSION_END) once price moves
+                                                             // outside the Phase 1 session window (InpSession*) before entry
+
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
 CGZDataProvider   g_provider(GetPointer(g_logger));
@@ -81,6 +90,7 @@ CGZTestHarness    g_harness(GetPointer(g_logger));
 CGZSwingEngine    g_swing_engine(GetPointer(g_logger));
 CGZLegEngine      g_leg_engine(GetPointer(g_logger));
 CGZBreakEngine    g_break_engine(GetPointer(g_logger));
+CGZSetupStateMachine g_setup_sm(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;
@@ -93,6 +103,9 @@ int               g_swing_count = 0;
 int               g_leg_count = 0;
 int               g_broken_leg_count = 0;
 
+//--- Phase 4 diagnostic results (setup lifecycle over the loaded range) -------
+int               g_setup_count = 0;
+
 //+------------------------------------------------------------------+
 //| Build and print/save the Phase 1 completion report                |
 //+------------------------------------------------------------------+
@@ -100,8 +113,8 @@ void BuildAndEmitReport()
   {
    string report = "";
    report += "===================================================\n";
-   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 COMPLETION REPORT\n";
-   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + "\n";
+   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 COMPLETION REPORT\n";
+   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + "\n";
    report += " Generated (terminal local time, diagnostic only): " + TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS) + "\n";
    report += "===================================================\n\n";
 
@@ -110,10 +123,12 @@ void BuildAndEmitReport()
    report += "       GZ_DatasetInfo, GZ_TimeEngine, GZ_DST, GZ_Session, GZ_Logger, GZ_TestHarness\n";
    report += "Phase 2 files: GZ_StructureTypes, GZ_SwingEngine\n";
    report += "Phase 3 files: GZ_LegTypes, GZ_ATR, GZ_LegEngine, GZ_BreakEngine\n";
+   report += "Phase 4 files: GZ_SetupTypes, GZ_FibEngine, GZ_SetupStateMachine\n";
    report += "Interfaces: GZ_TimeContext, CGZDatasetInfo (Phase 1), GZ_Swing / CGZSwingEngine (Phase 2),\n";
-   report += "            GZ_Leg / CGZLegEngine / CGZBreakEngine (Phase 3) - all consumed by later\n";
-   report += "            phases; Update()/UpdateBar()/OnBar()/CheckBreak() are live-safe, DetectAll()\n";
-   report += "            is research-batch\n\n";
+   report += "            GZ_Leg / CGZLegEngine / CGZBreakEngine (Phase 3), GZ_Setup / CGZFibEngine /\n";
+   report += "            CGZSetupStateMachine (Phase 4) - all consumed by later phases; Update()/\n";
+   report += "            UpdateBar()/OnBar()/CheckBreak()/OnLegCreated()/OnLegBroken() are live-safe,\n";
+   report += "            DetectAll() is research-batch\n\n";
 
    report += "--- Data Validation: M1 ---\n";
    report += StringFormat("Symbol=%s Bars=%d First=%s Last=%s\n",
@@ -154,10 +169,23 @@ void BuildAndEmitReport()
               g_leg_count, g_broken_leg_count, g_leg_count-g_broken_leg_count);
    report += "No lookahead: a leg's extreme only ever consumes bars at/after its target swing's\n";
    report += "confirmation time (see T27), and a break is only ever confirmed on the exact bar\n";
-   report += "that clears the configured level+buffer (see T34). No fib/setup-state/entry/exit\n";
-   report += "logic consumes this output yet - deferred to Phase 4.\n\n";
+   report += "that clears the configured level+buffer (see T34). Consumed by Phase 4 below.\n\n";
 
-   report += "--- Automated Test Results (T01-T34: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3) ---\n";
+   report += "--- Phase 4: Fibonacci Engine + Setup State Machine ---\n";
+   report += StringFormat("FibZone ratio=[%.2f,%.2f] SessionFilter=%s\n",
+              InpFibZoneMinRatio, InpFibZoneMaxRatio, InpApplySessionFilter?"true":"false");
+   report += StringFormat("Setups=%d  LEG_DETECTED=%d  FIB_ACTIVE=%d  WAITING_ENTRY=%d  CANCELLED=%d\n",
+              g_setup_count, g_setup_sm.CountByState(GZ_SETUP_LEG_DETECTED), g_setup_sm.CountByState(GZ_SETUP_FIB_ACTIVE),
+              g_setup_sm.CountByState(GZ_SETUP_WAITING_ENTRY), g_setup_sm.CountByState(GZ_SETUP_CANCELLED));
+   report += StringFormat("Cancel reasons: OPPOSITE_BREAK=%d NEW_VALID_SETUP=%d SESSION_END=%d DATA_END=%d\n",
+              g_setup_sm.CountTerminalByReason(GZ_CANCEL_OPPOSITE_BREAK), g_setup_sm.CountTerminalByReason(GZ_CANCEL_NEW_VALID_SETUP),
+              g_setup_sm.CountTerminalByReason(GZ_CANCEL_SESSION_END), g_setup_sm.CountTerminalByReason(GZ_CANCEL_DATA_END));
+   report += "At most one non-terminal setup per direction is ever left standing after a new leg\n";
+   report += "is created (see T41); an opposite-direction break cancels whatever is still open on\n";
+   report += "the other side (see T42). ENTERED/EXITED are stub states, never assigned here - no\n";
+   report += "entry/exit logic consumes this output yet - deferred to Phase 5.\n\n";
+
+   report += "--- Automated Test Results (T01-T45: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -168,14 +196,17 @@ void BuildAndEmitReport()
    report += StringFormat("\nTOTAL: %d PASS / %d FAIL (of %d)\n\n", pass, fail, g_harness.ResultCount());
 
    report += "--- Known Limitations / Deferred Work ---\n";
-   report += "DEFERRED TO PHASE 4: Fibonacci Engine, Setup State Machine - not implemented, by design.\n";
-   report += "DEFERRED TO PHASE 5+: Entry/Exit, Trade Simulator, Filters, Metrics, Experiment Runner.\n";
+   report += "DEFERRED TO PHASE 5: Entry Engine, Trade Simulator - not implemented, by design.\n";
+   report += "DEFERRED TO PHASE 6+: Exit Engine, MAE/MFE, Event Ledger, Metrics, Filters, Experiment Runner.\n";
    report += "Weekend-gap classification uses a Saturday-presence heuristic; broker-specific holiday\n";
    report += "calendars are not modeled and would need broker session data if required later.\n";
-   report += "Phase 3 leg/break detection is diagnostic-only in this report; when multiple legs are\n";
-   report += "open at once, selecting/cancelling among them is explicitly Phase 4's job (Setup State\n";
-   report += "Machine), not decided here. No baseline ATR period was stated in the Roadmap for the\n";
-   report += "Break Engine buffer; 14 is used as a documented, configurable default (InpAtrPeriod).\n\n";
+   report += "Phase 4 setup lifecycle is diagnostic-only in this report; a setup that reaches\n";
+   report += "WAITING_ENTRY simply stays there until cancelled or the data range ends - deciding\n";
+   report += "when it is actually ENTERED is explicitly Phase 5's job (Entry Engine), not decided\n";
+   report += "here. INVALID_PENETRATION cancellation is defined but never triggered in this build -\n";
+   report += "it depends on the Entry Engine's penetration parameter (Phase 5). SESSION_END\n";
+   report += "cancellation only fires when InpApplySessionFilter=true (default false, since the\n";
+   report += "Roadmap does not state whether every setup should be session-scoped by default).\n\n";
 
    report += "--- User Verification Required ---\n";
    report += "USER TEST REQUIRED #1: Compile this project in MetaEditor and attach the EA to a chart\n";
@@ -187,30 +218,28 @@ void BuildAndEmitReport()
    string final_status;
    bool data_ok = (g_info_m1.total_bars>0 && g_info_m5.total_bars>0);
    if(fail>0)
-      final_status = "PHASE 1+2+3 BLOCKED (automated test failure - see detail above)";
+      final_status = "PHASE 1+2+3+4 BLOCKED (automated test failure - see detail above)";
    else if(!data_ok)
-      final_status = "PHASE 1+2+3 BLOCKED (historical data unavailable for requested symbol/range)";
+      final_status = "PHASE 1+2+3+4 BLOCKED (historical data unavailable for requested symbol/range)";
    else if(!InpBrokerOffsetKnown)
-      final_status = "PHASE 1+2+3 BLOCKED (broker UTC offset not yet verified by user)";
+      final_status = "PHASE 1+2+3+4 BLOCKED (broker UTC offset not yet verified by user)";
    else
       // This report is only ever printed by the EA's own OnInit() running
       // inside MT5, so reaching this branch already proves compile+attach
-      // succeeded - there is nothing further to "wait" on. (Earlier builds
-      // of this report incorrectly stayed BLOCKED here even after a
-      // successful run; fixed as part of Phase 3.)
-      final_status = "PHASE 1+2+3 COMPLETE";
+      // succeeded - there is nothing further to "wait" on.
+      final_status = "PHASE 1+2+3+4 COMPLETE";
 
    report += "--- Final Status ---\n" + final_status + "\n";
    report += "===================================================\n";
 
    Print(report);
 
-   int handle = FileOpen("GZ_Phase1_2_3_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   int handle = FileOpen("GZ_Phase1_2_3_4_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle!=INVALID_HANDLE)
      {
       FileWriteString(handle, report);
       FileClose(handle);
-      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_Report.txt");
+      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_Report.txt");
      }
    else
      {
@@ -226,7 +255,7 @@ int OnInit()
    // Runtime marker: proves the EA currently attached/running is compiled
    // from THIS source file. Printed first, before anything else, and via
    // raw Print() (not CGZLogger) so nothing upstream can suppress it.
-   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260922_V4_PHASE3");
+   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260922_V5_PHASE4");
 
    // Runtime Inputs marker: prints the ACTUAL live values of the inputs
    // this specific EA instance is running with (per-attachment values from
@@ -241,7 +270,7 @@ int OnInit()
       InpBrokerOffsetKnown ? "true" : "false"));
 
    g_logger.EnableVerbose(InpVerboseLogging);
-   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3 starting up (research/diagnostic mode - no trading).");
+   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4 starting up (research/diagnostic mode - no trading).");
 
    //--- Time engine configuration -----------------------------------------
    GZ_TimeConfig time_cfg;
@@ -340,19 +369,21 @@ int OnInit()
    else
       g_logger.Warning("Structure", "No M5 data loaded - swing detection skipped.");
 
-   //--- Phase 3: Leg Engine + Break Engine (diagnostic only) -------------------
-   // Replays the already-loaded, already-validated M5 bars and the already-
-   // confirmed swings (from Phase 2 above) in chronological order, exactly as
-   // a live/forward-testing context would receive them one bar at a time:
+   //--- Phase 3+4: Leg Engine + Break Engine + Setup State Machine (diagnostic
+   //--- only). Replays the already-loaded, already-validated M5 bars and the
+   //--- already-confirmed swings (Phase 2) in chronological order, exactly as
+   //--- a live/forward-testing context would receive them one bar at a time:
    //   1. feed any swing(s) confirmed AT this bar's time into the Leg Engine
-   //      (candidate leg creation - see GZ_LegEngine.Update)
+   //      (candidate leg creation) -> feed each newly-created leg into the
+   //      Setup State Machine (OnLegCreated)
    //   2. extend every still-open leg's extreme with this bar
-   //      (see GZ_LegEngine.UpdateBar)
    //   3. advance the shared ATR calculation with this bar
-   //   4. check every still-open leg for a break on this bar
-   // ATR passed to leg creation (step 1) is the value as of the PREVIOUS bar
-   // (i.e. before step 3 runs for the current bar) - deterministic and never
-   // looks ahead into the bar that is only now being processed.
+   //   4. check every still-open leg for a break on this bar -> feed any
+   //      newly-broken leg into the Setup State Machine (OnLegBroken)
+   //   5. feed this bar + its session status into the Setup State Machine
+   //      (OnBar) regardless of whether anything broke on it
+   // ATR passed to leg creation (step 1) is the value as of the PREVIOUS bar -
+   // deterministic and never looks ahead into the bar being processed.
    g_leg_engine.Init(InpLegVariant);
    GZ_BreakConfig break_cfg; break_cfg.Default();
    break_cfg.mode            = InpBreakMode;
@@ -360,8 +391,16 @@ int OnInit()
    break_cfg.atr_period      = InpAtrPeriod;
    g_break_engine.Configure(break_cfg);
 
+   g_setup_sm.Init(InpFibZoneMinRatio, InpFibZoneMaxRatio);
+   GZ_SessionProfile session_profile;
+   session_profile.Set("PROFILE_01", "Session", InpTimeMode,
+                        InpSessionStartHour, InpSessionStartMinute,
+                        InpSessionEndHour, InpSessionEndMinute,
+                        InpSessionInclude, true);
+
    g_leg_count = 0;
    g_broken_leg_count = 0;
+   g_setup_count = 0;
    if(n5>0)
      {
       int swing_ptr = 0;
@@ -372,7 +411,8 @@ int OnInit()
          while(swing_ptr<g_swing_count && g_swings[swing_ptr].confirmation_time==bar.time)
            {
             int new_idx=-1;
-            g_leg_engine.Update(g_swings[swing_ptr], g_break_engine.CurrentAtr(), g_break_engine.AtrReady(), new_idx);
+            if(g_leg_engine.Update(g_swings[swing_ptr], g_break_engine.CurrentAtr(), g_break_engine.AtrReady(), new_idx))
+               g_setup_sm.OnLegCreated(g_leg_engine.GetLeg(new_idx));
             swing_ptr++;
            }
 
@@ -386,14 +426,25 @@ int OnInit()
             if(leg.broken)
                continue;
             if(g_break_engine.CheckBreak(leg, bar))
+              {
                g_leg_engine.SetLeg(j, leg);
+               g_setup_sm.OnLegBroken(leg);
+              }
            }
+
+         GZ_TimeContext bar_ctx;
+         g_time_engine.BuildContext(bar.time, bar_ctx);
+         bool inside_session = (g_session_engine.Evaluate(bar_ctx, session_profile)==GZ_SESSION_INSIDE);
+         g_setup_sm.OnBar(bar, inside_session, InpApplySessionFilter);
         }
+
+      g_setup_sm.OnDataEnd(m5[n5-1].time);
 
       g_leg_count = g_leg_engine.LegCount();
       for(int j=0;j<g_leg_count;j++)
          if(g_leg_engine.GetLeg(j).broken)
             g_broken_leg_count++;
+      g_setup_count = g_setup_sm.SetupCount();
 
       g_logger.Info("Leg", StringFormat("Phase 3: legs created=%d broken=%d open=%d (variant=%s break=%s buffer_atr=%.2f atr_period=%d)",
                     g_leg_count, g_broken_leg_count, g_leg_count-g_broken_leg_count,
@@ -409,9 +460,29 @@ int OnInit()
         }
       if(g_leg_count>show_legs)
          g_logger.Info("Leg", StringFormat("  ... and %d more leg(s)", g_leg_count-show_legs));
+
+      g_logger.Info("Setup", StringFormat(
+         "Phase 4: setups=%d LEG_DETECTED=%d FIB_ACTIVE=%d WAITING_ENTRY=%d CANCELLED=%d (zone=[%.2f,%.2f] session_filter=%s)",
+         g_setup_count, g_setup_sm.CountByState(GZ_SETUP_LEG_DETECTED), g_setup_sm.CountByState(GZ_SETUP_FIB_ACTIVE),
+         g_setup_sm.CountByState(GZ_SETUP_WAITING_ENTRY), g_setup_sm.CountByState(GZ_SETUP_CANCELLED),
+         InpFibZoneMinRatio, InpFibZoneMaxRatio, InpApplySessionFilter?"true":"false"));
+      g_logger.Info("Setup", StringFormat(
+         "  Cancel reasons: OPPOSITE_BREAK=%d NEW_VALID_SETUP=%d SESSION_END=%d DATA_END=%d",
+         g_setup_sm.CountTerminalByReason(GZ_CANCEL_OPPOSITE_BREAK), g_setup_sm.CountTerminalByReason(GZ_CANCEL_NEW_VALID_SETUP),
+         g_setup_sm.CountTerminalByReason(GZ_CANCEL_SESSION_END), g_setup_sm.CountTerminalByReason(GZ_CANCEL_DATA_END)));
+      int show_setups = (g_setup_count<5) ? g_setup_count : 5;
+      for(int j=0;j<show_setups;j++)
+        {
+         GZ_Setup s = g_setup_sm.GetSetup(j);
+         g_logger.Info("Setup", StringFormat("  Setup #%d %s state=%s origin=%.5f target=%.5f zone=[%.5f,%.5f] reason=%s",
+                       (int)s.id, s.leg.DirectionToString(), s.StateToString(), s.leg.origin_swing.price, s.leg.target_swing.price,
+                       s.zone_min_price, s.zone_max_price, s.CancelReasonToString()));
+        }
+      if(g_setup_count>show_setups)
+         g_logger.Info("Setup", StringFormat("  ... and %d more setup(s)", g_setup_count-show_setups));
      }
    else
-      g_logger.Warning("Leg", "No M5 data loaded - leg/break detection skipped.");
+      g_logger.Warning("Leg", "No M5 data loaded - leg/break/setup detection skipped.");
 
    //--- Run deterministic automated test harness (synthetic data) -------------
    g_harness.RunAll();
@@ -419,7 +490,7 @@ int OnInit()
    //--- Report ------------------------------------------------------------------
    BuildAndEmitReport();
 
-   g_logger.Info("Init", "Phase 1+2+3 diagnostics complete. STOPPING - not proceeding to Phase 4 (Fibonacci/Setup State Machine) logic.");
+   g_logger.Info("Init", "Phase 1+2+3+4 diagnostics complete. STOPPING - not proceeding to Phase 5 (Entry Engine + Trade Simulator) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.
@@ -431,7 +502,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3 EA removed.");
+   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4 EA removed.");
   }
 
 //+------------------------------------------------------------------+

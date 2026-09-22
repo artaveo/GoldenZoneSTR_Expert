@@ -37,4 +37,14 @@
 #define GZ_DEFAULT_ATR_PERIOD        14
 #define GZ_PROJECT_VERSION_P3        "GZ-P3-ROADMAP v1.0"
 
+// Phase 4 - Fibonacci Engine + Setup State Machine.
+// Research levels: 0.30-0.90 grid, including 0.78, architecture extensible
+// to 0.01 increments (Roadmap). The watched "zone" for WAITING_ENTRY is the
+// price interval spanned by [min,max] of that grid; no single baseline
+// ratio is stated in the Roadmap for the zone bounds themselves, so the
+// grid's own min/max are used directly - documented, not silently assumed.
+#define GZ_DEFAULT_FIB_ZONE_MIN_RATIO  0.30
+#define GZ_DEFAULT_FIB_ZONE_MAX_RATIO  0.90
+#define GZ_PROJECT_VERSION_P4          "GZ-P4-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__

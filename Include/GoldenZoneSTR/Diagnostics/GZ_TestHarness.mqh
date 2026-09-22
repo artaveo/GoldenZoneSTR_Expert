@@ -4,6 +4,7 @@
 //| Phase 1 (T01-T18): Data Layer + Validator + Time Engine           |
 //| Phase 2 (T19-T23): M5 Structure Engine (swing detection)          |
 //| Phase 3 (T24-T34): Leg Engine + Break Engine                      |
+//| Phase 4 (T35-T45): Fibonacci Engine + Setup State Machine         |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -27,6 +28,9 @@
 #include "..\Leg\GZ_ATR.mqh"
 #include "..\Leg\GZ_LegEngine.mqh"
 #include "..\Leg\GZ_BreakEngine.mqh"
+#include "..\Setup\GZ_SetupTypes.mqh"
+#include "..\Setup\GZ_FibEngine.mqh"
+#include "..\Setup\GZ_SetupStateMachine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -934,6 +938,337 @@ public:
                 premature?"true":"false", confirmed_on_time?"true":"false", TimeToString(leg.break_time)));
      }
 
+   //--- T35: Fib price-at-ratio, BULLISH leg (0%=extreme/high, 100%=origin/low)
+   void T35_FibPriceBullish()
+     {
+      GZ_Leg leg; leg.Clear();
+      leg.direction = GZ_LEG_BULLISH;
+      leg.extreme_price = 110.0;
+      leg.origin_swing.price = 90.0;
+
+      double price = CGZFibEngine::PriceAtRatio(leg, 0.618);
+      double expected = 110.0 - 0.618*(110.0-90.0); // 97.64
+
+      bool ok = MathAbs(price-expected)<0.0001;
+      AddResult("T35", ok, StringFormat("price=%.4f expected=%.4f", price, expected));
+     }
+
+   //--- T36: Fib price-at-ratio, BEARISH leg (0%=extreme/low, 100%=origin/high)
+   void T36_FibPriceBearish()
+     {
+      GZ_Leg leg; leg.Clear();
+      leg.direction = GZ_LEG_BEARISH;
+      leg.extreme_price = 90.0;
+      leg.origin_swing.price = 110.0;
+
+      double price = CGZFibEngine::PriceAtRatio(leg, 0.618);
+      double expected = 90.0 + 0.618*(110.0-90.0); // 102.36
+
+      bool ok = MathAbs(price-expected)<0.0001;
+      AddResult("T36", ok, StringFormat("price=%.4f expected=%.4f", price, expected));
+     }
+
+   //--- T37: Zone/bar overlap detection (order-independent, partial overlap
+   //--- counts as a touch). -------------------------------------------------
+   void T37_FibZoneOverlap()
+     {
+      GZ_Leg leg; leg.Clear();
+      leg.direction = GZ_LEG_BULLISH;
+      leg.extreme_price = 110.0;        // ratio 0.30 -> 104.0, ratio 0.90 -> 92.0
+      leg.origin_swing.price = 90.0;
+
+      MqlRates inside  = MakeBar(0, 94,95,93,94);     // fully inside [92,104]
+      MqlRates below   = MakeBar(0, 90,91,89,90);     // fully below, no overlap
+      MqlRates partial = MakeBar(0, 103,105,101,104); // straddles the top edge
+
+      bool touches_inside  = CGZFibEngine::DoesBarTouchZone(leg, 0.30, 0.90, inside);
+      bool touches_below   = CGZFibEngine::DoesBarTouchZone(leg, 0.30, 0.90, below);
+      bool touches_partial = CGZFibEngine::DoesBarTouchZone(leg, 0.30, 0.90, partial);
+
+      bool ok = touches_inside && (!touches_below) && touches_partial;
+      AddResult("T37", ok, StringFormat("inside=%s below=%s partial=%s",
+                touches_inside?"true":"false", touches_below?"true":"false", touches_partial?"true":"false"));
+     }
+
+   //--- T38: A newly-created leg produces a setup in LEG_DETECTED. ---------
+   void T38_SetupCreatedOnLegDetected()
+     {
+      datetime t0 = MakeTime(2026,1,6,9,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int i1=-1; legEngine.Update(low1,0.0,false,i1);
+      int i2=-1; legEngine.Update(high1,0.0,false,i2);
+      GZ_Leg leg = legEngine.GetLeg(i2);
+
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      int si = sm.OnLegCreated(leg);
+      GZ_Setup setup = sm.GetSetup(si);
+
+      bool ok = (setup.state==GZ_SETUP_LEG_DETECTED) && (setup.leg.id==leg.id) &&
+                (setup.detected_time==high1.confirmation_time);
+      AddResult("T38", ok, StringFormat("state=%s detected_time=%s", setup.StateToString(), TimeToString(setup.detected_time)));
+     }
+
+   //--- T39: A confirmed break locks the setup and activates its fib zone
+   //--- (LEG_LOCKED -> FIB_ACTIVE cascade), zone bounds exactly match
+   //--- CGZFibEngine at the configured ratios. -----------------------------
+   void T39_SetupLocksAndActivatesFib()
+     {
+      datetime t0 = MakeTime(2026,1,6,10,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int i1=-1; legEngine.Update(low1,0.0,false,i1);
+      int i2=-1; legEngine.Update(high1,0.0,false,i2);
+      GZ_Leg leg = legEngine.GetLeg(i2);
+
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      int si = sm.OnLegCreated(leg);
+
+      GZ_BreakConfig cfg; cfg.Default(); // CLOSE, buffer=0
+      CGZBreakEngine breakEngine(m_logger); breakEngine.Configure(cfg);
+
+      MqlRates breakBar = MakeBar(t0+8*300, 109,112,108,111); // close=111>110, high=112
+      legEngine.UpdateBar(breakBar);
+      GZ_Leg legAfterExtreme = legEngine.GetLeg(i2); // extreme now 112
+      breakEngine.OnBar(breakBar);
+      bool broke = breakEngine.CheckBreak(legAfterExtreme, breakBar);
+      legEngine.SetLeg(i2, legAfterExtreme);
+
+      sm.OnLegBroken(legAfterExtreme);
+      GZ_Setup setup = sm.GetSetup(si);
+
+      // extreme=112, origin=90 -> zone@0.30=112-0.30*22=105.4, zone@0.90=112-0.90*22=92.2
+      bool ok = broke && (setup.state==GZ_SETUP_FIB_ACTIVE) && (setup.locked_time==legAfterExtreme.break_time) &&
+                (MathAbs(setup.zone_min_price-105.4)<0.0001) && (MathAbs(setup.zone_max_price-92.2)<0.0001);
+      AddResult("T39", ok, StringFormat("state=%s zone_min=%.4f zone_max=%.4f", setup.StateToString(), setup.zone_min_price, setup.zone_max_price));
+     }
+
+   //--- T40: Once FIB_ACTIVE, a bar whose range touches the fib zone
+   //--- advances the setup to WAITING_ENTRY. --------------------------------
+   void T40_SetupWaitingEntryOnZoneTouch()
+     {
+      datetime t0 = MakeTime(2026,1,6,11,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int i1=-1; legEngine.Update(low1,0.0,false,i1);
+      int i2=-1; legEngine.Update(high1,0.0,false,i2);
+      GZ_Leg leg = legEngine.GetLeg(i2);
+
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      int si = sm.OnLegCreated(leg);
+
+      GZ_BreakConfig cfg; cfg.Default();
+      CGZBreakEngine breakEngine(m_logger); breakEngine.Configure(cfg);
+      MqlRates breakBar = MakeBar(t0+8*300, 109,112,108,111);
+      legEngine.UpdateBar(breakBar);
+      GZ_Leg legAfter = legEngine.GetLeg(i2);
+      breakEngine.OnBar(breakBar);
+      breakEngine.CheckBreak(legAfter, breakBar);
+      legEngine.SetLeg(i2, legAfter);
+      sm.OnLegBroken(legAfter);
+
+      // zone=[92.2,105.4]; this bar's range (95-100) sits fully inside it.
+      MqlRates touchBar = MakeBar(t0+9*300, 98,100,95,99);
+      sm.OnBar(touchBar, true, false); // has_session=false -> no session cancellation
+      GZ_Setup setup = sm.GetSetup(si);
+
+      bool ok = (setup.state==GZ_SETUP_WAITING_ENTRY) && (setup.waiting_entry_time==touchBar.time);
+      AddResult("T40", ok, StringFormat("state=%s waiting_entry_time=%s", setup.StateToString(), TimeToString(setup.waiting_entry_time)));
+     }
+
+   //--- T41: A fresh same-direction leg cancels the still-open setup on the
+   //--- same side (NEW_VALID_SETUP); a different-direction leg leaves it
+   //--- untouched. ------------------------------------------------------------
+   void T41_NewValidSetupCancelsOlder()
+     {
+      datetime t0 = MakeTime(2026,1,6,12,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,          t0+2*300,  1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300,    t0+7*300,  2);
+      GZ_Swing low2  = MakeSwing(GZ_SWING_LOW,  95.0,  t0+8*300,    t0+10*300, 3);
+      GZ_Swing high2 = MakeSwing(GZ_SWING_HIGH, 115.0, t0+11*300,   t0+13*300, 4);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int iLow1=-1;  legEngine.Update(low1,0.0,false,iLow1);
+      int iHigh1=-1; legEngine.Update(high1,0.0,false,iHigh1);  // leg1: BULLISH low1->high1
+      int iLow2=-1;  legEngine.Update(low2,0.0,false,iLow2);    // legX: BEARISH high1->low2
+      int iHigh2=-1; legEngine.Update(high2,0.0,false,iHigh2);  // leg2: BULLISH low2->high2
+
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      int s0 = sm.OnLegCreated(legEngine.GetLeg(iHigh1)); // setup0: BULLISH
+      int s1 = sm.OnLegCreated(legEngine.GetLeg(iLow2));  // setup1: BEARISH
+      int s2 = sm.OnLegCreated(legEngine.GetLeg(iHigh2)); // setup2: BULLISH -> should cancel setup0
+
+      GZ_Setup setup0 = sm.GetSetup(s0);
+      GZ_Setup setup1 = sm.GetSetup(s1);
+      GZ_Setup setup2 = sm.GetSetup(s2);
+
+      bool ok = (setup0.state==GZ_SETUP_CANCELLED) && (setup0.cancel_reason==GZ_CANCEL_NEW_VALID_SETUP) &&
+                (setup1.state==GZ_SETUP_LEG_DETECTED) &&
+                (setup2.state==GZ_SETUP_LEG_DETECTED);
+      AddResult("T41", ok, StringFormat("setup0=%s/%s setup1=%s setup2=%s",
+                setup0.StateToString(), setup0.CancelReasonToString(), setup1.StateToString(), setup2.StateToString()));
+     }
+
+   //--- T42: An opposite-direction break cancels the still-open setup on
+   //--- the other side (OPPOSITE_BREAK), while locking its own setup. ------
+   void T42_OppositeBreakCancels()
+     {
+      datetime t0 = MakeTime(2026,1,6,13,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300,  1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300,  2);
+      GZ_Swing low2  = MakeSwing(GZ_SWING_LOW,  95.0,  t0+8*300, t0+10*300, 3);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int iLow1=-1;  legEngine.Update(low1,0.0,false,iLow1);
+      int iHigh1=-1; legEngine.Update(high1,0.0,false,iHigh1); // leg1: BULLISH low1->high1
+      int iLow2=-1;  legEngine.Update(low2,0.0,false,iLow2);   // legX: BEARISH high1->low2
+
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      int s0 = sm.OnLegCreated(legEngine.GetLeg(iHigh1)); // setup0: BULLISH
+      int s1 = sm.OnLegCreated(legEngine.GetLeg(iLow2));  // setup1: BEARISH
+
+      GZ_BreakConfig cfg; cfg.Default();
+      CGZBreakEngine breakEngine(m_logger); breakEngine.Configure(cfg);
+      MqlRates breakBar = MakeBar(t0+11*300, 109,112,108,111); // closes above leg1's target (110)
+      legEngine.UpdateBar(breakBar);
+      GZ_Leg leg1After = legEngine.GetLeg(iHigh1);
+      breakEngine.OnBar(breakBar);
+      breakEngine.CheckBreak(leg1After, breakBar);
+      legEngine.SetLeg(iHigh1, leg1After);
+
+      sm.OnLegBroken(leg1After);
+
+      GZ_Setup setup0 = sm.GetSetup(s0);
+      GZ_Setup setup1 = sm.GetSetup(s1);
+
+      bool ok = (setup0.state==GZ_SETUP_FIB_ACTIVE) &&
+                (setup1.state==GZ_SETUP_CANCELLED) && (setup1.cancel_reason==GZ_CANCEL_OPPOSITE_BREAK);
+      AddResult("T42", ok, StringFormat("setup0=%s setup1=%s/%s",
+                setup0.StateToString(), setup1.StateToString(), setup1.CancelReasonToString()));
+     }
+
+   //--- T43: A bar outside the configured session cancels an open setup
+   //--- (SESSION_END) only when a session was actually configured. ---------
+   void T43_SessionEndCancels()
+     {
+      datetime t0 = MakeTime(2026,1,6,14,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngineA(m_logger); legEngineA.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int a1=-1; legEngineA.Update(low1,0.0,false,a1);
+      int a2=-1; legEngineA.Update(high1,0.0,false,a2);
+
+      CGZSetupStateMachine smA(m_logger); smA.Init(0.30,0.90);
+      int saA = smA.OnLegCreated(legEngineA.GetLeg(a2));
+      MqlRates bar = MakeBar(t0+8*300, 109,110,108,109);
+      smA.OnBar(bar, false, true); // outside session, has_session=true -> cancel
+      GZ_Setup setupA = smA.GetSetup(saA);
+
+      CGZLegEngine legEngineB(m_logger); legEngineB.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int b1=-1; legEngineB.Update(low1,0.0,false,b1);
+      int b2=-1; legEngineB.Update(high1,0.0,false,b2);
+
+      CGZSetupStateMachine smB(m_logger); smB.Init(0.30,0.90);
+      int saB = smB.OnLegCreated(legEngineB.GetLeg(b2));
+      smB.OnBar(bar, false, false); // has_session=false -> must NOT cancel
+      GZ_Setup setupB = smB.GetSetup(saB);
+
+      bool ok = (setupA.state==GZ_SETUP_CANCELLED) && (setupA.cancel_reason==GZ_CANCEL_SESSION_END) &&
+                (setupB.state!=GZ_SETUP_CANCELLED);
+      AddResult("T43", ok, StringFormat("with_session=%s/%s without_session=%s",
+                setupA.StateToString(), setupA.CancelReasonToString(), setupB.StateToString()));
+     }
+
+   //--- T44: OnDataEnd cancels every still-open setup (DATA_END), and never
+   //--- overrides a setup that already reached a terminal state earlier. ---
+   void T44_DataEndCancelsRemaining()
+     {
+      datetime t0 = MakeTime(2026,1,6,15,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300,  1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300,  2);
+      GZ_Swing low2  = MakeSwing(GZ_SWING_LOW,  95.0,  t0+8*300, t0+10*300, 3);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int iHigh1=-1; int iLow1=-1; int iLow2=-1;
+      legEngine.Update(low1,0.0,false,iLow1);
+      legEngine.Update(high1,0.0,false,iHigh1); // setup0: BULLISH - stays open until data end
+      legEngine.Update(low2,0.0,false,iLow2);   // setup1: BEARISH - pre-cancelled below
+
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      int s0 = sm.OnLegCreated(legEngine.GetLeg(iHigh1));
+      int s1 = sm.OnLegCreated(legEngine.GetLeg(iLow2));
+
+      // Pre-cancel setup1 only, via the reserved invalid-data hook, so this
+      // test can prove OnDataEnd both (a) cancels a setup that is genuinely
+      // still open and (b) never overwrites one that already has a terminal
+      // reason.
+      GZ_Setup setup1Before = sm.GetSetup(s1);
+      datetime invalidTime = t0+9*300;
+      sm.CancelForInvalidData(setup1Before.id, invalidTime);
+
+      datetime dataEndTime = t0+20*300;
+      sm.OnDataEnd(dataEndTime);
+
+      GZ_Setup final0 = sm.GetSetup(s0);
+      GZ_Setup final1 = sm.GetSetup(s1);
+
+      bool ok = (final0.state==GZ_SETUP_CANCELLED) && (final0.cancel_reason==GZ_CANCEL_DATA_END) && (final0.terminal_time==dataEndTime) &&
+                (final1.state==GZ_SETUP_CANCELLED) && (final1.cancel_reason==GZ_CANCEL_INVALID_DATA) && (final1.terminal_time==invalidTime);
+      AddResult("T44", ok, StringFormat("setup0(was open)=%s/%s setup1(pre-cancelled, must stay unchanged)=%s/%s",
+                final0.StateToString(), final0.CancelReasonToString(), final1.StateToString(), final1.CancelReasonToString()));
+     }
+
+   //--- T45: Determinism - two identical Leg+Break+Setup runs over the same
+   //--- swing/bar sequence produce identical resulting setups. --------------
+   void T45_SetupDeterminism()
+     {
+      datetime t0 = MakeTime(2026,1,6,16,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+      MqlRates breakBar = MakeBar(t0+8*300, 109,112,108,111);
+      MqlRates touchBar = MakeBar(t0+9*300, 98,100,95,99);
+
+      GZ_BreakConfig cfg; cfg.Default();
+
+      CGZLegEngine legA(m_logger); legA.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkA(m_logger); brkA.Configure(cfg);
+      CGZSetupStateMachine smA(m_logger); smA.Init(0.30,0.90);
+      int a1=-1; legA.Update(low1,0.0,false,a1);
+      int a2=-1; legA.Update(high1,0.0,false,a2);
+      int saA = smA.OnLegCreated(legA.GetLeg(a2));
+      legA.UpdateBar(breakBar); GZ_Leg lA = legA.GetLeg(a2); brkA.OnBar(breakBar); brkA.CheckBreak(lA,breakBar); legA.SetLeg(a2,lA);
+      smA.OnLegBroken(lA);
+      smA.OnBar(touchBar, true, false);
+      smA.OnDataEnd(touchBar.time);
+      GZ_Setup finalA = smA.GetSetup(saA);
+
+      CGZLegEngine legB(m_logger); legB.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkB(m_logger); brkB.Configure(cfg);
+      CGZSetupStateMachine smB(m_logger); smB.Init(0.30,0.90);
+      int b1=-1; legB.Update(low1,0.0,false,b1);
+      int b2=-1; legB.Update(high1,0.0,false,b2);
+      int saB = smB.OnLegCreated(legB.GetLeg(b2));
+      legB.UpdateBar(breakBar); GZ_Leg lB = legB.GetLeg(b2); brkB.OnBar(breakBar); brkB.CheckBreak(lB,breakBar); legB.SetLeg(b2,lB);
+      smB.OnLegBroken(lB);
+      smB.OnBar(touchBar, true, false);
+      smB.OnDataEnd(touchBar.time);
+      GZ_Setup finalB = smB.GetSetup(saB);
+
+      bool ok = (finalA.state==finalB.state) &&
+                (MathAbs(finalA.zone_min_price-finalB.zone_min_price)<0.00001) &&
+                (MathAbs(finalA.zone_max_price-finalB.zone_max_price)<0.00001) &&
+                (finalA.locked_time==finalB.locked_time) &&
+                (finalA.waiting_entry_time==finalB.waiting_entry_time);
+      AddResult("T45", ok, StringFormat("stateA=%s stateB=%s", finalA.StateToString(), finalB.StateToString()));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -972,6 +1307,17 @@ public:
       T32_LegVariantMinDistance();
       T33_LegBreakDeterminism();
       T34_BreakNoLookahead();
+      T35_FibPriceBullish();
+      T36_FibPriceBearish();
+      T37_FibZoneOverlap();
+      T38_SetupCreatedOnLegDetected();
+      T39_SetupLocksAndActivatesFib();
+      T40_SetupWaitingEntryOnZoneTouch();
+      T41_NewValidSetupCancelsOlder();
+      T42_OppositeBreakCancels();
+      T43_SessionEndCancels();
+      T44_DataEndCancelsRemaining();
+      T45_SetupDeterminism();
      }
 
    int               PassCount() const
