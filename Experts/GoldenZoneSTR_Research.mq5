@@ -214,9 +214,10 @@ void BuildAndEmitReport()
    report += "--- Phase 4: Fibonacci Engine + Setup State Machine ---\n";
    report += StringFormat("FibZone ratio=[%.2f,%.2f] SessionFilter=%s\n",
               InpFibZoneMinRatio, InpFibZoneMaxRatio, InpApplySessionFilter?"true":"false");
-   report += StringFormat("Setups=%d  LEG_DETECTED=%d  FIB_ACTIVE=%d  WAITING_ENTRY=%d  CANCELLED=%d\n",
+   report += StringFormat("Setups=%d  LEG_DETECTED=%d  FIB_ACTIVE=%d  WAITING_ENTRY=%d  ENTERED=%d  EXITED=%d  CANCELLED=%d\n",
               g_setup_count, g_setup_sm.CountByState(GZ_SETUP_LEG_DETECTED), g_setup_sm.CountByState(GZ_SETUP_FIB_ACTIVE),
-              g_setup_sm.CountByState(GZ_SETUP_WAITING_ENTRY), g_setup_sm.CountByState(GZ_SETUP_CANCELLED));
+              g_setup_sm.CountByState(GZ_SETUP_WAITING_ENTRY), g_setup_sm.CountByState(GZ_SETUP_ENTERED),
+              g_setup_sm.CountByState(GZ_SETUP_EXITED), g_setup_sm.CountByState(GZ_SETUP_CANCELLED));
    report += StringFormat("Cancel reasons: OPPOSITE_BREAK=%d NEW_VALID_SETUP=%d SESSION_END=%d DATA_END=%d\n",
               g_setup_sm.CountTerminalByReason(GZ_CANCEL_OPPOSITE_BREAK), g_setup_sm.CountTerminalByReason(GZ_CANCEL_NEW_VALID_SETUP),
               g_setup_sm.CountTerminalByReason(GZ_CANCEL_SESSION_END), g_setup_sm.CountTerminalByReason(GZ_CANCEL_DATA_END));
@@ -516,9 +517,10 @@ int OnInit()
          g_logger.Info("Leg", StringFormat("  ... and %d more leg(s)", g_leg_count-show_legs));
 
       g_logger.Info("Setup", StringFormat(
-         "Phase 4: setups=%d LEG_DETECTED=%d FIB_ACTIVE=%d WAITING_ENTRY=%d ENTERED=%d CANCELLED=%d (zone=[%.2f,%.2f] session_filter=%s)",
+         "Phase 4: setups=%d LEG_DETECTED=%d FIB_ACTIVE=%d WAITING_ENTRY=%d ENTERED=%d EXITED=%d CANCELLED=%d (zone=[%.2f,%.2f] session_filter=%s)",
          g_setup_count, g_setup_sm.CountByState(GZ_SETUP_LEG_DETECTED), g_setup_sm.CountByState(GZ_SETUP_FIB_ACTIVE),
-         g_setup_sm.CountByState(GZ_SETUP_WAITING_ENTRY), g_setup_sm.CountByState(GZ_SETUP_ENTERED), g_setup_sm.CountByState(GZ_SETUP_CANCELLED),
+         g_setup_sm.CountByState(GZ_SETUP_WAITING_ENTRY), g_setup_sm.CountByState(GZ_SETUP_ENTERED),
+         g_setup_sm.CountByState(GZ_SETUP_EXITED), g_setup_sm.CountByState(GZ_SETUP_CANCELLED),
          InpFibZoneMinRatio, InpFibZoneMaxRatio, InpApplySessionFilter?"true":"false"));
       g_logger.Info("Setup", StringFormat(
          "  Cancel reasons: OPPOSITE_BREAK=%d NEW_VALID_SETUP=%d SESSION_END=%d INVALID_PENETRATION=%d DATA_END=%d",
