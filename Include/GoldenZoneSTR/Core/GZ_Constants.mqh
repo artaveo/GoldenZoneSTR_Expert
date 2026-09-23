@@ -141,4 +141,24 @@
 #define GZ_DEFAULT_MAX_ROBUSTNESS_BATCH_SIZE   20    // Roadmap "stage research, don't run one huge Grid at once" cap, reapplied to Phase 12 (axes per RunSweepBatch call)
 #define GZ_PROJECT_VERSION_P12                 "GZ-P12-ROADMAP v1.0"
 
+// Phase 13 - Walk-Forward Research.
+// Roadmap: "Train -> Validate -> Move Window -> Train -> Validate", configurable
+// Training length / Validation length / Step size / Minimum trades. The Roadmap
+// gives NO numeric defaults, so the values below are conventional, documented
+// defaults (same pattern as GZ_DEFAULT_ATR_PERIOD in Phase 3), all overridable
+// via EA inputs. Window lengths are in CALENDAR days (weekends included) so a
+// window boundary never depends on a broker holiday calendar.
+// The stability thresholds have no Roadmap-stated formula either - see
+// GZ_WalkForwardEngine.mqh::Aggregate() for the exact rules that use them.
+#define GZ_DEFAULT_WF_TRAIN_DAYS               28    // training window length (calendar days)
+#define GZ_DEFAULT_WF_VALIDATE_DAYS            14    // validation window length (calendar days)
+#define GZ_DEFAULT_WF_STEP_DAYS                14    // how far the whole window slides each step (calendar days)
+#define GZ_DEFAULT_WF_MIN_TRADES               30    // a TRAINING candidate needs at least this many trades to be eligible for selection
+#define GZ_DEFAULT_WF_MIN_VALIDATION_TRADES    10    // a validation window with fewer trades is flagged LOW_VALIDATION_TRADES
+#define GZ_WF_PARAM_UNSTABLE_CHANGE_PCT        0.50  // share of consecutive selected-window pairs whose chosen value changed, above which PARAM_UNSTABLE is flagged
+#define GZ_WF_PARAM_UNSTABLE_MIN_WINDOWS       3     // PARAM_UNSTABLE is only ever flagged with at least this many selected windows (2 windows = 1 pair = no evidence)
+#define GZ_WF_EFFICIENCY_MIN                   0.50  // walk-forward efficiency (mean validation expectancy / mean training expectancy) below this flags OVERFIT_SUSPECT
+#define GZ_WF_NOISE_FLOOR_R                    0.05  // mean training expectancy at/below this (in R) makes the efficiency ratio UNDEFINED rather than a meaningless huge/negative number
+#define GZ_PROJECT_VERSION_P13                 "GZ-P13-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__

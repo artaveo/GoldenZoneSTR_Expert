@@ -1,11 +1,12 @@
-# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12
+# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13
 
 Data Layer + Data Validator + Time Engine (Phase 1), M5 Structure/Swing Engine (Phase 2),
 Leg Engine + Break Engine (Phase 3), Fibonacci Engine + Setup State Machine (Phase 4),
 Entry Engine + Historical Trade Simulator (Phase 5), Exit Engine SL/TP/BE (Phase 6),
 MAE/MFE + R-Path + Event Ledger (Phase 7), Metrics + Reporting (Phase 8), Experiment
 Configuration + Runner (Phase 9), Filter Engine (Phase 10), Filter Combination Research
-(Phase 11), Robustness + Sensitivity Research (Phase 12). No live trading.
+(Phase 11), Robustness + Sensitivity Research (Phase 12), Walk-Forward Research (Phase 13).
+No live trading.
 
 ## Install
 
@@ -18,7 +19,7 @@ Configuration + Runner (Phase 9), Filter Engine (Phase 10), Filter Combination R
 5. Attach the compiled EA to an XAUUSD chart (any chart timeframe — the EA loads its own M1/M5
    internally, independent of the chart's timeframe).
 6. Check the **Experts** log tab for the report, and
-   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_8_9_10_11_Report.txt` (common Files folder) for the saved copy.
+   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_Report.txt` (common Files folder) for the saved copy.
 
 ## What this does
 
@@ -91,13 +92,33 @@ Configuration + Runner (Phase 9), Filter Engine (Phase 10), Filter Combination R
   result, so any combination is reconstructable. `RunBatch()` enforces the same "stage research,
   don't run one huge Grid at once" cap as Phase 9 (`InpFilterComboMaxBatchSize`). Set
   `InpRunPhase11=false` to skip it.
-- Runs 116 deterministic, synthetic-data self-tests (T01–T116: T01–T18 Phase 1, T19–T23 Phase 2,
+- **Phase 12:** `CGZRobustnessEngine` sweeps ONE config axis (11 supported, `InpRobustnessAxis1/2`)
+  around its current value — each swept value is a FULL Phase 2-8 re-simulation through Phase 9's
+  runner — and flags `NARROW_PEAK` / `FLAT_REGION` / `UNSTABLE_ZONE` / `PARAMETER_SENSITIVE`. The
+  single highest historical value is never presented as safe on its own (`safe_to_adopt_best`).
+  Set `InpRunPhase12=false` to skip it.
+- **Phase 13:** `CGZWalkForwardEngine` builds rolling **Train → Validate** windows over the whole
+  loaded M1/M5 range (calendar-day lengths `InpWfTrainDays` / `InpWfValidateDays` / `InpWfStepDays`,
+  half-open `[start, end)`, validation starts exactly where training ends). Per window it sweeps
+  ONE axis (`InpWfAxis`, same default neighborhood as Phase 12) on the TRAINING slice only,
+  drops candidates under `InpWfMinTrades`, and selects a value with Phase 12's own flags: an unsafe
+  best (narrow peak / unstable zone) is not taken when `InpWfRequireSafeSelection=true` — the
+  window falls back to the baseline value, or selects nothing. The selected value (and, for
+  comparison, the fixed baseline) is then run on the following validation slice. Output: per-window
+  training result, selected value, validation result, plus pooled out-of-sample statistics,
+  a selection-edge vs. the fixed baseline, walk-forward efficiency and `PARAM_UNSTABLE` /
+  `OVERFIT_SUSPECT` / `NEGATIVE_OOS` / `VALIDATION_OVERLAP` flags. Each window is simulated on its
+  own data slice from a cold start (documented limitation). Single-axis only; anchored/expanding
+  windows are deferred. Set `InpRunPhase13=false` to skip it.
+- Runs 142 deterministic, synthetic-data self-tests (T01–T142: T01–T18 Phase 1, T19–T23 Phase 2,
   T24–T34 Phase 3, T35–T45 Phase 4, T46–T54 Phase 5, T55–T64 Phase 6, T65–T74 Phase 7,
-  T75–T86 Phase 8, T87–T96 Phase 9, T97–T106 Phase 10, T107–T116 Phase 11) and reports PASS/FAIL
+  T75–T86 Phase 8, T87–T96 Phase 9, T97–T106 Phase 10, T107–T116 Phase 11, T117–T127 Phase 12,
+  T128–T142 Phase 13) and reports PASS/FAIL
   for each.
-- Prints and saves a full Phase 1+2+3+4+5+6+7+8+9+10+11 completion report.
-- Does **not** place any live trades, and does **not** implement any Phase 12+ logic
-  (Robustness/Sensitivity onward). It stops after the report.
+- Prints (in chunks, so the Experts log is no longer truncated) and saves a full Phase 1+2+…+13
+  completion report.
+- Does **not** place any live trades, and does **not** implement any Phase 14+ logic
+  (Monte Carlo onward). It stops after the report.
 
 ## Before trusting the output
 
@@ -107,4 +128,4 @@ not guaranteed correct for your specific broker.
 
 See `Docs/Phase1_TestReport.md` for the Phase 1 report template and required user verification
 steps (the same verification requirement — compile/attach in MetaEditor/MT5 and confirm the
-broker UTC offset — still applies to this Phase 1+2+3+4+5+6+7+8+9+10+11 build).
+broker UTC offset — still applies to this Phase 1+2+…+13 build).

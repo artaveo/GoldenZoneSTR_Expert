@@ -13,6 +13,7 @@
 //| Phase 10 (T97-T106): Filter Engine                                 |
 //| Phase 11 (T107-T116): Filter Combination Research                  |
 //| Phase 12 (T117-T127): Robustness + Sensitivity Research            |
+//| Phase 13 (T128-T142): Walk-Forward Research                        |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -58,6 +59,8 @@
 #include "..\Filter\GZ_FilterComboEngine.mqh"
 #include "..\Robustness\GZ_RobustnessTypes.mqh"
 #include "..\Robustness\GZ_RobustnessEngine.mqh"
+#include "..\WalkForward\GZ_WalkForwardTypes.mqh"
+#include "..\WalkForward\GZ_WalkForwardEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -4254,6 +4257,600 @@ public:
       AddResult("T127", ok, StringFormat("idA=%s idB=%s point_count=%d identical=%s", rA.id, rB.id, rA.point_count, ok?"true":"false"));
      }
 
+
+   //+------------------------------------------------------------------+
+   //| Phase 13 (T128-T142): Walk-Forward Research                        |
+   //| Pure-logic tests (windows, slicing, selection, aggregation) use    |
+   //| hand-built inputs with NO simulation, exactly like Phase 12's own  |
+   //| T121-T125; T139-T142 then run the real engine end-to-end on a      |
+   //| multi-day replication of the Phase 9 fixture. The integration tests|
+   //| assert STRUCTURE/determinism/no-lookahead, not specific trade      |
+   //| counts (a replicated fixture's exact per-window trades are not     |
+   //| something this file can honestly claim to know in advance).        |
+   //+------------------------------------------------------------------+
+
+   //--- helper: hand-fill one point of a synthetic training sweep
+   void WfFillSweepPoint(GZ_RobustnessSweepResult &r, int idx, double value, int trades, double expectancy)
+     {
+      r.points[idx].Clear();
+      r.points[idx].param_value   = value;
+      r.points[idx].value_applied = true;
+      r.points[idx].result.metrics.trade.trade_count = trades;
+      r.points[idx].result.metrics.trade.expectancy  = expectancy;
+      r.points[idx].result.metrics.trade.net_r       = (double)trades*expectancy;
+     }
+
+   //--- helper: the 5-point "narrow peak at value 3" curve T134/T135 share
+   //--- (values 1..5, expectancy 0.10/0.20/1.00/0.30/0.10, all 40 trades)
+   void WfBuildPeakSweep(GZ_RobustnessSweepResult &r, double baseline_value)
+     {
+      r.Clear();
+      r.param_label    = "TEST_AXIS";
+      r.baseline_value = baseline_value;
+      r.point_count    = 5;
+      double ev[5] = {0.10, 0.20, 1.00, 0.30, 0.10};
+      for(int i=0;i<5;i++)
+         WfFillSweepPoint(r, i, (double)(i+1), 40, ev[i]);
+     }
+
+   //--- helper: one hand-built, fully-validated window for Aggregate() tests
+   void WfSetValidatedWindow(GZ_WalkForwardResult &r, int idx, double selected, double train_exp,
+                             int trades, int winners, int losers, double avg_win, double avg_loss,
+                             int base_trades, double base_net)
+     {
+      r.windows[idx].Clear();
+      r.windows[idx].index          = idx;
+      r.windows[idx].status         = GZ_WF_SEL_SELECTED;
+      r.windows[idx].selected_value = selected;
+      r.windows[idx].train_stats.trade_count = 30;
+      r.windows[idx].train_stats.expectancy  = train_exp;
+
+      double net = (double)winners*avg_win - (double)losers*avg_loss;
+      r.windows[idx].val_stats.trade_count = trades;
+      r.windows[idx].val_stats.winners     = winners;
+      r.windows[idx].val_stats.losers      = losers;
+      r.windows[idx].val_stats.avg_win_r   = avg_win;
+      r.windows[idx].val_stats.avg_loss_r  = avg_loss;
+      r.windows[idx].val_stats.net_r       = net;
+      r.windows[idx].val_stats.expectancy  = (trades>0) ? net/(double)trades : 0.0;
+      r.windows[idx].validation_ran        = true;
+      r.windows[idx].low_validation_trades = (trades < r.config.min_validation_trades);
+
+      r.windows[idx].baseline_val_ran               = true;
+      r.windows[idx].baseline_val_stats.trade_count = base_trades;
+      r.windows[idx].baseline_val_stats.net_r       = base_net;
+      r.windows[idx].baseline_val_stats.expectancy  = (base_trades>0) ? base_net/(double)base_trades : 0.0;
+      r.window_count = idx+1;
+     }
+
+   //--- helper: replicate the Phase 9 one-day fixture over `days` consecutive
+   //--- calendar days (each day shifted by exactly 86400 s), M1 and M5 together
+   void BuildWalkForwardFixture(int days, MqlRates &m1[], MqlRates &m5[])
+     {
+      MqlRates d5[]; BuildPhase9M5Series(d5);
+      MqlRates d1[]; BuildPhase9M1Series(d1, d5[10].time);
+      int n5d = ArraySize(d5);
+      int n1d = ArraySize(d1);
+      ArrayResize(m5, n5d*days);
+      ArrayResize(m1, n1d*days);
+      for(int d=0; d<days; d++)
+        {
+         long shift = (long)d*86400;
+         for(int i=0;i<n5d;i++)
+           {
+            m5[d*n5d+i]      = d5[i];
+            m5[d*n5d+i].time = (datetime)((long)d5[i].time + shift);
+           }
+         for(int i=0;i<n1d;i++)
+           {
+            m1[d*n1d+i]      = d1[i];
+            m1[d*n1d+i].time = (datetime)((long)d1[i].time + shift);
+           }
+        }
+     }
+
+   //--- helper: the integration config T139-T141 share (PIVOT_STRENGTH axis,
+   //--- candidates {1,2}, baseline 2, train 2d / validate 1d / step 1d)
+   void WfIntegrationConfig(GZ_WalkForwardConfig &cfg)
+     {
+      cfg.Default();
+      cfg.base_config.time_config.broker_offset_known = true;
+      cfg.axis               = GZ_ROBUST_PIVOT_STRENGTH;
+      cfg.candidates[0]      = 1.0;
+      cfg.candidates[1]      = 2.0;
+      cfg.candidate_count    = 2;
+      cfg.train_days         = 2;
+      cfg.validate_days      = 1;
+      cfg.step_days          = 1;
+      cfg.min_trades         = 1;
+      cfg.min_validation_trades = 1;
+      cfg.require_safe_selection = true;
+     }
+
+   //--- T128: BuildWindows() on a known range. 84 days of data, train 28 /
+   //--- validate 14 / step 14 -> exactly 4 rolling windows (validate_end at
+   //--- day 42/56/70/84; the 4th ends EXACTLY at the data end, still fits),
+   //--- each window's train_end == validate_start (contiguous), consecutive
+   //--- windows 14 days apart, nothing capped. ------------------------------
+   void T128_WindowBuilderKnownRange()
+     {
+      datetime ds = MakeTime(2026,3,1,0,0);
+      datetime de = (datetime)((long)ds + 84*86400);
+
+      GZ_WalkForwardConfig cfg; cfg.Default();
+      cfg.train_days = 28; cfg.validate_days = 14; cfg.step_days = 14;
+
+      CGZWalkForwardEngine eng(m_logger);
+      GZ_WalkForwardResult r; r.Clear();
+      int n = eng.BuildWindows(ds, de, cfg, r);
+
+      bool ok = (n==4) && (r.window_count==4) && !r.windows_capped;
+      for(int k=0; k<4 && ok; k++)
+        {
+         long s = (long)ds + (long)k*14*86400;
+         ok = ((long)r.windows[k].train_start    == s) &&
+              ((long)r.windows[k].train_end      == s + 28*86400) &&
+              ((long)r.windows[k].validate_start == s + 28*86400) &&
+              ((long)r.windows[k].validate_end   == s + 42*86400) &&
+              (r.windows[k].index==k);
+        }
+      AddResult("T128", ok, StringFormat("windows=%d capped=%s last_validate_end_day=%d (expect 4 windows, last ends at day 84)",
+                n, r.windows_capped?"true":"false", (int)(((long)r.windows[3].validate_end-(long)ds)/86400)));
+     }
+
+   //--- T129: BuildWindows() refuses instead of guessing - data shorter than
+   //--- one train+validate span -> 0 windows (no partial window invented);
+   //--- a non-positive length -> 0 windows AND an INVALID_WINDOW_CONFIG note
+   //--- (never silently defaulted); an empty date range -> 0 windows. -------
+   void T129_WindowBuilderRefusals()
+     {
+      datetime ds = MakeTime(2026,3,1,0,0);
+      CGZWalkForwardEngine eng(m_logger);
+
+      GZ_WalkForwardConfig cfg; cfg.Default();
+      cfg.train_days = 28; cfg.validate_days = 14; cfg.step_days = 14;
+
+      GZ_WalkForwardResult r1; r1.Clear();
+      int n_short = eng.BuildWindows(ds, (datetime)((long)ds + 30*86400), cfg, r1);   // 30d < 42d needed
+
+      GZ_WalkForwardConfig bad = cfg; bad.train_days = 0;
+      GZ_WalkForwardResult r2; r2.Clear();
+      int n_bad = eng.BuildWindows(ds, (datetime)((long)ds + 84*86400), bad, r2);
+      bool has_note = false;
+      for(int i=0;i<r2.note_count;i++)
+         if(StringFind(r2.notes[i], "INVALID_WINDOW_CONFIG")>=0) has_note = true;
+
+      GZ_WalkForwardResult r3; r3.Clear();
+      int n_empty = eng.BuildWindows(ds, ds, cfg, r3);
+
+      bool ok = (n_short==0) && (n_bad==0) && has_note && (n_empty==0);
+      AddResult("T129", ok, StringFormat("short=%d bad_cfg=%d (invalid_note=%s) empty_range=%d (all expect 0)",
+                n_short, n_bad, has_note?"true":"false", n_empty));
+     }
+
+   //--- T130: the documented window cap is FLAGGED, not silent. 100 days,
+   //--- train 1 / validate 1 / step 1 would fit 99 windows; generation stops
+   //--- at GZ_MAX_WALKFORWARD_WINDOWS (24) and windows_capped is set. -------
+   void T130_WindowCapFlagged()
+     {
+      datetime ds = MakeTime(2026,1,1,0,0);
+      GZ_WalkForwardConfig cfg; cfg.Default();
+      cfg.train_days = 1; cfg.validate_days = 1; cfg.step_days = 1;
+
+      CGZWalkForwardEngine eng(m_logger);
+      GZ_WalkForwardResult r; r.Clear();
+      int n = eng.BuildWindows(ds, (datetime)((long)ds + 100*86400), cfg, r);
+
+      bool ok = (n==GZ_MAX_WALKFORWARD_WINDOWS) && r.windows_capped;
+      AddResult("T130", ok, StringFormat("windows=%d (cap=%d) capped=%s", n, GZ_MAX_WALKFORWARD_WINDOWS, r.windows_capped?"true":"false"));
+     }
+
+   //--- T131: SliceByTime() is HALF-OPEN [from, to). 10 M5 bars at t0+i*300:
+   //--- [t0+600, t0+1500) -> exactly bars 2,3,4 (the bar AT the end time is
+   //--- excluded, the bar AT the start time is included); [t0, t0+3000) ->
+   //--- all 10; from==to and a range past the data -> 0. --------------------
+   void T131_SliceHalfOpen()
+     {
+      datetime t0 = MakeTime(2026,3,2,9,0);
+      MqlRates bars[]; ArrayResize(bars,10);
+      for(int i=0;i<10;i++)
+         bars[i] = MakeBar(t0 + i*300, 100,101,99,100.5);
+
+      CGZWalkForwardEngine eng(m_logger);
+      MqlRates out[];
+
+      int n_mid  = eng.SliceByTime(bars, t0+600, t0+1500, out);
+      bool mid_ok = (n_mid==3) && (ArraySize(out)==3) && (out[0].time==t0+600) && (out[2].time==t0+1200);
+
+      int n_all  = eng.SliceByTime(bars, t0, t0+3000, out);
+      int n_same = eng.SliceByTime(bars, t0+600, t0+600, out);
+      int n_past = eng.SliceByTime(bars, t0+100000, t0+200000, out);
+
+      bool ok = mid_ok && (n_all==10) && (n_same==0) && (n_past==0) && (ArraySize(out)==0);
+      AddResult("T131", ok, StringFormat("mid=%d all=%d empty_range=%d past_data=%d (expect 3/10/0/0)", n_mid, n_all, n_same, n_past));
+     }
+
+   //--- T132: window/slice no-overlap invariant on real slices. Bars every 6h
+   //--- over 84 days; window #1 (train days 14..42, validate days 42..56):
+   //--- every training bar is strictly before validate_start, every
+   //--- validation bar is >= validate_start and < validate_end, the two
+   //--- slices share no bar, and the counts are exactly 28d*4 and 14d*4. -----
+   void T132_TrainValidateSlicesDisjoint()
+     {
+      datetime ds = MakeTime(2026,3,1,0,0);
+      datetime de = (datetime)((long)ds + 84*86400);
+      int nb = 84*4;
+      MqlRates bars[]; ArrayResize(bars, nb);
+      for(int i=0;i<nb;i++)
+         bars[i] = MakeBar((datetime)((long)ds + (long)i*21600), 100,101,99,100.5);
+
+      GZ_WalkForwardConfig cfg; cfg.Default();
+      cfg.train_days = 28; cfg.validate_days = 14; cfg.step_days = 14;
+
+      CGZWalkForwardEngine eng(m_logger);
+      GZ_WalkForwardResult r; r.Clear();
+      eng.BuildWindows(ds, de, cfg, r);
+
+      MqlRates tr[], va[];
+      int ntr = eng.SliceByTime(bars, r.windows[1].train_start,    r.windows[1].train_end,    tr);
+      int nva = eng.SliceByTime(bars, r.windows[1].validate_start, r.windows[1].validate_end, va);
+
+      bool ok = (ntr==28*4) && (nva==14*4);
+      for(int i=0;i<ntr && ok;i++)
+         if(tr[i].time >= r.windows[1].validate_start) ok = false;   // a training bar at/after validate_start = lookahead
+      for(int i=0;i<nva && ok;i++)
+         if(va[i].time < r.windows[1].validate_start || va[i].time >= r.windows[1].validate_end) ok = false;
+      if(ok && ntr>0 && nva>0)
+         ok = (tr[ntr-1].time < va[0].time);
+      AddResult("T132", ok, StringFormat("train_bars=%d validate_bars=%d (expect 112/56) train_end==validate_start=%s",
+                ntr, nva, (r.windows[1].train_end==r.windows[1].validate_start)?"true":"false"));
+     }
+
+   //--- T133: min-trades eligibility. A candidate with the HIGHEST expectancy
+   //--- (1.50) but only 5 trades (< min 30) can never win - the best eligible
+   //--- value (1.0, 0.30R over 40 trades) is selected, and eligible/run counts
+   //--- are exact. ---------------------------------------------------------
+   void T133_SelectionMinTradesEligibility()
+     {
+      GZ_RobustnessSweepResult sw; sw.Clear();
+      sw.param_label = "TEST_AXIS"; sw.baseline_value = 2.0; sw.point_count = 3;
+      WfFillSweepPoint(sw, 0, 1.0, 40, 0.30);
+      WfFillSweepPoint(sw, 1, 2.0,  5, 1.50);   // best raw expectancy, but too few trades
+      WfFillSweepPoint(sw, 2, 3.0, 40, 0.25);
+
+      CGZWalkForwardEngine eng(m_logger);
+      GZ_WalkForwardWindow w; w.Clear();
+      eng.SelectFromSweep(sw, 30, true, 2.0, w);
+
+      bool ok = (w.status==GZ_WF_SEL_SELECTED) && (MathAbs(w.selected_value-1.0)<0.0001) &&
+                (w.train_stats.trade_count==40) && (w.train_candidates_run==3) && (w.train_candidates_eligible==2) &&
+                w.train_safe_to_adopt;
+      AddResult("T133", ok, StringFormat("status=%s selected=%.2f trades=%d run=%d eligible=%d (expect SELECTED 1.00, 40, 3, 2)",
+                GZWfSelectionStatusToString(w.status), w.selected_value, w.train_stats.trade_count,
+                w.train_candidates_run, w.train_candidates_eligible));
+     }
+
+   //--- T134: the Roadmap Phase 12 rule ("the single highest historical
+   //--- value must not be accepted alone") applied to selection. Narrow peak
+   //--- at value 3 (1.00R, neighbors 0.20R/0.30R): require_safe=true -> the
+   //--- BASELINE value 2 (0.20R) is used instead (FALLBACK_BASELINE) and the
+   //--- raw best (3.0) is still recorded; require_safe=false -> the peak
+   //--- itself (3.0) is taken (SELECTED). -----------------------------------
+   void T134_SelectionUnsafePeakFallsBackToBaseline()
+     {
+      CGZWalkForwardEngine eng(m_logger);
+
+      GZ_RobustnessSweepResult sw; WfBuildPeakSweep(sw, 2.0);
+      GZ_WalkForwardWindow safe_w; safe_w.Clear();
+      eng.SelectFromSweep(sw, 30, true, 2.0, safe_w);
+      bool safe_ok = (safe_w.status==GZ_WF_SEL_FALLBACK_BASELINE) && (MathAbs(safe_w.selected_value-2.0)<0.0001) &&
+                     (MathAbs(safe_w.train_best_value-3.0)<0.0001) && safe_w.train_narrow_peak && !safe_w.train_safe_to_adopt &&
+                     (MathAbs(safe_w.train_stats.expectancy-0.20)<0.0001);
+
+      GZ_RobustnessSweepResult sw2; WfBuildPeakSweep(sw2, 2.0);
+      GZ_WalkForwardWindow raw_w; raw_w.Clear();
+      eng.SelectFromSweep(sw2, 30, false, 2.0, raw_w);
+      bool raw_ok = (raw_w.status==GZ_WF_SEL_SELECTED) && (MathAbs(raw_w.selected_value-3.0)<0.0001);
+
+      bool ok = safe_ok && raw_ok;
+      AddResult("T134", ok, StringFormat("require_safe: %s selected=%.2f best=%.2f narrow=%s | not_required: %s selected=%.2f",
+                GZWfSelectionStatusToString(safe_w.status), safe_w.selected_value, safe_w.train_best_value,
+                safe_w.train_narrow_peak?"true":"false", GZWfSelectionStatusToString(raw_w.status), raw_w.selected_value));
+     }
+
+   //--- T135: the two "nothing selected" outcomes are distinct and neither
+   //--- fabricates a value. (a) every candidate under the min-trades floor ->
+   //--- NO_ELIGIBLE; (b) narrow peak whose fallback BASELINE candidate is
+   //--- itself under the floor -> NO_SAFE_CANDIDATE. In both, selected_value
+   //--- stays 0 and HasSelection() is false (so the window is never
+   //--- validated). --------------------------------------------------------
+   void T135_SelectionNothingSelectedOutcomes()
+     {
+      CGZWalkForwardEngine eng(m_logger);
+
+      GZ_RobustnessSweepResult a; a.Clear();
+      a.param_label = "TEST_AXIS"; a.baseline_value = 2.0; a.point_count = 2;
+      WfFillSweepPoint(a, 0, 1.0, 5, 0.5);
+      WfFillSweepPoint(a, 1, 2.0, 5, 0.6);
+      GZ_WalkForwardWindow wa; wa.Clear();
+      eng.SelectFromSweep(a, 30, true, 2.0, wa);
+      bool a_ok = (wa.status==GZ_WF_SEL_NO_ELIGIBLE) && !wa.HasSelection() && (wa.train_candidates_eligible==0) && (MathAbs(wa.selected_value)<0.0001);
+
+      GZ_RobustnessSweepResult b; WfBuildPeakSweep(b, 1.0);          // baseline = value 1 ...
+      WfFillSweepPoint(b, 0, 1.0, 10, 0.10);                          // ... but only 10 trades (< 30)
+      GZ_WalkForwardWindow wb; wb.Clear();
+      eng.SelectFromSweep(b, 30, true, 1.0, wb);
+      bool b_ok = (wb.status==GZ_WF_SEL_NO_SAFE_CANDIDATE) && !wb.HasSelection() && wb.train_narrow_peak && (MathAbs(wb.selected_value)<0.0001);
+
+      bool ok = a_ok && b_ok;
+      AddResult("T135", ok, StringFormat("(a) %s has_selection=%s | (b) %s narrow=%s has_selection=%s",
+                GZWfSelectionStatusToString(wa.status), wa.HasSelection()?"true":"false",
+                GZWfSelectionStatusToString(wb.status), wb.train_narrow_peak?"true":"false", wb.HasSelection()?"true":"false"));
+     }
+
+   //--- T136: Aggregate() known numbers, hand-computed. Three validated
+   //--- windows (avg win 2R / avg loss 1R each):
+   //---   w0 10 trades 6W/4L -> +8R   (train exp 1.0, baseline 10 trades +2R)
+   //---   w1 20 trades 8W/12L -> +4R  (train exp 0.5, baseline 20 trades -2R)
+   //---   w2 10 trades 3W/7L -> -1R   (train exp 0.6, baseline 10 trades -1R)
+   //--- pooled: 40 trades, 17W/23L, net +11R, expectancy 0.275, win rate 0.425,
+   //--- PF = 34/23 = 1.4783, 2 positive windows; mean train exp 0.70, mean val
+   //--- exp 0.30 -> efficiency 0.4286 (< 0.50 -> OVERFIT_SUSPECT); baseline
+   //--- pooled 40 trades -1R = -0.025 -> selection edge +0.30; no changes in the
+   //--- selected value (all 1.0); no low-validation windows (10 >= 10). ------
+   void T136_AggregatePooledStatsKnownNumbers()
+     {
+      GZ_WalkForwardResult r; r.Clear();
+      r.config.step_days = 14; r.config.validate_days = 14; r.config.min_validation_trades = 10;
+      WfSetValidatedWindow(r, 0, 1.0, 1.0, 10, 6,  4, 2.0, 1.0, 10,  2.0);
+      WfSetValidatedWindow(r, 1, 1.0, 0.5, 20, 8, 12, 2.0, 1.0, 20, -2.0);
+      WfSetValidatedWindow(r, 2, 1.0, 0.6, 10, 3,  7, 2.0, 1.0, 10, -1.0);
+
+      CGZWalkForwardEngine eng(m_logger);
+      eng.Aggregate(r);
+
+      bool ok = (r.windows_selected==3) && (r.windows_validated==3) && (r.windows_low_validation_trades==0) && (r.positive_windows==2) &&
+                (r.pooled_trades==40) && (r.pooled_winners==17) && (r.pooled_losers==23) &&
+                (MathAbs(r.pooled_net_r-11.0)<0.0001) && (MathAbs(r.pooled_expectancy-0.275)<0.0001) &&
+                (MathAbs(r.pooled_win_rate-0.425)<0.0001) && (MathAbs(r.pooled_profit_factor-(34.0/23.0))<0.0001) &&
+                !r.pooled_profit_factor_undefined &&
+                (MathAbs(r.mean_train_expectancy-0.70)<0.0001) && (MathAbs(r.mean_val_expectancy-0.30)<0.0001) &&
+                r.efficiency_defined && (MathAbs(r.walk_forward_efficiency-(0.30/0.70))<0.0001) && r.overfit_suspect &&
+                (r.baseline_pooled_trades==40) && (MathAbs(r.baseline_pooled_expectancy-(-0.025))<0.0001) &&
+                r.selection_edge_defined && (MathAbs(r.selection_edge_expectancy-0.30)<0.0001) &&
+                !r.negative_oos && !r.param_unstable && !r.validation_overlap && (r.selection_changes==0) && (r.distinct_selected_values==1);
+      AddResult("T136", ok, StringFormat("pooled trades=%d net_r=%.3f exp=%.4f pf=%.4f wr=%.3f | eff=%.4f overfit=%s | edge=%.4f | positive_windows=%d",
+                r.pooled_trades, r.pooled_net_r, r.pooled_expectancy, r.pooled_profit_factor, r.pooled_win_rate,
+                r.walk_forward_efficiency, r.overfit_suspect?"true":"false", r.selection_edge_expectancy, r.positive_windows));
+     }
+
+   //--- T137: parameter-stability flag. Selected values [1,1,2,1,3] -> 3 changes
+   //--- over 4 consecutive pairs = 0.75 > 0.50 -> PARAM_UNSTABLE, 3 distinct
+   //--- values, most common (1.0) chosen 3 times, min 1 / max 3. [1,1,1,2] -> 1
+   //--- change / 3 pairs = 0.33 -> stable. [1,2] has a 100% change rate but only
+   //--- 2 selected windows (< GZ_WF_PARAM_UNSTABLE_MIN_WINDOWS) -> never flagged
+   //--- (one pair is not evidence). -----------------------------------------
+   void T137_AggregateParamStability()
+     {
+      CGZWalkForwardEngine eng(m_logger);
+
+      GZ_WalkForwardResult a; a.Clear();
+      double va[5] = {1.0, 1.0, 2.0, 1.0, 3.0};
+      for(int i=0;i<5;i++) { a.windows[i].Clear(); a.windows[i].index=i; a.windows[i].status=GZ_WF_SEL_SELECTED; a.windows[i].selected_value=va[i]; }
+      a.window_count = 5;
+      eng.Aggregate(a);
+      bool a_ok = a.param_unstable && (a.selection_changes==3) && (a.distinct_selected_values==3) &&
+                  (a.most_common_selected_count==3) && (MathAbs(a.selected_value_min-1.0)<0.0001) && (MathAbs(a.selected_value_max-3.0)<0.0001) &&
+                  (a.windows_selected==5);
+
+      GZ_WalkForwardResult b; b.Clear();
+      double vb[4] = {1.0, 1.0, 1.0, 2.0};
+      for(int i=0;i<4;i++) { b.windows[i].Clear(); b.windows[i].index=i; b.windows[i].status=GZ_WF_SEL_FALLBACK_BASELINE; b.windows[i].selected_value=vb[i]; }
+      b.window_count = 4;
+      eng.Aggregate(b);
+      bool b_ok = !b.param_unstable && (b.selection_changes==1) && (b.windows_selected==4);
+
+      GZ_WalkForwardResult c; c.Clear();
+      double vc[2] = {1.0, 2.0};
+      for(int i=0;i<2;i++) { c.windows[i].Clear(); c.windows[i].index=i; c.windows[i].status=GZ_WF_SEL_SELECTED; c.windows[i].selected_value=vc[i]; }
+      c.window_count = 2;
+      eng.Aggregate(c);
+      bool c_ok = !c.param_unstable && (c.selection_changes==1);
+
+      bool ok = a_ok && b_ok && c_ok;
+      AddResult("T137", ok, StringFormat("[1,1,2,1,3] unstable=%s changes=%d distinct=%d | [1,1,1,2] unstable=%s | [1,2] unstable=%s",
+                a.param_unstable?"true":"false", a.selection_changes, a.distinct_selected_values,
+                b.param_unstable?"true":"false", c.param_unstable?"true":"false"));
+     }
+
+   //--- T138: Aggregate() edge cases never fabricate numbers. (a) windows that
+   //--- selected nothing -> zero pooled trades, efficiency UNDEFINED (not 0.0
+   //--- presented as a real ratio), no flags raised, PF 0 and not "undefined".
+   //--- (b) one validated window with winners and NO losers -> profit factor
+   //--- flagged undefined (mathematically infinite) instead of a divide-by-zero
+   //--- number, and efficiency defined (mean train 1.0 > noise floor). -------
+   void T138_AggregateEdgeCases()
+     {
+      CGZWalkForwardEngine eng(m_logger);
+
+      GZ_WalkForwardResult a; a.Clear();
+      for(int i=0;i<2;i++) { a.windows[i].Clear(); a.windows[i].index=i; a.windows[i].status=GZ_WF_SEL_NO_ELIGIBLE; }
+      a.window_count = 2;
+      eng.Aggregate(a);
+      bool a_ok = (a.windows_selected==0) && (a.windows_validated==0) && (a.pooled_trades==0) && !a.efficiency_defined &&
+                  !a.overfit_suspect && !a.negative_oos && !a.param_unstable && !a.pooled_profit_factor_undefined &&
+                  (MathAbs(a.pooled_profit_factor)<0.0001) && !a.selection_edge_defined;
+
+      GZ_WalkForwardResult b; b.Clear();
+      WfSetValidatedWindow(b, 0, 1.0, 1.0, 3, 3, 0, 2.0, 0.0, 3, 1.0);
+      eng.Aggregate(b);
+      bool b_ok = b.pooled_profit_factor_undefined && (MathAbs(b.pooled_profit_factor)<0.0001) && b.efficiency_defined &&
+                  (MathAbs(b.walk_forward_efficiency-2.0)<0.0001) && !b.overfit_suspect && !b.negative_oos && (MathAbs(b.pooled_net_r-6.0)<0.0001);
+
+      bool ok = a_ok && b_ok;
+      AddResult("T138", ok, StringFormat("(a) no-selection: efficiency_defined=%s pooled_trades=%d | (b) no-losers: pf_undefined=%s efficiency=%.2f",
+                a.efficiency_defined?"true":"false", a.pooled_trades, b.pooled_profit_factor_undefined?"true":"false", b.walk_forward_efficiency));
+     }
+
+   //--- T139: RunWalkForward() end-to-end on the Phase 9 fixture replicated
+   //--- over 6 consecutive days (train 2d / validate 1d / step 1d -> exactly 3
+   //--- windows: the 4th would end past the data). Asserts STRUCTURE only:
+   //--- id/axis/baseline bookkeeping, config round-trip, 3 windows each with
+   //--- contiguous 2d+1d boundaries, every window actually processed (status
+   //--- != NOT_RUN/NO_DATA) with both candidates simulated on its training
+   //--- slice. -------------------------------------------------------------
+   void T139_RunWalkForwardStructure()
+     {
+      MqlRates m1[], m5[];
+      BuildWalkForwardFixture(6, m1, m5);
+
+      GZ_WalkForwardConfig cfg; WfIntegrationConfig(cfg);
+      CGZWalkForwardEngine eng(m_logger);
+      GZ_WalkForwardResult r;
+      eng.RunWalkForward(cfg, m1, m5, "DS_WF", GZ_VAL_VALID, GZ_VAL_VALID, r);
+
+      bool ok = (r.id=="WF_000001") && (r.axis_label=="PIVOT_STRENGTH") && (MathAbs(r.baseline_value-2.0)<0.0001) &&
+                (r.window_count==3) && !r.windows_capped && (r.dataset_id=="DS_WF") && (r.strategy_version==GZ_STRATEGY_VERSION) &&
+                (r.config.train_days==2) && (r.config.validate_days==1) && (r.config.step_days==1) && (r.config.candidate_count==2);
+      string statuses = "";
+      for(int k=0; k<r.window_count && ok; k++)
+        {
+         statuses += GZWfSelectionStatusToString(r.windows[k].status) + " ";
+         ok = (r.windows[k].status!=GZ_WF_SEL_NOT_RUN) && (r.windows[k].status!=GZ_WF_SEL_NO_DATA) &&
+              (r.windows[k].train_candidates_run==2) &&
+              (r.windows[k].train_end==r.windows[k].validate_start) &&
+              ((long)r.windows[k].validate_end-(long)r.windows[k].validate_start==86400) &&
+              ((long)r.windows[k].train_end-(long)r.windows[k].train_start==2*86400) &&
+              (r.windows[k].train_m5_bars>0) && (r.windows[k].validate_m5_bars>0);
+        }
+      AddResult("T139", ok, StringFormat("id=%s windows=%d statuses=[%s] selected=%d validated=%d pooled_trades=%d",
+                r.id, r.window_count, statuses, r.windows_selected, r.windows_validated, r.pooled_trades));
+     }
+
+   //--- T140: determinism - two INDEPENDENT engines over identical data+config
+   //--- produce field-for-field identical results, id included (both start at
+   //--- WF_000001 - same reasoning as T94/T127). ---------------------------
+   void T140_WalkForwardDeterminism()
+     {
+      MqlRates m1[], m5[];
+      BuildWalkForwardFixture(6, m1, m5);
+      GZ_WalkForwardConfig cfg; WfIntegrationConfig(cfg);
+
+      CGZWalkForwardEngine engA(m_logger);
+      GZ_WalkForwardResult rA;
+      engA.RunWalkForward(cfg, m1, m5, "DS_WF_DET", GZ_VAL_VALID, GZ_VAL_VALID, rA);
+
+      CGZWalkForwardEngine engB(m_logger);
+      GZ_WalkForwardResult rB;
+      engB.RunWalkForward(cfg, m1, m5, "DS_WF_DET", GZ_VAL_VALID, GZ_VAL_VALID, rB);
+
+      bool ok = (rA.id==rB.id) && (rA.window_count==rB.window_count) && (rA.window_count==3) &&
+                (rA.windows_selected==rB.windows_selected) && (rA.windows_validated==rB.windows_validated) &&
+                (rA.pooled_trades==rB.pooled_trades) && (MathAbs(rA.pooled_net_r-rB.pooled_net_r)<0.00001) &&
+                (rA.param_unstable==rB.param_unstable) && (rA.overfit_suspect==rB.overfit_suspect) &&
+                (MathAbs(rA.baseline_pooled_net_r-rB.baseline_pooled_net_r)<0.00001);
+      for(int k=0; k<rA.window_count && ok; k++)
+        {
+         ok = (rA.windows[k].status==rB.windows[k].status) &&
+              (MathAbs(rA.windows[k].selected_value-rB.windows[k].selected_value)<0.00001) &&
+              (rA.windows[k].train_stats.trade_count==rB.windows[k].train_stats.trade_count) &&
+              (MathAbs(rA.windows[k].train_stats.net_r-rB.windows[k].train_stats.net_r)<0.00001) &&
+              (rA.windows[k].val_stats.trade_count==rB.windows[k].val_stats.trade_count) &&
+              (MathAbs(rA.windows[k].val_stats.net_r-rB.windows[k].val_stats.net_r)<0.00001) &&
+              (rA.windows[k].train_start==rB.windows[k].train_start);
+        }
+      AddResult("T140", ok, StringFormat("idA=%s idB=%s windows=%d identical=%s", rA.id, rB.id, rA.window_count, ok?"true":"false"));
+     }
+
+   //--- T141: NO LOOKAHEAD in selection. Run once on the fixture; then run again
+   //--- on a copy where EVERY M1/M5 bar at or after window 0's train_end has
+   //--- had 500 added to O/H/L/C (i.e. all validation data and everything
+   //--- later is different). Window 0's whole TRAINING-side result - status,
+   //--- selected value, candidates run/eligible, training trade count and net
+   //--- R, the training bar count - must be identical, because the training
+   //--- sweep is never handed a bar at/after train_end. (Whether window 0
+   //--- actually produced trades on the fixture is not asserted; equality of
+   //--- the training side under a changed future is the property tested.) ----
+   void T141_SelectionIgnoresFutureData()
+     {
+      MqlRates m1[], m5[];
+      BuildWalkForwardFixture(6, m1, m5);
+      GZ_WalkForwardConfig cfg; WfIntegrationConfig(cfg);
+
+      CGZWalkForwardEngine engA(m_logger);
+      GZ_WalkForwardResult rA;
+      engA.RunWalkForward(cfg, m1, m5, "DS_WF_LA", GZ_VAL_VALID, GZ_VAL_VALID, rA);
+      datetime te = rA.windows[0].train_end;
+
+      MqlRates m1b[], m5b[];
+      ArrayResize(m1b, ArraySize(m1)); ArrayResize(m5b, ArraySize(m5));
+      int mutated = 0;
+      for(int i=0;i<ArraySize(m5);i++)
+        {
+         m5b[i] = m5[i];
+         if(m5b[i].time >= te) { m5b[i].open+=500; m5b[i].high+=500; m5b[i].low+=500; m5b[i].close+=500; mutated++; }
+        }
+      for(int i=0;i<ArraySize(m1);i++)
+        {
+         m1b[i] = m1[i];
+         if(m1b[i].time >= te) { m1b[i].open+=500; m1b[i].high+=500; m1b[i].low+=500; m1b[i].close+=500; mutated++; }
+        }
+
+      CGZWalkForwardEngine engB(m_logger);
+      GZ_WalkForwardResult rB;
+      engB.RunWalkForward(cfg, m1b, m5b, "DS_WF_LA", GZ_VAL_VALID, GZ_VAL_VALID, rB);
+
+      bool ok = (mutated>0) && (rA.window_count==rB.window_count) && (rA.window_count>=1) &&
+                (rA.windows[0].status==rB.windows[0].status) &&
+                (MathAbs(rA.windows[0].selected_value-rB.windows[0].selected_value)<0.00001) &&
+                (rA.windows[0].train_candidates_run==rB.windows[0].train_candidates_run) &&
+                (rA.windows[0].train_candidates_eligible==rB.windows[0].train_candidates_eligible) &&
+                (rA.windows[0].train_stats.trade_count==rB.windows[0].train_stats.trade_count) &&
+                (MathAbs(rA.windows[0].train_stats.net_r-rB.windows[0].train_stats.net_r)<0.00001) &&
+                (rA.windows[0].train_m5_bars==rB.windows[0].train_m5_bars);
+      AddResult("T141", ok, StringFormat("mutated_bars=%d w0: statusA=%s statusB=%s selA=%.2f selB=%.2f train_tradesA=%d train_tradesB=%d",
+                mutated, GZWfSelectionStatusToString(rA.windows[0].status), GZWfSelectionStatusToString(rB.windows[0].status),
+                rA.windows[0].selected_value, rB.windows[0].selected_value,
+                rA.windows[0].train_stats.trade_count, rB.windows[0].train_stats.trade_count));
+     }
+
+   //--- T142: RunWalkForward() input guards leave a well-formed, EMPTY result
+   //--- (never a half-filled one). No M5 data -> NO_M5_DATA note, 0 windows;
+   //--- no candidate values -> NO_CANDIDATES note, 0 windows; too-short data ->
+   //--- 0 windows with a NO_WINDOWS note and every aggregate at zero/false. ---
+   void T142_RunWalkForwardGuards()
+     {
+      CGZWalkForwardEngine eng(m_logger);
+      GZ_WalkForwardConfig cfg; WfIntegrationConfig(cfg);
+
+      MqlRates e1[], e5[];
+      GZ_WalkForwardResult r1;
+      eng.RunWalkForward(cfg, e1, e5, "DS_G1", GZ_VAL_VALID, GZ_VAL_VALID, r1);
+      bool n1 = false;
+      for(int i=0;i<r1.note_count;i++) if(StringFind(r1.notes[i], "NO_M5_DATA")>=0) n1 = true;
+      bool g1 = n1 && (r1.window_count==0) && (r1.id=="WF_000001");
+
+      MqlRates m1[], m5[];
+      BuildWalkForwardFixture(6, m1, m5);
+      GZ_WalkForwardConfig nocand = cfg; nocand.candidate_count = 0;
+      GZ_WalkForwardResult r2;
+      eng.RunWalkForward(nocand, m1, m5, "DS_G2", GZ_VAL_VALID, GZ_VAL_VALID, r2);
+      bool n2 = false;
+      for(int i=0;i<r2.note_count;i++) if(StringFind(r2.notes[i], "NO_CANDIDATES")>=0) n2 = true;
+      bool g2 = n2 && (r2.window_count==0) && (r2.id=="WF_000002");
+
+      MqlRates s1[], s5[];
+      BuildWalkForwardFixture(2, s1, s5);      // 2 days of data < 3 days (2 train + 1 validate) needed
+      GZ_WalkForwardResult r3;
+      eng.RunWalkForward(cfg, s1, s5, "DS_G3", GZ_VAL_VALID, GZ_VAL_VALID, r3);
+      bool n3 = false;
+      for(int i=0;i<r3.note_count;i++) if(StringFind(r3.notes[i], "NO_WINDOWS")>=0) n3 = true;
+      bool g3 = n3 && (r3.window_count==0) && (r3.pooled_trades==0) && (r3.windows_validated==0) && !r3.efficiency_defined;
+
+      bool ok = g1 && g2 && g3;
+      AddResult("T142", ok, StringFormat("no_m5=%s no_candidates=%s too_short=%s", g1?"ok":"FAIL", g2?"ok":"FAIL", g3?"ok":"FAIL"));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -4385,6 +4982,21 @@ public:
       T125_BestIdxTieBreakAndSafeToAdopt();
       T126_SweepBatchCapAndEmptyRejection();
       T127_SweepDeterminism();
+      T128_WindowBuilderKnownRange();
+      T129_WindowBuilderRefusals();
+      T130_WindowCapFlagged();
+      T131_SliceHalfOpen();
+      T132_TrainValidateSlicesDisjoint();
+      T133_SelectionMinTradesEligibility();
+      T134_SelectionUnsafePeakFallsBackToBaseline();
+      T135_SelectionNothingSelectedOutcomes();
+      T136_AggregatePooledStatsKnownNumbers();
+      T137_AggregateParamStability();
+      T138_AggregateEdgeCases();
+      T139_RunWalkForwardStructure();
+      T140_WalkForwardDeterminism();
+      T141_SelectionIgnoresFutureData();
+      T142_RunWalkForwardGuards();
      }
 
    int               PassCount() const
