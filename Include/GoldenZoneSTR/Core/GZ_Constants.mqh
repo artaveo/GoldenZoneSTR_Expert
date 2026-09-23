@@ -103,4 +103,11 @@
 #define GZ_DEFAULT_MAX_EXPERIMENT_BATCH_SIZE    200
 #define GZ_PROJECT_VERSION_P9                   "GZ-P9-ROADMAP v1.0"
 
+// Phase 10 - Filter Engine.
+// Defaults documented in GZ_FilterTypes.mqh (GZ_FilterSetConfig::Default()):
+// every filter mode defaults to OFF (safe - a fresh Phase 10 run changes
+// nothing about the Phase 1-9 trade population until a filter is explicitly
+// enabled via EA input), atr_period=14 mirrors GZ_DEFAULT_ATR_PERIOD (Phase 3).
+#define GZ_PROJECT_VERSION_P10                  "GZ-P10-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__

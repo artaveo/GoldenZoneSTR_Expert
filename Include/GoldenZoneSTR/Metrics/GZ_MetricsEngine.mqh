@@ -184,21 +184,20 @@ private:
       out.max_losing_streak            = max_lose_streak;
      }
 
-public:
-                     CGZMetricsEngine(CGZLogger *logger=NULL) { m_logger=logger; }
-
-   //--- Compute the full Phase 8 summary from an already-Init()'d,
-   //--- already-run CGZJournalEngine (Phase 7). time_engine/
-   //--- session_engine/session_profile are used ONLY to classify each
-   //--- trade's entry as inside/outside the configured session window
-   //--- for the by-session breakdown - the exact same evaluation the
-   //--- live pipeline already performs on every bar (see
-   //--- GZ_TradeSimulator.mqh); passing the caller's own already-
-   //--- configured instances guarantees this matches, rather than
-   //--- re-deriving a second session concept here.
-   void Compute(CGZJournalEngine &journal_engine, CGZTimeEngine &time_engine,
-                CGZSessionEngine &session_engine, const GZ_SessionProfile &session_profile,
-                GZ_MetricsSummary &out) const
+   //--- Shared aggregation core (Phase 8, unmodified) plus an OPTIONAL
+   //--- Phase 10 inclusion mask - see Compute()/ComputeFiltered() below.
+   //--- use_mask==false reproduces the exact Phase 8 behavior (every
+   //--- closed journal entry included) with zero new branching cost for
+   //--- every caller written before Phase 10 existed. When use_mask is
+   //--- true, mask[i] (aligned 1:1 with journal_engine.GetJournal(i), the
+   //--- SAME index space CGZFilterEngine's caller builds it in - see
+   //--- GoldenZoneSTR_Research.mq5) decides whether journal entry i is
+   //--- folded into the summary at all; mask is never consulted for an
+   //--- OPEN journal entry (design note 1, GZ_MetricsTypes.mqh - those
+   //--- are already excluded either way).
+   void ComputeInternal(CGZJournalEngine &journal_engine, CGZTimeEngine &time_engine,
+                         CGZSessionEngine &session_engine, const GZ_SessionProfile &session_profile,
+                         bool use_mask, const bool &mask[], GZ_MetricsSummary &out) const
      {
       out.Clear();
 
@@ -239,6 +238,8 @@ public:
          GZ_TradeJournal j = journal_engine.GetJournal(i);
          if(j.is_open)
             continue; // design note 1 (GZ_MetricsTypes.mqh) - closed trades only
+         if(use_mask && !mask[i])
+            continue; // Phase 10 - this closed trade's setup was filtered out
 
          closed_count++;
          double r = j.final_r;
@@ -313,17 +314,55 @@ public:
       out.range_end          = range_end;
       out.closed_trade_count = closed_count;
 
-      // out.filters stays at its Clear()-ed, reserved default - design
-      // note 7 (GZ_MetricsTypes.mqh) - DEFERRED TO PHASE 10/11.
+      // out.filters stays at its Clear()-ed default here - a WITH/WITHOUT
+      // population diff needs TWO ComputeInternal() passes (unfiltered +
+      // masked) to compare, which is the CALLER's job (see
+      // GoldenZoneSTR_Research.mq5's Phase 10 block) - populating
+      // out.filters from a single pass would be meaningless.
 
       ComputeRisk(r_sequence, out.risk);
 
       if(m_logger!=NULL)
          m_logger.Info("Metrics", StringFormat(
-            "Phase 8: closed_trades=%d net_r=%.3f avg_r=%.3f win_rate=%.1f%% pf=%s max_dd=%.3fR max_win_streak=%d max_lose_streak=%d",
-            out.trade.trade_count, out.trade.net_r, out.trade.avg_r, out.trade.win_rate*100.0,
+            "%s: closed_trades=%d net_r=%.3f avg_r=%.3f win_rate=%.1f%% pf=%s max_dd=%.3fR max_win_streak=%d max_lose_streak=%d",
+            use_mask?"Metrics(filtered)":"Metrics", out.trade.trade_count, out.trade.net_r, out.trade.avg_r, out.trade.win_rate*100.0,
             out.trade.profit_factor_undefined ? "UNDEFINED(inf)" : DoubleToString(out.trade.profit_factor,3),
             out.risk.max_drawdown_r, out.risk.max_winning_streak, out.risk.max_losing_streak));
+     }
+
+public:
+                     CGZMetricsEngine(CGZLogger *logger=NULL) { m_logger=logger; }
+
+   //--- Compute the full Phase 8 summary from an already-Init()'d,
+   //--- already-run CGZJournalEngine (Phase 7). time_engine/
+   //--- session_engine/session_profile are used ONLY to classify each
+   //--- trade's entry as inside/outside the configured session window
+   //--- for the by-session breakdown - the exact same evaluation the
+   //--- live pipeline already performs on every bar (see
+   //--- GZ_TradeSimulator.mqh); passing the caller's own already-
+   //--- configured instances guarantees this matches, rather than
+   //--- re-deriving a second session concept here.
+   void Compute(CGZJournalEngine &journal_engine, CGZTimeEngine &time_engine,
+                CGZSessionEngine &session_engine, const GZ_SessionProfile &session_profile,
+                GZ_MetricsSummary &out) const
+     {
+      bool dummy_mask[];
+      ComputeInternal(journal_engine, time_engine, session_engine, session_profile, false, dummy_mask, out);
+     }
+
+   //--- Phase 10: identical to Compute() except journal entry i is
+   //--- folded in only when mask[i]==true (ArraySize(mask) must equal
+   //--- journal_engine.JournalCount() - the caller builds it by index,
+   //--- aligned to GetJournal(i), typically from a CGZFilterEngine
+   //--- outcome keyed by that same entry's setup_id). Used to produce
+   //--- the WITH-filter population that GZ_FilterDiagnostics diffs
+   //--- against an unfiltered Compute() call - see
+   //--- GoldenZoneSTR_Research.mq5's Phase 10 block and T106.
+   void ComputeFiltered(CGZJournalEngine &journal_engine, CGZTimeEngine &time_engine,
+                         CGZSessionEngine &session_engine, const GZ_SessionProfile &session_profile,
+                         const bool &mask[], GZ_MetricsSummary &out) const
+     {
+      ComputeInternal(journal_engine, time_engine, session_engine, session_profile, true, mask, out);
      }
   };
 

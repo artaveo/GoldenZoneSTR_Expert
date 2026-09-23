@@ -81,16 +81,19 @@
 //|                                                                    |
 //| 7) Filter Diagnostics (Roadmap: "Setups before/after, Trades       |
 //|    before/after, Rejections, Win-rate/PF/Expectancy/DD/Trade-count |
-//|    deltas") needs a Filter Engine producing a WITH-filter and       |
-//|    WITHOUT-filter population to diff - that engine is explicitly   |
-//|    Phase 10 (Roadmap), which does not exist yet (Phase 7's Event    |
-//|    Ledger already reserves, and never emits, GZ_LEDGER_REJECTION/   |
-//|    GZ_LEDGER_FILTER_RESULT for the exact same reason - see          |
-//|    GZ_LedgerTypes.mqh). GZ_FilterDiagnostics below is therefore a   |
-//|    reserved, always-zero stub (per spec Section 3: "create only     |
-//|    the minimal interface/stub required by architecture. Do not      |
-//|    implement the later phase itself") - DEFERRED TO PHASE 10/11,    |
-//|    not fabricated from nothing.                                     |
+//|    deltas") needed a Filter Engine producing a WITH-filter and      |
+//|    WITHOUT-filter population to diff - Phase 10's CGZFilterEngine   |
+//|    (see GZ_Filter\GZ_FilterEngine.mqh) now IS that producer.        |
+//|    GZ_FilterDiagnostics.available is true exactly when the caller   |
+//|    ran that WITH/WITHOUT diff (GoldenZoneSTR_Research.mq5's Phase   |
+//|    10 block: CGZMetricsEngine::Compute() for the unfiltered         |
+//|    population, ::ComputeFiltered() for the filtered one, diffed     |
+//|    field-by-field into this struct) - still false/zero from a bare  |
+//|    CGZMetricsEngine::Compute() call with no such diff performed     |
+//|    (e.g. every Phase 1-9 test in this harness), which is exactly    |
+//|    the "available" flag's purpose: distinguish "no filter diagnostic|
+//|    was computed for this summary" from "filters were computed and   |
+//|    changed nothing" (both leave the delta fields at/near 0).        |
 //+------------------------------------------------------------------+
 #ifndef __GZ_METRICS_TYPES_MQH__
 #define __GZ_METRICS_TYPES_MQH__
@@ -201,9 +204,11 @@ struct GZ_BreakdownBucket
   };
 
 //+------------------------------------------------------------------+
-//| RESERVED stub for Phase 10/11 Filter Diagnostics (design note 7). |
-//| Every field stays at its zero/false default in this build -       |
-//| CGZMetricsEngine never populates this struct with anything else.  |
+//| Phase 10 Filter Diagnostics (design note 7) - a WITH-filter vs    |
+//| WITHOUT-filter population diff. CGZMetricsEngine itself never     |
+//| populates this struct (it stays at Clear()'s zero/false default   |
+//| from either Compute() or ComputeFiltered() alone) - the CALLER    |
+//| fills it by diffing two GZ_MetricsSummary.trade/.risk results.    |
 //+------------------------------------------------------------------+
 struct GZ_FilterDiagnostics
   {

@@ -10,6 +10,7 @@
 //| Phase 7 (T65-T74): MAE/MFE + R-Path + Event Ledger                |
 //| Phase 8 (T75-T86): Metrics + Reporting                            |
 //| Phase 9 (T87-T96): Experiment Configuration + Runner               |
+//| Phase 10 (T97-T106): Filter Engine                                 |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -49,6 +50,8 @@
 #include "..\Metrics\GZ_MetricsEngine.mqh"
 #include "..\Experiment\GZ_ExperimentTypes.mqh"
 #include "..\Experiment\GZ_ExperimentRunner.mqh"
+#include "..\Filter\GZ_FilterTypes.mqh"
+#include "..\Filter\GZ_FilterEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -2259,10 +2262,11 @@ public:
                 ent.TradeCount(), ext.ExitCount(), ledger.CountByType(GZ_LEDGER_ENTRY), ledger.CountByType(GZ_LEDGER_EXIT)));
      }
 
-   //--- T72: the RESERVED ledger event types (Rejection/FilterResult -
-   //--- DEFERRED TO PHASE 10) are never emitted anywhere in this build,
-   //--- even after a full pipeline run that produces real setups/trades/
-   //--- exits. --------------------------------------------------------------
+   //--- T72: a BARE CGZEventLedger::BuildFromFinalState() replay (no
+   //--- Phase 10 filter pass on top) never emits Rejection/FilterResult -
+   //--- those are constructed only by the SEPARATE Phase 10 pass a caller
+   //--- runs afterward (see GoldenZoneSTR_Research.mq5's Phase 10 block
+   //--- and T97-T106), never by BuildFromFinalState() itself. --------------
    void T72_LedgerReservedTypesNeverEmitted()
      {
       GZ_Swing swings[]; MqlRates m5[]; MqlRates m1[];
@@ -2679,10 +2683,11 @@ public:
                 j.JournalCount(), sum.trade.trade_count, sum.trade.net_r));
      }
 
-   //--- T84: Filter Diagnostics is a RESERVED stub (design note 7,
-   //--- GZ_MetricsTypes.mqh) - DEFERRED TO PHASE 10/11 - never populated
-   //--- with anything but its zero/false default in this build, even
-   //--- after a real Compute() call. ---------------------------------------
+   //--- T84: a BARE CGZMetricsEngine::Compute() call (Phase 8, unfiltered)
+   //--- never populates .filters with anything but its zero/false default -
+   //--- that struct is only filled by a CALLER diffing Compute() against
+   //--- ComputeFiltered() (Phase 10 - see T106 and GoldenZoneSTR_Research
+   //--- .mq5's Phase 10 block), never by Compute() itself. ------------------
    void T84_MetricsFilterDiagnosticsReservedStub()
      {
       CGZJournalEngine j(m_logger); j.Init();
@@ -2700,7 +2705,7 @@ public:
                 (MathAbs(sum.filters.win_rate_delta)<0.00001) && (MathAbs(sum.filters.profit_factor_delta)<0.00001) &&
                 (MathAbs(sum.filters.expectancy_delta)<0.00001) && (MathAbs(sum.filters.max_drawdown_delta)<0.00001) &&
                 (sum.filters.trade_count_delta==0);
-      AddResult("T84", ok, "Filter Diagnostics stays reserved (available=false, all fields zero) - DEFERRED TO PHASE 10/11");
+      AddResult("T84", ok, "A bare Compute() call leaves .filters at its zero/false default (available=false) - only ComputeFiltered()+diff (Phase 10, see T106) populates it");
      }
 
    //--- T85: Date range span - range_start/range_end must equal the
@@ -3140,6 +3145,394 @@ public:
       AddResult("T96", ok, "GZ_ExperimentConfig round-trips into GZ_ExperimentResult.config unchanged, field-for-field");
      }
 
+   //=====================================================================
+   //  PHASE 10: FILTER ENGINE  (T97-T106)
+   //=====================================================================
+
+   //--- helper: build a Setup with a BROKEN leg carrying exactly the
+   //--- origin/target/break facts a filter test needs to control. Other
+   //--- Setup fields (state/zone/etc.) are irrelevant to CGZFilterEngine
+   //--- (design note 5, GZ_FilterTypes.mqh - it reads leg.broken/
+   //--- break_time/break_price/target_swing/LegSize() and detected_time
+   //--- only), so they are left at harmless defaults. ---------------------
+   GZ_Setup MakeBrokenSetup(long id, ENUM_GZ_LEG_DIR dir, double origin_price, double target_price,
+                             double extreme_price, double break_price, datetime break_time)
+     {
+      GZ_Setup s; s.Clear();
+      s.id = id;
+      s.leg.Clear();
+      s.leg.id = id;
+      s.leg.direction = dir;
+      s.leg.origin_swing = MakeSwing(dir==GZ_LEG_BULLISH?GZ_SWING_LOW:GZ_SWING_HIGH, origin_price, break_time-3600, break_time-3600, id*10+1);
+      s.leg.target_swing = MakeSwing(dir==GZ_LEG_BULLISH?GZ_SWING_HIGH:GZ_SWING_LOW, target_price, break_time-1800, break_time-1800, id*10+2);
+      s.leg.extreme_price = extreme_price;
+      s.leg.extreme_time  = break_time;
+      s.leg.broken        = true;
+      s.leg.break_time    = break_time;
+      s.leg.break_price   = break_price;
+      s.detected_time      = break_time-3600;
+      s.state              = GZ_SETUP_BREAK_CONFIRMED;
+      return s;
+     }
+
+   //--- helper: build an UNBROKEN setup (leg.broken==false) - Break/Leg/
+   //--- Volume/Volatility all have nothing to measure for it and must
+   //--- report NOT_AVAILABLE (design note 5). -----------------------------
+   GZ_Setup MakeUnbrokenSetup(long id, ENUM_GZ_LEG_DIR dir, datetime detected_t)
+     {
+      GZ_Setup s; s.Clear();
+      s.id = id;
+      s.leg.Clear();
+      s.leg.id = id;
+      s.leg.direction = dir;
+      s.leg.broken = false;
+      s.detected_time = detected_t;
+      s.state = GZ_SETUP_LEG_DETECTED;
+      return s;
+     }
+
+   //--- helper: N flat bars (open==close==100, spaced 300s apart) whose
+   //--- true range is EXACTLY high-low every bar (prev close is always
+   //--- 100, so hc==lc==half-range - see T102's derivation note below),
+   //--- letting a test pick an exact ATR by choosing high/low per bar. --
+   void MakeFlatBars(MqlRates &r[], datetime t0, int count, double half_range, long vol=100)
+     {
+      ArrayResize(r, count);
+      for(int i=0;i<count;i++)
+         r[i] = MakeBar(t0+i*300, 100.0, 100.0+half_range, 100.0-half_range, 100.0, vol);
+     }
+
+   //--- T97: every filter OFF (Default()) -> overall_pass is ALWAYS true,
+   //--- even for a setup whose leg never broke (every measurable filter
+   //--- therefore NOT_AVAILABLE) - an OFF filter never gates anything. ---
+   void T97_FilterOffNeverGates()
+     {
+      MqlRates bars[]; MakeFlatBars(bars, MakeTime(2026,3,2,10,0), 3, 1.0);
+      GZ_Setup s = MakeUnbrokenSetup(1, GZ_LEG_BULLISH, bars[2].time);
+
+      GZ_FilterSetConfig cfg; cfg.Default(); // every mode == GZ_FILTER_OFF
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      CGZFilterEngine fe(m_logger);
+      GZ_SetupFilterOutcome out;
+      fe.Evaluate(s, bars, cfg, te, se, out);
+
+      bool all_not_available = true;
+      for(int i=0;i<GZ_FILTER_COUNT;i++)
+         if(out.results[i].result!=GZ_FILTER_NOT_AVAILABLE) all_not_available=false;
+
+      bool ok = out.overall_pass && all_not_available;
+      AddResult("T97", ok, StringFormat("overall_pass=%s all_not_available=%s (every filter OFF by default)",
+                out.overall_pass?"true":"false", all_not_available?"true":"false"));
+     }
+
+   //--- T98: Break Quality, INCLUDE mode. 6 flat bars (half_range=1.0 ->
+   //--- ATR=2.0 for every period<=5, see MakeFlatBars derivation), break
+   //--- at bar[5] with |break_price-target_price|=0.5 -> metric=0.25.
+   //--- threshold=0.20 -> PASS -> overall_pass true; threshold=0.30 ->
+   //--- FAIL -> overall_pass false. ---------------------------------------
+   void T98_BreakQualityIncludePassFail()
+     {
+      MqlRates bars[]; MakeFlatBars(bars, MakeTime(2026,3,2,10,0), 6, 1.0);
+      GZ_Setup s = MakeBrokenSetup(1, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5, bars[5].time);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      CGZFilterEngine fe(m_logger);
+
+      GZ_FilterSetConfig cfgPass; cfgPass.Default();
+      cfgPass.mode[GZ_FILTER_BREAK_QUALITY] = GZ_FILTER_INCLUDE;
+      cfgPass.atr_period = 5;
+      cfgPass.break_quality_min_atr_mult = 0.20;
+      GZ_SetupFilterOutcome outPass;
+      fe.Evaluate(s, bars, cfgPass, te, se, outPass);
+
+      GZ_FilterSetConfig cfgFail = cfgPass;
+      cfgFail.break_quality_min_atr_mult = 0.30;
+      GZ_SetupFilterOutcome outFail;
+      fe.Evaluate(s, bars, cfgFail, te, se, outFail);
+
+      bool ok = outPass.overall_pass && !outFail.overall_pass &&
+                MathAbs(outPass.results[GZ_FILTER_BREAK_QUALITY].metric_value-0.25)<0.0001;
+      AddResult("T98", ok, StringFormat("metric=%.4f pass_at_0.20=%s pass_at_0.30=%s",
+                outPass.results[GZ_FILTER_BREAK_QUALITY].metric_value,
+                outPass.overall_pass?"true":"false", outFail.overall_pass?"true":"false"));
+     }
+
+   //--- T99: NOT_AVAILABLE must never silently become PASS (explicit
+   //--- Roadmap requirement) - with only 2 bars fed, ATR(period=5) is not
+   //--- ready (idx<period), so Break Quality reports NOT_AVAILABLE; with
+   //--- the filter enabled (either INCLUDE or EXCLUDE) the setup must be
+   //--- rejected, never waved through. -----------------------------------
+   void T99_NotAvailableNeverAutoPasses()
+     {
+      MqlRates bars[]; MakeFlatBars(bars, MakeTime(2026,3,2,10,0), 2, 1.0);
+      GZ_Setup s = MakeBrokenSetup(1, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5, bars[1].time);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      CGZFilterEngine fe(m_logger);
+
+      GZ_FilterSetConfig cfgInc; cfgInc.Default();
+      cfgInc.atr_period = 5;
+      cfgInc.mode[GZ_FILTER_BREAK_QUALITY] = GZ_FILTER_INCLUDE;
+      GZ_SetupFilterOutcome outInc;
+      fe.Evaluate(s, bars, cfgInc, te, se, outInc);
+
+      GZ_FilterSetConfig cfgExc = cfgInc;
+      cfgExc.mode[GZ_FILTER_BREAK_QUALITY] = GZ_FILTER_EXCLUDE;
+      GZ_SetupFilterOutcome outExc;
+      fe.Evaluate(s, bars, cfgExc, te, se, outExc);
+
+      bool ok = (outInc.results[GZ_FILTER_BREAK_QUALITY].result==GZ_FILTER_NOT_AVAILABLE) &&
+                (outExc.results[GZ_FILTER_BREAK_QUALITY].result==GZ_FILTER_NOT_AVAILABLE) &&
+                !outInc.overall_pass && !outExc.overall_pass;
+      AddResult("T99", ok, StringFormat("result=%s include_pass=%s exclude_pass=%s (both must be false)",
+                GZFilterResultToString(outInc.results[GZ_FILTER_BREAK_QUALITY].result),
+                outInc.overall_pass?"true":"false", outExc.overall_pass?"true":"false"));
+     }
+
+   //--- T100: EXCLUDE mode inverts INCLUDE - same setup/bars as T98
+   //--- (underlying result PASS at threshold 0.20): EXCLUDE keeps only
+   //--- setups whose result is FAIL, so overall_pass must be FALSE at
+   //--- 0.20 and TRUE at 0.30 (mirror image of T98's INCLUDE results). --
+   void T100_ExcludeModeInverts()
+     {
+      MqlRates bars[]; MakeFlatBars(bars, MakeTime(2026,3,2,10,0), 6, 1.0);
+      GZ_Setup s = MakeBrokenSetup(1, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5, bars[5].time);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      CGZFilterEngine fe(m_logger);
+
+      GZ_FilterSetConfig cfg020; cfg020.Default();
+      cfg020.atr_period = 5;
+      cfg020.mode[GZ_FILTER_BREAK_QUALITY] = GZ_FILTER_EXCLUDE;
+      cfg020.break_quality_min_atr_mult = 0.20; // underlying PASS (metric 0.25>=0.20)
+      GZ_SetupFilterOutcome out020;
+      fe.Evaluate(s, bars, cfg020, te, se, out020);
+
+      GZ_FilterSetConfig cfg030 = cfg020;
+      cfg030.break_quality_min_atr_mult = 0.30; // underlying FAIL (metric 0.25<0.30)
+      GZ_SetupFilterOutcome out030;
+      fe.Evaluate(s, bars, cfg030, te, se, out030);
+
+      bool ok = !out020.overall_pass && out030.overall_pass;
+      AddResult("T100", ok, StringFormat("exclude_at_0.20(underlying PASS)=%s exclude_at_0.30(underlying FAIL)=%s",
+                out020.overall_pass?"true":"false", out030.overall_pass?"true":"false"));
+     }
+
+   //--- T101: Volume filter - trailing-average threshold, using a 5-bar
+   //--- lookback so the arithmetic is exact by hand (see design note in
+   //--- header comment above MakeFlatBars): bars[1..4]=100 tick_volume,
+   //--- break bar[5]=300 -> window[1..5] avg=(4*100+300)/5=140 ->
+   //--- metric=300/140=2.142857 -> PASS at mult=2.0, FAIL at mult=2.5. --
+   void T101_VolumeThreshold()
+     {
+      MqlRates bars[]; MakeFlatBars(bars, MakeTime(2026,3,2,10,0), 6, 1.0, 100);
+      bars[5].tick_volume = 300;
+      GZ_Setup s = MakeBrokenSetup(1, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5, bars[5].time);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      CGZFilterEngine fe(m_logger);
+
+      GZ_FilterSetConfig cfgPass; cfgPass.Default();
+      cfgPass.volume_lookback = 5;
+      cfgPass.mode[GZ_FILTER_VOLUME] = GZ_FILTER_INCLUDE;
+      cfgPass.volume_min_mult = 2.0;
+      GZ_SetupFilterOutcome outPass;
+      fe.Evaluate(s, bars, cfgPass, te, se, outPass);
+
+      GZ_FilterSetConfig cfgFail = cfgPass;
+      cfgFail.volume_min_mult = 2.5;
+      GZ_SetupFilterOutcome outFail;
+      fe.Evaluate(s, bars, cfgFail, te, se, outFail);
+
+      bool ok = outPass.overall_pass && !outFail.overall_pass &&
+                MathAbs(outPass.results[GZ_FILTER_VOLUME].metric_value-(300.0/140.0))<0.0001;
+      AddResult("T101", ok, StringFormat("metric=%.4f pass_at_2.0=%s pass_at_2.5=%s",
+                outPass.results[GZ_FILTER_VOLUME].metric_value,
+                outPass.overall_pass?"true":"false", outFail.overall_pass?"true":"false"));
+     }
+
+   //--- T102: Volatility filter - current ATR(period=3) vs baseline
+   //--- ATR(lookback=6). bars[1..3] half_range=2 (TR=4), bars[4..6]
+   //--- half_range=1 (TR=2): baseline avg over [1..6]=(4+4+4+2+2+2)/6=3.0,
+   //--- current avg over [4..6]=(2+2+2)/3=2.0 -> ratio=0.6667 -> PASS in
+   //--- [0.5,0.8], FAIL when min raised to 0.7 (too quiet vs baseline). --
+   void T102_VolatilityBand()
+     {
+      MqlRates bars[]; ArrayResize(bars,7);
+      datetime t0 = MakeTime(2026,3,2,10,0);
+      bars[0] = MakeBar(t0+0*300, 100,102,98,100);    // half_range=2, excluded from both windows
+      bars[1] = MakeBar(t0+1*300, 100,102,98,100);    // half_range=2
+      bars[2] = MakeBar(t0+2*300, 100,102,98,100);    // half_range=2
+      bars[3] = MakeBar(t0+3*300, 100,102,98,100);    // half_range=2
+      bars[4] = MakeBar(t0+4*300, 100,101,99,100);    // half_range=1
+      bars[5] = MakeBar(t0+5*300, 100,101,99,100);    // half_range=1
+      bars[6] = MakeBar(t0+6*300, 100,101,99,100);    // half_range=1 (break bar, idx=6)
+      GZ_Setup s = MakeBrokenSetup(1, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5, bars[6].time);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      CGZFilterEngine fe(m_logger);
+
+      GZ_FilterSetConfig cfgPass; cfgPass.Default();
+      cfgPass.atr_period = 3;
+      cfgPass.volatility_lookback = 6;
+      cfgPass.mode[GZ_FILTER_VOLATILITY] = GZ_FILTER_INCLUDE;
+      cfgPass.volatility_min_mult = 0.5;
+      cfgPass.volatility_max_mult = 0.8;
+      GZ_SetupFilterOutcome outPass;
+      fe.Evaluate(s, bars, cfgPass, te, se, outPass);
+
+      GZ_FilterSetConfig cfgFail = cfgPass;
+      cfgFail.volatility_min_mult = 0.7; // 0.667 < 0.7 -> too quiet
+      GZ_SetupFilterOutcome outFail;
+      fe.Evaluate(s, bars, cfgFail, te, se, outFail);
+
+      double expected = 2.0/3.0;
+      bool ok = outPass.overall_pass && !outFail.overall_pass &&
+                MathAbs(outPass.results[GZ_FILTER_VOLATILITY].metric_value-expected)<0.0001;
+      AddResult("T102", ok, StringFormat("metric=%.4f (expected %.4f) pass_in_band=%s fail_out_of_band=%s",
+                outPass.results[GZ_FILTER_VOLATILITY].metric_value, expected,
+                outPass.overall_pass?"true":"false", outFail.overall_pass?"true":"false"));
+     }
+
+   //--- T103: Session filter reuses the SAME CGZTimeEngine/CGZSessionEngine
+   //--- machinery every other phase uses (GZ_Session.mqh) - break inside
+   //--- [16:30,20:30) BROKER -> PASS; break outside -> FAIL. --------------
+   void T103_SessionFilterInsideOutside()
+     {
+      MqlRates barsIn[]; MakeFlatBars(barsIn, MakeTime(2026,3,2,17,0), 3, 1.0);   // 17:00 - inside
+      MqlRates barsOut[]; MakeFlatBars(barsOut, MakeTime(2026,3,2,10,0), 3, 1.0); // 10:00 - outside
+      GZ_Setup sIn  = MakeBrokenSetup(1, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5, barsIn[2].time);
+      GZ_Setup sOut = MakeBrokenSetup(2, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5, barsOut[2].time);
+
+      CGZTimeEngine te(m_logger);
+      GZ_TimeConfig tc; tc.Default(); tc.broker_offset_known=true; te.Configure(tc);
+      CGZSessionEngine se;
+      CGZFilterEngine fe(m_logger);
+
+      GZ_FilterSetConfig cfg; cfg.Default();
+      cfg.mode[GZ_FILTER_SESSION] = GZ_FILTER_INCLUDE;
+      cfg.session_profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,16,30,20,30,true,true);
+
+      GZ_SetupFilterOutcome outIn, outOut;
+      fe.Evaluate(sIn,  barsIn,  cfg, te, se, outIn);
+      fe.Evaluate(sOut, barsOut, cfg, te, se, outOut);
+
+      bool ok = outIn.overall_pass && !outOut.overall_pass &&
+                (outIn.results[GZ_FILTER_SESSION].result==GZ_FILTER_PASS) &&
+                (outOut.results[GZ_FILTER_SESSION].result==GZ_FILTER_FAIL);
+      AddResult("T103", ok, StringFormat("inside=%s(%s) outside=%s(%s)",
+                GZFilterResultToString(outIn.results[GZ_FILTER_SESSION].result), outIn.overall_pass?"pass":"reject",
+                GZFilterResultToString(outOut.results[GZ_FILTER_SESSION].result), outOut.overall_pass?"pass":"reject"));
+     }
+
+   //--- T104: VWAP / M15 Context / News are RESERVED - always
+   //--- NOT_AVAILABLE for ANY setup (design note 1, GZ_FilterTypes.mqh),
+   //--- harmless while OFF (default) but rejecting (never fabricating a
+   //--- PASS) the instant any one of them is turned INCLUDE/EXCLUDE. ----
+   void T104_ReservedFiltersAlwaysNotAvailable()
+     {
+      MqlRates bars[]; MakeFlatBars(bars, MakeTime(2026,3,2,17,0), 6, 1.0);
+      GZ_Setup s = MakeBrokenSetup(1, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5, bars[5].time);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); tc.broker_offset_known=true; te.Configure(tc);
+      CGZSessionEngine se;
+      CGZFilterEngine fe(m_logger);
+
+      GZ_FilterSetConfig cfgOff; cfgOff.Default(); // VWAP/M15/News all OFF
+      GZ_SetupFilterOutcome outOff;
+      fe.Evaluate(s, bars, cfgOff, te, se, outOff);
+
+      GZ_FilterSetConfig cfgOn = cfgOff;
+      cfgOn.mode[GZ_FILTER_VWAP] = GZ_FILTER_INCLUDE;
+      GZ_SetupFilterOutcome outOn;
+      fe.Evaluate(s, bars, cfgOn, te, se, outOn);
+
+      bool reserved_na = (outOff.results[GZ_FILTER_VWAP].result==GZ_FILTER_NOT_AVAILABLE) &&
+                          (outOff.results[GZ_FILTER_M15_CONTEXT].result==GZ_FILTER_NOT_AVAILABLE) &&
+                          (outOff.results[GZ_FILTER_NEWS].result==GZ_FILTER_NOT_AVAILABLE);
+      bool ok = reserved_na && outOff.overall_pass && !outOn.overall_pass;
+      AddResult("T104", ok, StringFormat("reserved_always_NA=%s off_harmless=%s on_rejects=%s",
+                reserved_na?"true":"false", outOff.overall_pass?"true":"false", (!outOn.overall_pass)?"true":"false"));
+     }
+
+   //--- T105: Determinism - identical setup+bars+cfg, evaluated twice,
+   //--- produce field-for-field identical outcomes (every metric_value,
+   //--- every result, overall_pass). --------------------------------------
+   void T105_FilterEngineDeterminism()
+     {
+      MqlRates bars[]; MakeFlatBars(bars, MakeTime(2026,3,2,17,0), 6, 1.0);
+      bars[5].tick_volume = 250;
+      GZ_Setup s = MakeBrokenSetup(1, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5, bars[5].time);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); tc.broker_offset_known=true; te.Configure(tc);
+      CGZSessionEngine se;
+      CGZFilterEngine fe(m_logger);
+
+      GZ_FilterSetConfig cfg; cfg.Default();
+      cfg.mode[GZ_FILTER_BREAK_QUALITY] = GZ_FILTER_INCLUDE;
+      cfg.mode[GZ_FILTER_VOLUME]        = GZ_FILTER_INCLUDE;
+      cfg.mode[GZ_FILTER_SESSION]       = GZ_FILTER_EXCLUDE;
+      cfg.session_profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,16,30,20,30,true,true);
+
+      GZ_SetupFilterOutcome outA, outB;
+      fe.Evaluate(s, bars, cfg, te, se, outA);
+      fe.Evaluate(s, bars, cfg, te, se, outB);
+
+      bool ok = (outA.overall_pass==outB.overall_pass);
+      for(int i=0;i<GZ_FILTER_COUNT && ok;i++)
+         ok = (outA.results[i].result==outB.results[i].result) &&
+              (MathAbs(outA.results[i].metric_value-outB.results[i].metric_value)<0.00001);
+      AddResult("T105", ok, StringFormat("passA=%s passB=%s", outA.overall_pass?"true":"false", outB.overall_pass?"true":"false"));
+     }
+
+   //--- T106: CGZMetricsEngine::ComputeFiltered() - a WITH/WITHOUT
+   //--- population diff. 4 closed trades (setup_id==trade_id, via
+   //--- AddClosedJournalTrade), realized_r = 1,-1,2,-2. Mask keeps
+   //--- setups #1 and #3 only (both winners: net_r=3, trade_count=2),
+   //--- excludes #2/#4 (both losers). Unfiltered stays 4 trades net_r=0;
+   //--- filtered must be exactly the #1/#3 subset - proving the mask is
+   //--- honored per-entry and the unfiltered Compute() is unaffected. ---
+   void T106_MetricsComputeFilteredDiff()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,3,3,9,0);
+      AddClosedJournalTrade(j, 1, GZ_LEG_BULLISH, t0,          t0+60,          1.0);
+      AddClosedJournalTrade(j, 2, GZ_LEG_BULLISH, t0+3600,     t0+3600+60,    -1.0);
+      AddClosedJournalTrade(j, 3, GZ_LEG_BULLISH, t0+7200,     t0+7200+60,     2.0);
+      AddClosedJournalTrade(j, 4, GZ_LEG_BULLISH, t0+10800,    t0+10800+60,   -2.0);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+
+      GZ_MetricsSummary before;
+      metrics.Compute(j, te, se, profile, before);
+
+      bool mask[4] = {true, false, true, false};
+      GZ_MetricsSummary after;
+      metrics.ComputeFiltered(j, te, se, profile, mask, after);
+
+      GZ_FilterDiagnostics diag; diag.Clear();
+      diag.available     = true;
+      diag.trades_before  = before.trade.trade_count;
+      diag.trades_after   = after.trade.trade_count;
+      diag.trade_count_delta = after.trade.trade_count - before.trade.trade_count;
+
+      bool ok = (before.trade.trade_count==4) && (MathAbs(before.trade.net_r-0.0)<0.0001) &&
+                (after.trade.trade_count==2) && (MathAbs(after.trade.net_r-3.0)<0.0001) &&
+                (after.trade.winners==2) && (after.trade.losers==0) &&
+                (diag.trades_before==4) && (diag.trades_after==2) && (diag.trade_count_delta==-2);
+      AddResult("T106", ok, StringFormat("before: n=%d net_r=%.3f | after(masked): n=%d net_r=%.3f winners=%d",
+                before.trade.trade_count, before.trade.net_r, after.trade.trade_count, after.trade.net_r, after.trade.winners));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -3240,6 +3633,16 @@ public:
       T94_ExperimentDeterminism();
       T95_ExperimentCallerSuppliedFieldsPassThrough();
       T96_ExperimentFullConfigRoundTrip();
+      T97_FilterOffNeverGates();
+      T98_BreakQualityIncludePassFail();
+      T99_NotAvailableNeverAutoPasses();
+      T100_ExcludeModeInverts();
+      T101_VolumeThreshold();
+      T102_VolatilityBand();
+      T103_SessionFilterInsideOutside();
+      T104_ReservedFiltersAlwaysNotAvailable();
+      T105_FilterEngineDeterminism();
+      T106_MetricsComputeFilteredDiff();
      }
 
    int               PassCount() const

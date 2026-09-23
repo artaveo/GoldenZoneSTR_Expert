@@ -30,17 +30,16 @@
 //|   GZ_LEDGER_SETUP_CANCELLED - an ordinary, non-error termination.  |
 //| - GZ_LEDGER_ENTRY / GZ_LEDGER_EXIT: one event per GZ_Trade (Phase  |
 //|   5) / per closed GZ_TradeExit (Phase 6).                          |
-//| - GZ_LEDGER_REJECTION / GZ_LEDGER_FILTER_RESULT: RESERVED. Neither |
-//|   "a rejection" nor "a filter result" has any producer anywhere in |
-//|   Phases 1-6 - the Filter Engine that would generate PASS/FAIL/    |
-//|   NOT_AVAILABLE filter outcomes (and therefore filter-driven       |
-//|   rejections) is explicitly Phase 10 (Roadmap). Per spec Section 3 |
-//|   ("create only the minimal interface/stub required by             |
-//|    architecture. Do not implement the later phase itself"), these  |
-//|   two members exist so the Event Ledger's shape does not need to   |
-//|   change again in Phase 10, but CGZEventLedger never constructs    |
-//|   either in this build (see T72) - DEFERRED TO PHASE 10, not       |
-//|   fabricated from nothing.                                         |
+//| - GZ_LEDGER_REJECTION / GZ_LEDGER_FILTER_RESULT: were RESERVED      |
+//|   through Phase 9 (no producer existed - see T72, which still      |
+//|   asserts a BARE CGZEventLedger::BuildFromFinalState() replay      |
+//|   never constructs either, since that method itself remains        |
+//|   filter-unaware by design - see GZ_EventLedger.mqh). Phase 10's   |
+//|   CGZFilterEngine is now the producer: GoldenZoneSTR_Research.mq5's|
+//|   Phase 10 block calls CGZEventLedger::RecordFilterResult() once   |
+//|   per evaluated setup and RecordRejection() for every setup whose  |
+//|   combined filter decision rejected an otherwise-taken trade - a   |
+//|   SEPARATE pass after BuildFromFinalState(), not a change to it.   |
 //+------------------------------------------------------------------+
 #ifndef __GZ_LEDGER_TYPES_MQH__
 #define __GZ_LEDGER_TYPES_MQH__
@@ -54,8 +53,8 @@ enum ENUM_GZ_LEDGER_EVENT_TYPE
    GZ_LEDGER_SETUP_INVALIDATED,
    GZ_LEDGER_ENTRY,
    GZ_LEDGER_EXIT,
-   GZ_LEDGER_REJECTION,      // reserved; DEFERRED TO PHASE 10 (Filter Engine) - never emitted in this build
-   GZ_LEDGER_FILTER_RESULT   // reserved; DEFERRED TO PHASE 10 (Filter Engine) - never emitted in this build
+   GZ_LEDGER_REJECTION,      // Phase 10 (Filter Engine) now the producer - see GZ_LedgerTypes.mqh header
+   GZ_LEDGER_FILTER_RESULT   // Phase 10 (Filter Engine) now the producer - see GZ_LedgerTypes.mqh header
   };
 
 //+------------------------------------------------------------------+
