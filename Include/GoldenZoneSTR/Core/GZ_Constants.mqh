@@ -89,4 +89,18 @@
 // report, same pattern as GZ_PROJECT_VERSION_P7.
 #define GZ_PROJECT_VERSION_P8         "GZ-P8-ROADMAP v1.0"
 
+// Phase 9 - Experiment Configuration + Runner.
+// GZ_STRATEGY_VERSION is the pre-freeze strategy tag every GZ_ExperimentResult
+// carries as its "Strategy version" field (Roadmap Result requirement). It
+// deliberately uses the exact vocabulary the Roadmap's own Phase 16 (Research
+// Freeze) example uses ("GZ_STR v1.0 -> GZ_STR v1.1") - Phase 16 itself is not
+// implemented yet, so this constant is the single, not-yet-bumped baseline tag;
+// bumping it on a material change is explicitly Phase 16's job, not Phase 9's.
+// GZ_DEFAULT_MAX_EXPERIMENT_BATCH_SIZE enforces the Roadmap's own Phase 9 rule
+// ("do not use a huge Grid all at once; research should be staged") as an
+// actual runtime cap, not just a comment - see GZ_ExperimentRunner.mqh.
+#define GZ_STRATEGY_VERSION                    "GZ_STR v1.0"
+#define GZ_DEFAULT_MAX_EXPERIMENT_BATCH_SIZE    200
+#define GZ_PROJECT_VERSION_P9                   "GZ-P9-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__

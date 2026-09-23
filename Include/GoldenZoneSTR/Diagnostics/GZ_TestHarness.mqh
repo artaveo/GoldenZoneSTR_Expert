@@ -9,6 +9,7 @@
 //| Phase 6 (T55-T64): Exit Engine (SL/TP/BE)                         |
 //| Phase 7 (T65-T74): MAE/MFE + R-Path + Event Ledger                |
 //| Phase 8 (T75-T86): Metrics + Reporting                            |
+//| Phase 9 (T87-T96): Experiment Configuration + Runner               |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -46,6 +47,8 @@
 #include "..\Journal\GZ_EventLedger.mqh"
 #include "..\Metrics\GZ_MetricsTypes.mqh"
 #include "..\Metrics\GZ_MetricsEngine.mqh"
+#include "..\Experiment\GZ_ExperimentTypes.mqh"
+#include "..\Experiment\GZ_ExperimentRunner.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -2784,6 +2787,330 @@ public:
                 sumA.trade.trade_count, sumB.trade.trade_count, sumA.trade.net_r, sumB.trade.net_r));
      }
 
+   //=====================================================================
+   //  PHASE 9: EXPERIMENT CONFIGURATION + RUNNER  (T87-T96)
+   //=====================================================================
+
+   //--- Shared fixture for T88-T96: a real, contiguous 11-bar M5 series
+   //--- (NOT hand-injected GZ_Swing records like BuildPhase7Scenario -
+   //--- CGZExperimentRunner detects swings itself via CGZSwingEngine, so
+   //--- this must be genuine raw OHLC with real pivot windows) that,
+   //--- under the baseline pivot_strength=2, produces EXACTLY two
+   //--- confirmed swings - LOW=80 (pivot idx2, confirmed idx4) and
+   //--- HIGH=140 (pivot idx6, confirmed idx8) - which the baseline
+   //--- LAST_SWING Leg Engine turns into one bullish leg, broken on the
+   //--- very next bar (idx9, CLOSE=141>140), which dips back into the
+   //--- default [0.30,0.90] fib zone on the bar after that (idx10,
+   //--- range [95,139] overlaps zone [86,122]) to reach WAITING_ENTRY.
+   //--- Every other bar in the array is deliberately NOT a pivot at any
+   //--- strength>=2 (verified by hand - see GZ_ExperimentRunner.mqh
+   //--- design notes for the reasoning) so this fixture is exactly two
+   //--- swings, no more, at the baseline strength.
+   void BuildPhase9M5Series(MqlRates &m5[])
+     {
+      datetime t0 = MakeTime(2026,3,2,9,0);
+      ArrayResize(m5,11);
+      m5[0]  = MakeHL(t0+0*300,  105,100);
+      m5[1]  = MakeHL(t0+1*300,  103,98);
+      m5[2]  = MakeHL(t0+2*300,  102,80);   // pivot LOW candidate (L=80)
+      m5[3]  = MakeHL(t0+3*300,  104,95);
+      m5[4]  = MakeHL(t0+4*300,  106,97);   // LOW confirmed here (t0+4*300)
+      m5[5]  = MakeHL(t0+5*300,  108,99);
+      m5[6]  = MakeHL(t0+6*300,  140,100);  // pivot HIGH candidate (H=140)
+      m5[7]  = MakeHL(t0+7*300,  115,101);
+      m5[8]  = MakeHL(t0+8*300,  112,98);   // HIGH confirmed here (t0+8*300), close=105<140, no break yet
+      m5[9]  = MakeBar(t0+9*300, 112,142,110,141); // BREAK bar: close=141>140 (baseline CLOSE break)
+      m5[10] = MakeHL(t0+10*300, 139,95);   // zone-touch bar: range [95,139] overlaps zone [86,122]
+     }
+
+   //--- M1 bars that, layered on BuildPhase9M5Series()'s zone-touch bar
+   //--- (m5[10], time T), trigger a baseline TOUCH entry at the default
+   //--- entry_fib_ratio=0.618 (price=140-0.618*60=102.92, inside m1[0]'s
+   //--- [102,104.5] range) and then a comfortable TP_HIT exit (baseline
+   //--- STRUCTURE SL=leg origin=80, TP=2R - m1[1] clears any realistic
+   //--- TP regardless of the exact entry fill price).
+   void BuildPhase9M1Series(MqlRates &m1[], datetime m5_touch_time)
+     {
+      datetime T = m5_touch_time;
+      ArrayResize(m1,2);
+      m1[0] = MakeBar(T+300+60, 104,104.5,102,102.5);   // crosses 102.92 -> TOUCH entry
+      m1[1] = MakeBar(T+600+60, 155,160,154,158);        // well past TP
+     }
+
+   //--- T87: Experiment ID format/sequencing - "GZ_%06d", starting at 1,
+   //--- incrementing once per Execute() call regardless of outcome. -------
+   void T87_ExperimentIdSequencing()
+     {
+      CGZExperimentRunner runner(m_logger);
+      bool okBefore = (runner.NextSequence()==1);
+
+      GZ_ExperimentConfig cfg; cfg.Default();
+      MqlRates emptyM1[], emptyM5[];
+      GZ_ExperimentResult r1, r2;
+      runner.RunSingle(cfg, emptyM1, emptyM5, "DS1", GZ_VAL_VALID, GZ_VAL_VALID, r1); // no M5 - still consumes an id
+      runner.RunSingle(cfg, emptyM1, emptyM5, "DS1", GZ_VAL_VALID, GZ_VAL_VALID, r2);
+
+      bool ok = okBefore && (r1.id=="GZ_000001") && (r2.id=="GZ_000002") && (runner.NextSequence()==3);
+      AddResult("T87", ok, StringFormat("id1=%s id2=%s next_seq=%d", r1.id, r2.id, (int)runner.NextSequence()));
+     }
+
+   //--- T88: no M5 data - NO_M5_DATA warning, zero-everything, but the
+   //--- result's own bookkeeping (id/dataset_id/config copy/strategy
+   //--- version/validation status) is still fully populated - a rejected
+   //--- experiment is still a COMPLETE, well-formed record, not a half-
+   //--- filled one. -----------------------------------------------------
+   void T88_ExperimentNoM5DataWarning()
+     {
+      CGZExperimentRunner runner(m_logger);
+      GZ_ExperimentConfig cfg; cfg.Default();
+      cfg.symbol = "XAUUSD";
+      cfg.pivot_strength = 3; // arbitrary non-default, to prove config copies through
+      MqlRates emptyM1[], emptyM5[];
+      GZ_ExperimentResult r;
+      runner.RunSingle(cfg, emptyM1, emptyM5, "DS_EMPTY", GZ_VAL_VALID_WITH_WARNINGS, GZ_VAL_INVALID, r);
+
+      bool ok = (r.id=="GZ_000001") && (r.dataset_id=="DS_EMPTY") && (r.config.pivot_strength==3) &&
+                (r.strategy_version==GZ_STRATEGY_VERSION) &&
+                (r.m1_validation_status==GZ_VAL_VALID_WITH_WARNINGS) && (r.m5_validation_status==GZ_VAL_INVALID) &&
+                (r.HasWarning("NO_M5_DATA")) && (r.trade_count==0) && (r.swing_count==0) &&
+                (MathAbs(r.metrics.trade.net_r)<0.00001);
+      AddResult("T88", ok, StringFormat("warnings=%d has_NO_M5_DATA=%s trade_count=%d",
+                r.warning_count, r.HasWarning("NO_M5_DATA")?"true":"false", r.trade_count));
+     }
+
+   //--- T89: full pipeline from RAW M1/M5 data, through real swing
+   //--- detection (Phase 2), leg/break (Phase 3), setup (Phase 4), entry
+   //--- (Phase 5), exit (Phase 6), journal (Phase 7) and metrics (Phase
+   //--- 8) - proving CGZExperimentRunner actually wires every phase
+   //--- together, not just Phase 5-8 in isolation (see T71/T86, which
+   //--- start from hand-injected swings). -------------------------------
+   void T89_ExperimentFullPipelineFromRawData()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates m1[]; BuildPhase9M1Series(m1, m5[10].time);
+
+      CGZExperimentRunner runner(m_logger);
+      GZ_ExperimentConfig cfg; cfg.Default();
+      cfg.time_config.broker_offset_known = true; // avoid the (expected, harmless) BROKER_OFFSET_UNKNOWN warning here
+
+      GZ_ExperimentResult r;
+      runner.RunSingle(cfg, m1, m5, "DS_RAW", GZ_VAL_VALID, GZ_VAL_VALID, r);
+
+      bool ok = (r.swing_count==2) && (r.leg_count==1) && (r.setup_count==1) &&
+                (r.trade_count>=1) && (r.exit_count==r.trade_count) &&
+                (!r.HasWarning("NO_TRADES_PRODUCED")) && (!r.HasWarning("NO_SWINGS_DETECTED")) &&
+                (r.metrics.trade.trade_count==r.trade_count) &&
+                (r.range_start==m5[0].time) && (r.range_end==m5[10].time);
+      AddResult("T89", ok, StringFormat("swings=%d legs=%d setups=%d trades=%d exits=%d net_r=%.3f warnings=%d",
+                r.swing_count, r.leg_count, r.setup_count, r.trade_count, r.exit_count, r.metrics.trade.net_r, r.warning_count));
+     }
+
+   //--- T90: same raw M5 fixture (reaches WAITING_ENTRY - swings/legs/
+   //--- setups all still form normally) but with NO M1 data supplied -
+   //--- the baseline TOUCH model can only ever fire on an M1 bar, so
+   //--- entries are impossible here by construction. Proves
+   //--- NO_TRADES_PRODUCED means specifically "no ENTRY", not "the whole
+   //--- pipeline produced nothing". --------------------------------------
+   void T90_ExperimentNoTradesProducedWarning()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates emptyM1[];
+
+      CGZExperimentRunner runner(m_logger);
+      GZ_ExperimentConfig cfg; cfg.Default();
+      cfg.time_config.broker_offset_known = true;
+
+      GZ_ExperimentResult r;
+      runner.RunSingle(cfg, emptyM1, m5, "DS_NOENTRY", GZ_VAL_VALID, GZ_VAL_VALID, r);
+
+      bool ok = (r.swing_count==2) && (r.leg_count==1) && (r.setup_count==1) &&
+                (r.trade_count==0) && (r.exit_count==0) && (r.HasWarning("NO_TRADES_PRODUCED")) &&
+                (!r.HasWarning("NO_SWINGS_DETECTED")) && (MathAbs(r.metrics.trade.net_r)<0.00001);
+      AddResult("T90", ok, StringFormat("swings=%d legs=%d setups=%d trades=%d has_NO_TRADES_PRODUCED=%s",
+                r.swing_count, r.leg_count, r.setup_count, r.trade_count, r.HasWarning("NO_TRADES_PRODUCED")?"true":"false"));
+     }
+
+   //--- T91: RunBatch as a SWEEP - two configs varying ONLY
+   //--- pivot_strength (1 vs 2) over the IDENTICAL raw M5 series must
+   //--- produce two INDEPENDENT results whose own config/swing_count
+   //--- differ exactly as expected - proving each experiment in a batch
+   //--- gets its own config (not a shared/aliased/last-write-wins one)
+   //--- and its own fresh engines (see header). ---------------------------
+   void T91_ExperimentSweepByPivotStrength()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates emptyM1[];
+
+      GZ_ExperimentConfig base; base.Default();
+      base.time_config.broker_offset_known = true;
+
+      GZ_ExperimentConfig configs[];
+      ArrayResize(configs,2);
+      configs[0] = base; configs[0].pivot_strength = 1;
+      configs[1] = base; configs[1].pivot_strength = 2;
+
+      CGZExperimentRunner runner(m_logger);
+      GZ_ExperimentResult results[];
+      ENUM_GZ_BATCH_STATUS status = runner.RunBatch(configs, 2, GZ_EXPERIMENT_SWEEP, emptyM1, m5, "DS_SWEEP",
+                                                      GZ_VAL_VALID, GZ_VAL_VALID, results);
+
+      bool ok = (status==GZ_BATCH_OK) && (ArraySize(results)==2) &&
+                (results[0].id=="GZ_000001") && (results[1].id=="GZ_000002") &&
+                (results[0].config.pivot_strength==1) && (results[1].config.pivot_strength==2) &&
+                (results[0].swing_count>results[1].swing_count) && (results[1].swing_count==2);
+      AddResult("T91", ok, StringFormat("strength1_swings=%d strength2_swings=%d (expect 1st > 2nd, 2nd==2)",
+                results[0].swing_count, results[1].swing_count));
+     }
+
+   //--- T92: RunBatch rejects an oversized batch OUTRIGHT (Roadmap:
+   //--- "don't run one huge Grid at once") - zero results, zero
+   //--- experiments actually executed (m_next_seq/NextSequence()
+   //--- untouched), never a silent truncation to the cap. ------------------
+   void T92_ExperimentBatchSizeCapRejection()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates emptyM1[];
+
+      GZ_ExperimentConfig base; base.Default();
+      GZ_ExperimentConfig configs[];
+      ArrayResize(configs,5);
+      for(int i=0;i<5;i++) configs[i] = base;
+
+      CGZExperimentRunner runner(m_logger);
+      runner.SetMaxBatchSize(3);
+      long seqBefore = runner.NextSequence();
+
+      GZ_ExperimentResult results[];
+      ENUM_GZ_BATCH_STATUS status = runner.RunBatch(configs, 5, GZ_EXPERIMENT_GRID, emptyM1, m5, "DS_TOO_BIG",
+                                                      GZ_VAL_VALID, GZ_VAL_VALID, results);
+
+      bool ok = (status==GZ_BATCH_REJECTED_TOO_LARGE) && (ArraySize(results)==0) && (runner.NextSequence()==seqBefore);
+      AddResult("T92", ok, StringFormat("status=%s results=%d seq_before=%d seq_after=%d",
+                EnumToString(status), ArraySize(results), (int)seqBefore, (int)runner.NextSequence()));
+     }
+
+   //--- T93: RunBatch within the cap succeeds normally - N configs in, N
+   //--- results out, sequential ids. Also covers the empty-batch
+   //--- rejection (count=0) as its own, distinct outcome. -----------------
+   void T93_ExperimentBatchWithinCapAndEmptyBatch()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates emptyM1[];
+
+      GZ_ExperimentConfig base; base.Default();
+      GZ_ExperimentConfig configs[];
+      ArrayResize(configs,3);
+      for(int i=0;i<3;i++) configs[i] = base;
+
+      CGZExperimentRunner runner(m_logger);
+      GZ_ExperimentResult results[];
+      ENUM_GZ_BATCH_STATUS status = runner.RunBatch(configs, 3, GZ_EXPERIMENT_BATCH, emptyM1, m5, "DS_OK",
+                                                      GZ_VAL_VALID, GZ_VAL_VALID, results);
+      bool batchOk = (status==GZ_BATCH_OK) && (ArraySize(results)==3) &&
+                     (results[0].id=="GZ_000001") && (results[1].id=="GZ_000002") && (results[2].id=="GZ_000003");
+
+      GZ_ExperimentConfig emptyConfigs[];
+      GZ_ExperimentResult emptyResults[];
+      ENUM_GZ_BATCH_STATUS emptyStatus = runner.RunBatch(emptyConfigs, 0, GZ_EXPERIMENT_BATCH, emptyM1, m5, "DS_OK",
+                                                           GZ_VAL_VALID, GZ_VAL_VALID, emptyResults);
+      bool emptyOk = (emptyStatus==GZ_BATCH_REJECTED_EMPTY) && (ArraySize(emptyResults)==0);
+
+      bool ok = batchOk && emptyOk;
+      AddResult("T93", ok, StringFormat("batch_status=%s results=%d | empty_status=%s",
+                EnumToString(status), ArraySize(results), EnumToString(emptyStatus)));
+     }
+
+   //--- T94: Determinism - two INDEPENDENT CGZExperimentRunner instances
+   //--- over identical config+data produce identical results (both start
+   //--- their own id sequence at GZ_000001, so full equality - including
+   //--- id - is the correct expectation here, unlike a shared-runner
+   //--- SWEEP where ids intentionally differ per experiment). -------------
+   void T94_ExperimentDeterminism()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates m1[]; BuildPhase9M1Series(m1, m5[10].time);
+
+      GZ_ExperimentConfig cfg; cfg.Default();
+      cfg.time_config.broker_offset_known = true;
+
+      CGZExperimentRunner runnerA(m_logger);
+      GZ_ExperimentResult a;
+      runnerA.RunSingle(cfg, m1, m5, "DS_DET", GZ_VAL_VALID, GZ_VAL_VALID, a);
+
+      CGZExperimentRunner runnerB(m_logger);
+      GZ_ExperimentResult b;
+      runnerB.RunSingle(cfg, m1, m5, "DS_DET", GZ_VAL_VALID, GZ_VAL_VALID, b);
+
+      bool ok = (a.id==b.id) && (a.swing_count==b.swing_count) && (a.leg_count==b.leg_count) &&
+                (a.setup_count==b.setup_count) && (a.trade_count==b.trade_count) && (a.exit_count==b.exit_count) &&
+                (a.trade_count==b.trade_count) && (MathAbs(a.metrics.trade.net_r-b.metrics.trade.net_r)<0.00001) &&
+                (MathAbs(a.metrics.trade.win_rate-b.metrics.trade.win_rate)<0.00001) &&
+                (a.warning_count==b.warning_count) && (a.range_start==b.range_start) && (a.range_end==b.range_end);
+      AddResult("T94", ok, StringFormat("tradesA=%d tradesB=%d net_rA=%.3f net_rB=%.3f",
+                a.trade_count, b.trade_count, a.metrics.trade.net_r, b.metrics.trade.net_r));
+     }
+
+   //--- T95: Dataset ID / Strategy version / Data validation status are
+   //--- carried through into the result EXACTLY as the caller supplied
+   //--- them (design note 4, GZ_ExperimentTypes.mqh) - never recomputed,
+   //--- never silently altered. --------------------------------------------
+   void T95_ExperimentCallerSuppliedFieldsPassThrough()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates emptyM1[];
+
+      CGZExperimentRunner runner(m_logger);
+      GZ_ExperimentConfig cfg; cfg.Default();
+      GZ_ExperimentResult r;
+      runner.RunSingle(cfg, emptyM1, m5, "XAUUSD_M1M5_2026.01.01_2026.06.13", GZ_VAL_VALID_WITH_WARNINGS, GZ_VAL_VALID, r);
+
+      bool ok = (r.dataset_id=="XAUUSD_M1M5_2026.01.01_2026.06.13") &&
+                (r.strategy_version==GZ_STRATEGY_VERSION) &&
+                (r.m1_validation_status==GZ_VAL_VALID_WITH_WARNINGS) &&
+                (r.m5_validation_status==GZ_VAL_VALID);
+      AddResult("T95", ok, StringFormat("dataset_id=%s strategy_version=%s m1_status=%d m5_status=%d",
+                r.dataset_id, r.strategy_version, (int)r.m1_validation_status, (int)r.m5_validation_status));
+     }
+
+   //--- T96: GZ_ExperimentConfig round-trips through GZ_ExperimentResult
+   //--- byte-for-byte (Roadmap "Full configuration" Result field) - every
+   //--- field the caller set is exactly what comes back out, across
+   //--- several representative fields from every embedded sub-config. -----
+   void T96_ExperimentFullConfigRoundTrip()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates emptyM1[];
+
+      GZ_ExperimentConfig cfg; cfg.Default();
+      cfg.symbol                       = "EURUSD";
+      cfg.pivot_strength                = 4;
+      cfg.leg_variant                   = GZ_LEG_VARIANT_MIN_ATR_DISTANCE;
+      cfg.break_config.buffer_atr_mult  = 0.25;
+      cfg.fib_zone_min_ratio            = 0.35;
+      cfg.fib_zone_max_ratio            = 0.85;
+      cfg.entry_config.model            = GZ_ENTRY_LIMIT;
+      cfg.entry_config.entry_fib_ratio  = 0.5;
+      cfg.exit_config.tp_r_multiple     = 3.5;
+      cfg.exit_config.be_trigger_r      = 1.0;
+      cfg.apply_session_filter          = true;
+
+      CGZExperimentRunner runner(m_logger);
+      GZ_ExperimentResult r;
+      runner.RunSingle(cfg, emptyM1, m5, "DS_ROUNDTRIP", GZ_VAL_VALID, GZ_VAL_VALID, r);
+
+      bool ok = (r.config.symbol==cfg.symbol) && (r.config.pivot_strength==cfg.pivot_strength) &&
+                (r.config.leg_variant==cfg.leg_variant) &&
+                (MathAbs(r.config.break_config.buffer_atr_mult-cfg.break_config.buffer_atr_mult)<0.00001) &&
+                (MathAbs(r.config.fib_zone_min_ratio-cfg.fib_zone_min_ratio)<0.00001) &&
+                (MathAbs(r.config.fib_zone_max_ratio-cfg.fib_zone_max_ratio)<0.00001) &&
+                (r.config.entry_config.model==cfg.entry_config.model) &&
+                (MathAbs(r.config.entry_config.entry_fib_ratio-cfg.entry_config.entry_fib_ratio)<0.00001) &&
+                (MathAbs(r.config.exit_config.tp_r_multiple-cfg.exit_config.tp_r_multiple)<0.00001) &&
+                (MathAbs(r.config.exit_config.be_trigger_r-cfg.exit_config.be_trigger_r)<0.00001) &&
+                (r.config.apply_session_filter==cfg.apply_session_filter);
+      AddResult("T96", ok, "GZ_ExperimentConfig round-trips into GZ_ExperimentResult.config unchanged, field-for-field");
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -2874,6 +3201,16 @@ public:
       T84_MetricsFilterDiagnosticsReservedStub();
       T85_MetricsDateRangeSpan();
       T86_MetricsDeterminism();
+      T87_ExperimentIdSequencing();
+      T88_ExperimentNoM5DataWarning();
+      T89_ExperimentFullPipelineFromRawData();
+      T90_ExperimentNoTradesProducedWarning();
+      T91_ExperimentSweepByPivotStrength();
+      T92_ExperimentBatchSizeCapRejection();
+      T93_ExperimentBatchWithinCapAndEmptyBatch();
+      T94_ExperimentDeterminism();
+      T95_ExperimentCallerSuppliedFieldsPassThrough();
+      T96_ExperimentFullConfigRoundTrip();
      }
 
    int               PassCount() const
