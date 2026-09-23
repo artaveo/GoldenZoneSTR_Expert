@@ -8,6 +8,7 @@
 //| Phase 5 (T46-T54): Entry Engine + Historical Trade Simulator      |
 //| Phase 6 (T55-T64): Exit Engine (SL/TP/BE)                         |
 //| Phase 7 (T65-T74): MAE/MFE + R-Path + Event Ledger                |
+//| Phase 8 (T75-T86): Metrics + Reporting                            |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -43,6 +44,8 @@
 #include "..\Journal\GZ_JournalEngine.mqh"
 #include "..\Journal\GZ_LedgerTypes.mqh"
 #include "..\Journal\GZ_EventLedger.mqh"
+#include "..\Metrics\GZ_MetricsTypes.mqh"
+#include "..\Metrics\GZ_MetricsEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -2392,6 +2395,395 @@ public:
                 journalA.JournalCount(), journalB.JournalCount(), ledgerA.EventCount(), ledgerB.EventCount()));
      }
 
+   //=====================================================================
+   //  PHASE 8: METRICS + REPORTING  (T75-T86)
+   //=====================================================================
+
+   //--- helper: push one already-CLOSED synthetic trade into a
+   //--- CGZJournalEngine. realized_r is passed directly to
+   //--- OnTradeClosed() (its own documented parameter - see
+   //--- GZ_JournalEngine.mqh) so tests can target an EXACT R outcome
+   //--- without needing to reverse-engineer bar prices that would
+   //--- produce it. mae_bar/mfe_bar are OPTIONAL extra OnBar() calls a
+   //--- test can use to also control mae_r/mfe_r precisely; when NULL,
+   //--- the trade closes with its Phase 7 default (mae_r=mfe_r=0.0,
+   //--- same as OnTradeEntered() leaves it - see GZ_JournalEngine.mqh).
+   void AddClosedJournalTrade(CGZJournalEngine &j, long id, ENUM_GZ_LEG_DIR dir,
+                               datetime entry_t, datetime exit_t, double realized_r,
+                               double initial_risk=1.0)
+     {
+      GZ_Trade tr = MakeTrade(id, id, dir, 100.0, entry_t);
+      j.OnTradeEntered(tr, initial_risk);
+      j.OnTradeClosed(id, exit_t, 100.0, realized_r);
+     }
+
+   //--- T75: Trade Metrics baseline - 3 winners/2 losers/1 breakeven,
+   //--- exact win_rate/avg_win/avg_loss/profit_factor/net_r/avg_r/
+   //--- expectancy (expectancy must equal avg_r exactly - design note 3,
+   //--- GZ_MetricsTypes.mqh). ------------------------------------------
+   void T75_MetricsTradeStatsBaseline()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,2,2,9,0); // Monday
+      AddClosedJournalTrade(j, 1, GZ_LEG_BULLISH, t0,           t0+60,  1.0);
+      AddClosedJournalTrade(j, 2, GZ_LEG_BULLISH, t0+2*3600,    t0+2*3600+60, 2.0);
+      AddClosedJournalTrade(j, 3, GZ_LEG_BULLISH, t0+4*3600,    t0+4*3600+60, 0.5);
+      AddClosedJournalTrade(j, 4, GZ_LEG_BEARISH, t0+6*3600,    t0+6*3600+60, -1.0);
+      AddClosedJournalTrade(j, 5, GZ_LEG_BEARISH, t0+8*3600,    t0+8*3600+60, -0.5);
+      AddClosedJournalTrade(j, 6, GZ_LEG_BEARISH, t0+10*3600,   t0+10*3600+60, 0.0);
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum;
+      metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (sum.trade.trade_count==6) && (sum.trade.winners==3) && (sum.trade.losers==2) &&
+                (MathAbs(sum.trade.win_rate-(3.0/6.0))<0.0001) &&
+                (MathAbs(sum.trade.avg_win_r-((1.0+2.0+0.5)/3.0))<0.0001) &&
+                (MathAbs(sum.trade.avg_loss_r-((1.0+0.5)/2.0))<0.0001) &&
+                (MathAbs(sum.trade.net_r-2.0)<0.0001) &&
+                (MathAbs(sum.trade.avg_r-(2.0/6.0))<0.0001) &&
+                (MathAbs(sum.trade.expectancy-sum.trade.avg_r)<0.00001) &&
+                (!sum.trade.profit_factor_undefined) &&
+                (MathAbs(sum.trade.profit_factor-(3.5/1.5))<0.0001);
+      AddResult("T75", ok, StringFormat("trades=%d win_rate=%.3f avg_win=%.3f avg_loss=%.3f pf=%.3f net_r=%.3f avg_r=%.3f",
+                sum.trade.trade_count, sum.trade.win_rate, sum.trade.avg_win_r, sum.trade.avg_loss_r,
+                sum.trade.profit_factor, sum.trade.net_r, sum.trade.avg_r));
+     }
+
+   //--- T76: Profit Factor edge cases - winners-with-no-losers is flagged
+   //--- UNDEFINED (mathematically infinite - design note 4), never
+   //--- silently reported as some finite number; losers-with-no-winners
+   //--- reports a plain, DEFINED 0.0 (there is a real denominator; the
+   //--- numerator is legitimately zero). -----------------------------------
+   void T76_MetricsProfitFactorUndefined()
+     {
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+
+      CGZJournalEngine jWin(m_logger); jWin.Init();
+      datetime t0 = MakeTime(2026,2,3,9,0);
+      AddClosedJournalTrade(jWin, 1, GZ_LEG_BULLISH, t0,        t0+60,        1.0);
+      AddClosedJournalTrade(jWin, 2, GZ_LEG_BULLISH, t0+3600,   t0+3600+60,   2.0);
+      GZ_MetricsSummary sumWin; metrics.Compute(jWin, time_engine, sess, profile, sumWin);
+      bool winOk = sumWin.trade.profit_factor_undefined && (MathAbs(sumWin.trade.profit_factor)<0.00001);
+
+      CGZJournalEngine jLoss(m_logger); jLoss.Init();
+      AddClosedJournalTrade(jLoss, 1, GZ_LEG_BULLISH, t0,        t0+60,        -1.0);
+      AddClosedJournalTrade(jLoss, 2, GZ_LEG_BULLISH, t0+3600,   t0+3600+60,   -2.0);
+      GZ_MetricsSummary sumLoss; metrics.Compute(jLoss, time_engine, sess, profile, sumLoss);
+      bool lossOk = (!sumLoss.trade.profit_factor_undefined) && (MathAbs(sumLoss.trade.profit_factor)<0.00001);
+
+      bool ok = winOk && lossOk;
+      AddResult("T76", ok, StringFormat("winners_only: undefined=%s pf=%.3f | losers_only: undefined=%s pf=%.3f",
+                sumWin.trade.profit_factor_undefined?"true":"false", sumWin.trade.profit_factor,
+                sumLoss.trade.profit_factor_undefined?"true":"false", sumLoss.trade.profit_factor));
+     }
+
+   //--- T77: Risk - Max Drawdown (depth+duration in trades) on a known
+   //--- R sequence: +1,+1 (peak=2) / -0.5,-0.5,-0.5 (trough=0.5, dd=1.5,
+   //--- len=3) / +2 (new peak=2.5, episode closes). Exactly one drawdown
+   //--- episode -> avg_drawdown_r == max_drawdown_r. -----------------------
+   void T77_MetricsMaxDrawdown()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,2,4,9,0);
+      double rs[6] = {1.0, 1.0, -0.5, -0.5, -0.5, 2.0};
+      for(int i=0;i<6;i++)
+         AddClosedJournalTrade(j, i+1, GZ_LEG_BULLISH, t0+i*3600, t0+i*3600+60, rs[i]);
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum; metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (MathAbs(sum.risk.max_drawdown_r-1.5)<0.0001) &&
+                (sum.risk.max_drawdown_duration_trades==3) &&
+                (MathAbs(sum.risk.avg_drawdown_r-1.5)<0.0001);
+      AddResult("T77", ok, StringFormat("max_dd=%.3fR dd_len=%d avg_dd=%.3fR",
+                sum.risk.max_drawdown_r, sum.risk.max_drawdown_duration_trades, sum.risk.avg_drawdown_r));
+     }
+
+   //--- T78: Risk - winning/losing streaks; a breakeven (R==0.0) trade
+   //--- breaks BOTH streak counters (documented - GZ_MetricsEngine.mqh). ---
+   void T78_MetricsWinLoseStreaks()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,2,5,9,0);
+      double rs[10] = {1.0,1.0,1.0, -1.0,-1.0, 0.0, 1.0,1.0,1.0,1.0};
+      for(int i=0;i<10;i++)
+         AddClosedJournalTrade(j, i+1, GZ_LEG_BULLISH, t0+i*3600, t0+i*3600+60, rs[i]);
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum; metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (sum.risk.max_winning_streak==4) && (sum.risk.max_losing_streak==2);
+      AddResult("T78", ok, StringFormat("max_win_streak=%d (expect 4) max_lose_streak=%d (expect 2)",
+                sum.risk.max_winning_streak, sum.risk.max_losing_streak));
+     }
+
+   //--- T79: Behavior - avg MAE/MFE (from real OnBar() excursions, not
+   //--- realized_r), avg duration, avg time-to-MAE/MFE, across 2 trades. ---
+   void T79_MetricsBehaviorAverages()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,2,6,9,0);
+
+      GZ_Trade tr1 = MakeTrade(1, 1, GZ_LEG_BULLISH, 100.0, t0);
+      j.OnTradeEntered(tr1, 10.0); // 1R=10
+      j.OnBar(MakeBar(t0+60,  100,115,95,110)); // mfe=15->1.5R@t0+60 ; mae=5->0.5R@t0+60
+      j.OnTradeClosed(1, t0+120, 110.0, 1.0);
+
+      datetime t1 = t0+3600;
+      GZ_Trade tr2 = MakeTrade(2, 2, GZ_LEG_BULLISH, 100.0, t1);
+      j.OnTradeEntered(tr2, 10.0);
+      j.OnBar(MakeBar(t1+60, 100,105,90,95)); // mfe=5->0.5R@t1+60 ; mae=10->1.0R@t1+60
+      j.OnTradeClosed(2, t1+600, 95.0, -1.0);
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum; metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (MathAbs(sum.behavior.avg_mae_r-((0.5+1.0)/2.0))<0.0001) &&
+                (MathAbs(sum.behavior.avg_mfe_r-((1.5+0.5)/2.0))<0.0001) &&
+                (MathAbs(sum.behavior.avg_duration_seconds-((120.0+600.0)/2.0))<0.0001) &&
+                (MathAbs(sum.behavior.avg_time_to_mae_seconds-60.0)<0.0001) &&
+                (MathAbs(sum.behavior.avg_time_to_mfe_seconds-60.0)<0.0001);
+      AddResult("T79", ok, StringFormat("avg_mae=%.3fR avg_mfe=%.3fR avg_dur=%.1fs avg_ttmae=%.1fs avg_ttmfe=%.1fs",
+                sum.behavior.avg_mae_r, sum.behavior.avg_mfe_r, sum.behavior.avg_duration_seconds,
+                sum.behavior.avg_time_to_mae_seconds, sum.behavior.avg_time_to_mfe_seconds));
+     }
+
+   //--- T80: Breakdown by direction - 2 bullish winners, 1 bearish loser,
+   //--- each bucket must see ONLY its own trades. --------------------------
+   void T80_MetricsBreakdownByDirection()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,2,7,9,0);
+      AddClosedJournalTrade(j, 1, GZ_LEG_BULLISH, t0,        t0+60,      1.0);
+      AddClosedJournalTrade(j, 2, GZ_LEG_BULLISH, t0+3600,   t0+3660,    2.0);
+      AddClosedJournalTrade(j, 3, GZ_LEG_BEARISH, t0+7200,   t0+7260,   -1.0);
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum; metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (sum.by_direction[0].label=="LONG") && (sum.by_direction[0].stats.trade_count==2) &&
+                (MathAbs(sum.by_direction[0].stats.net_r-3.0)<0.0001) &&
+                (sum.by_direction[1].label=="SHORT") && (sum.by_direction[1].stats.trade_count==1) &&
+                (MathAbs(sum.by_direction[1].stats.net_r-(-1.0))<0.0001);
+      AddResult("T80", ok, StringFormat("LONG n=%d net_r=%.2f | SHORT n=%d net_r=%.2f",
+                sum.by_direction[0].stats.trade_count, sum.by_direction[0].stats.net_r,
+                sum.by_direction[1].stats.trade_count, sum.by_direction[1].stats.net_r));
+     }
+
+   //--- T81: Breakdown by session - one entry inside the configured
+   //--- 16:30-20:30 broker-time window, one outside; must land in the
+   //--- correct bucket using the SAME CGZSessionEngine::Evaluate() the
+   //--- live pipeline evaluates trades against. ----------------------------
+   void T81_MetricsBreakdownBySession()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime tInside  = MakeTime(2026,2,9,18,0);  // Monday 18:00 - inside 16:30-20:30
+      datetime tOutside = MakeTime(2026,2,9,9,0);   // Monday 09:00 - outside
+      AddClosedJournalTrade(j, 1, GZ_LEG_BULLISH, tInside,  tInside+60,  1.0);
+      AddClosedJournalTrade(j, 2, GZ_LEG_BULLISH, tOutside, tOutside+60, -1.0);
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_01","Session",GZ_TIME_BROKER,16,30,20,30,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum; metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (sum.by_session[0].label=="INSIDE")  && (sum.by_session[0].stats.trade_count==1) &&
+                (MathAbs(sum.by_session[0].stats.net_r-1.0)<0.0001) &&
+                (sum.by_session[1].label=="OUTSIDE") && (sum.by_session[1].stats.trade_count==1) &&
+                (MathAbs(sum.by_session[1].stats.net_r-(-1.0))<0.0001);
+      AddResult("T81", ok, StringFormat("INSIDE n=%d net_r=%.2f | OUTSIDE n=%d net_r=%.2f",
+                sum.by_session[0].stats.trade_count, sum.by_session[0].stats.net_r,
+                sum.by_session[1].stats.trade_count, sum.by_session[1].stats.net_r));
+     }
+
+   //--- T82: Breakdown by hour/day-of-week/month - derives its OWN
+   //--- expected bucket indices from the same entry_time via
+   //--- TimeToStruct() (self-consistent, no hand-guessed weekday - same
+   //--- style already used by T04's Saturday-presence heuristic). ---------
+   void T82_MetricsBreakdownByHourDowMonth()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,3,11,14,0); // Wednesday, March
+      AddClosedJournalTrade(j, 1, GZ_LEG_BULLISH, t0, t0+60, 1.0);
+
+      MqlDateTime dt; TimeToStruct(t0, dt);
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum; metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (sum.by_hour[dt.hour].stats.trade_count==1) &&
+                (sum.by_dow[dt.day_of_week].stats.trade_count==1) &&
+                (sum.by_month[dt.mon-1].stats.trade_count==1);
+      // Every OTHER bucket in each dimension must stay at zero.
+      for(int i=0;i<GZ_BREAKDOWN_HOUR_COUNT && ok;i++)
+         if(i!=dt.hour) ok = (sum.by_hour[i].stats.trade_count==0);
+      for(int i=0;i<GZ_BREAKDOWN_DOW_COUNT && ok;i++)
+         if(i!=dt.day_of_week) ok = (sum.by_dow[i].stats.trade_count==0);
+      for(int i=0;i<GZ_BREAKDOWN_MONTH_COUNT && ok;i++)
+         if(i!=dt.mon-1) ok = (sum.by_month[i].stats.trade_count==0);
+
+      AddResult("T82", ok, StringFormat("hour[%d]=%d dow[%d]=%d month[%d]=%d (each expect 1, all others 0)",
+                dt.hour, sum.by_hour[dt.hour].stats.trade_count,
+                dt.day_of_week, sum.by_dow[dt.day_of_week].stats.trade_count,
+                dt.mon-1, sum.by_month[dt.mon-1].stats.trade_count));
+     }
+
+   //--- T83: Population = CLOSED trades only (design note 1) - a trade
+   //--- still open (never OnTradeClosed()) must be excluded from EVERY
+   //--- total/bucket, not just silently counted as a 0.0-R trade. ---------
+   void T83_MetricsOpenTradesExcluded()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,2,10,9,0);
+      AddClosedJournalTrade(j, 1, GZ_LEG_BULLISH, t0, t0+60, 1.0);
+
+      GZ_Trade trOpen = MakeTrade(2, 2, GZ_LEG_BULLISH, 100.0, t0+3600);
+      j.OnTradeEntered(trOpen, 10.0); // never closed
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum; metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (j.JournalCount()==2) && (sum.trade.trade_count==1) && (sum.closed_trade_count==1) &&
+                (MathAbs(sum.trade.net_r-1.0)<0.0001);
+      AddResult("T83", ok, StringFormat("journals=%d(open+closed) counted_trades=%d net_r=%.3f",
+                j.JournalCount(), sum.trade.trade_count, sum.trade.net_r));
+     }
+
+   //--- T84: Filter Diagnostics is a RESERVED stub (design note 7,
+   //--- GZ_MetricsTypes.mqh) - DEFERRED TO PHASE 10/11 - never populated
+   //--- with anything but its zero/false default in this build, even
+   //--- after a real Compute() call. ---------------------------------------
+   void T84_MetricsFilterDiagnosticsReservedStub()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,2,11,9,0);
+      AddClosedJournalTrade(j, 1, GZ_LEG_BULLISH, t0, t0+60, 1.0);
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum; metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (!sum.filters.available) && (sum.filters.setups_before==0) && (sum.filters.setups_after==0) &&
+                (sum.filters.trades_before==0) && (sum.filters.trades_after==0) && (sum.filters.rejections==0) &&
+                (MathAbs(sum.filters.win_rate_delta)<0.00001) && (MathAbs(sum.filters.profit_factor_delta)<0.00001) &&
+                (MathAbs(sum.filters.expectancy_delta)<0.00001) && (MathAbs(sum.filters.max_drawdown_delta)<0.00001) &&
+                (sum.filters.trade_count_delta==0);
+      AddResult("T84", ok, "Filter Diagnostics stays reserved (available=false, all fields zero) - DEFERRED TO PHASE 10/11");
+     }
+
+   //--- T85: Date range span - range_start/range_end must equal the
+   //--- earliest entry_time / latest exit_time across the closed
+   //--- population (design note 6 - "Date range" is reported, not
+   //--- re-bucketed; Phase 9's Experiment Runner owns arbitrary slicing). --
+   void T85_MetricsDateRangeSpan()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime tA_entry = MakeTime(2026,2,12,9,0);
+      datetime tA_exit  = tA_entry+120;
+      datetime tB_entry = MakeTime(2026,2,13,10,0); // later entry
+      datetime tB_exit  = tB_entry+7200;             // latest exit overall
+      AddClosedJournalTrade(j, 1, GZ_LEG_BULLISH, tA_entry, tA_exit, 1.0);
+      AddClosedJournalTrade(j, 2, GZ_LEG_BULLISH, tB_entry, tB_exit, -1.0);
+
+      CGZTimeEngine time_engine(m_logger); GZ_TimeConfig tcfg; tcfg.Default(); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary sum; metrics.Compute(j, time_engine, sess, profile, sum);
+
+      bool ok = (sum.range_start==tA_entry) && (sum.range_end==tB_exit);
+      AddResult("T85", ok, StringFormat("range_start=%s (expect %s) range_end=%s (expect %s)",
+                TimeToString(sum.range_start), TimeToString(tA_entry),
+                TimeToString(sum.range_end), TimeToString(tB_exit)));
+     }
+
+   //--- T86: Determinism - two independent full-pipeline runs (Phase 5's
+   //--- own BuildPhase7Scenario fixture, reused - see T74) over identical
+   //--- data/configuration must produce byte-for-byte identical Phase 8
+   //--- summaries. ----------------------------------------------------------
+   void T86_MetricsDeterminism()
+     {
+      GZ_Swing swings[]; MqlRates m5[]; MqlRates m1[];
+      BuildPhase7Scenario(swings, m5, m1);
+
+      GZ_TimeConfig tcfg; tcfg.Default();
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_EntryConfig ecfg; ecfg.Default();
+      GZ_BreakConfig bcfg; bcfg.Default();
+      GZ_ExitConfig xcfg; xcfg.Default();
+
+      CGZLegEngine legA(m_logger); legA.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkA(m_logger); brkA.Configure(bcfg);
+      CGZSetupStateMachine smA(m_logger); smA.Init(0.30,0.90);
+      CGZEntryEngine entA(m_logger); entA.Init(ecfg);
+      CGZExitEngine extA(m_logger); extA.Init(xcfg);
+      CGZTimeEngine timeA(m_logger); timeA.Configure(tcfg);
+      CGZSessionEngine sessA;
+      CGZJournalEngine journalA(m_logger); journalA.Init();
+      CGZEventLedger ledgerA(m_logger); ledgerA.Init();
+      CGZTradeSimulator simA(m_logger);
+      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, extA, journalA, ledgerA, timeA, sessA, profile, false, false);
+      CGZMetricsEngine metricsA(m_logger);
+      GZ_MetricsSummary sumA; metricsA.Compute(journalA, timeA, sessA, profile, sumA);
+
+      CGZLegEngine legB(m_logger); legB.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkB(m_logger); brkB.Configure(bcfg);
+      CGZSetupStateMachine smB(m_logger); smB.Init(0.30,0.90);
+      CGZEntryEngine entB(m_logger); entB.Init(ecfg);
+      CGZExitEngine extB(m_logger); extB.Init(xcfg);
+      CGZTimeEngine timeB(m_logger); timeB.Configure(tcfg);
+      CGZSessionEngine sessB;
+      CGZJournalEngine journalB(m_logger); journalB.Init();
+      CGZEventLedger ledgerB(m_logger); ledgerB.Init();
+      CGZTradeSimulator simB(m_logger);
+      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, extB, journalB, ledgerB, timeB, sessB, profile, false, false);
+      CGZMetricsEngine metricsB(m_logger);
+      GZ_MetricsSummary sumB; metricsB.Compute(journalB, timeB, sessB, profile, sumB);
+
+      bool ok = (sumA.trade.trade_count==sumB.trade.trade_count) && (sumA.trade.trade_count==1) &&
+                (MathAbs(sumA.trade.net_r-sumB.trade.net_r)<0.00001) &&
+                (MathAbs(sumA.trade.win_rate-sumB.trade.win_rate)<0.00001) &&
+                (MathAbs(sumA.risk.max_drawdown_r-sumB.risk.max_drawdown_r)<0.00001) &&
+                (sumA.risk.max_winning_streak==sumB.risk.max_winning_streak) &&
+                (sumA.risk.max_losing_streak==sumB.risk.max_losing_streak) &&
+                (sumA.range_start==sumB.range_start) && (sumA.range_end==sumB.range_end);
+      if(ok)
+         for(int i=0;i<GZ_BREAKDOWN_DIRECTION_COUNT && ok;i++)
+            ok = (sumA.by_direction[i].stats.trade_count==sumB.by_direction[i].stats.trade_count) &&
+                 (MathAbs(sumA.by_direction[i].stats.net_r-sumB.by_direction[i].stats.net_r)<0.00001);
+      AddResult("T86", ok, StringFormat("tradesA=%d tradesB=%d net_rA=%.3f net_rB=%.3f",
+                sumA.trade.trade_count, sumB.trade.trade_count, sumA.trade.net_r, sumB.trade.net_r));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -2470,6 +2862,18 @@ public:
       T72_LedgerReservedTypesNeverEmitted();
       T73_JournalNoLookaheadTiming();
       T74_JournalAndLedgerDeterminism();
+      T75_MetricsTradeStatsBaseline();
+      T76_MetricsProfitFactorUndefined();
+      T77_MetricsMaxDrawdown();
+      T78_MetricsWinLoseStreaks();
+      T79_MetricsBehaviorAverages();
+      T80_MetricsBreakdownByDirection();
+      T81_MetricsBreakdownBySession();
+      T82_MetricsBreakdownByHourDowMonth();
+      T83_MetricsOpenTradesExcluded();
+      T84_MetricsFilterDiagnosticsReservedStub();
+      T85_MetricsDateRangeSpan();
+      T86_MetricsDeterminism();
      }
 
    int               PassCount() const

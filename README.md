@@ -1,10 +1,10 @@
-# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7
+# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8
 
 Data Layer + Data Validator + Time Engine (Phase 1), M5 Structure/Swing Engine (Phase 2),
 Leg Engine + Break Engine (Phase 3), Fibonacci Engine + Setup State Machine (Phase 4),
 Entry Engine + Historical Trade Simulator (Phase 5), Exit Engine SL/TP/BE (Phase 6),
-MAE/MFE + R-Path + Event Ledger (Phase 7).
-No metrics/filter/experiment-runner logic, no live trading.
+MAE/MFE + R-Path + Event Ledger (Phase 7), Metrics + Reporting (Phase 8).
+No filter/experiment-runner logic, no live trading.
 
 ## Install
 
@@ -17,7 +17,7 @@ No metrics/filter/experiment-runner logic, no live trading.
 5. Attach the compiled EA to an XAUUSD chart (any chart timeframe — the EA loads its own M1/M5
    internally, independent of the chart's timeframe).
 6. Check the **Experts** log tab for the report, and
-   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_Report.txt` (common Files folder) for the saved copy.
+   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_8_Report.txt` (common Files folder) for the saved copy.
 
 ## What this does
 
@@ -51,12 +51,19 @@ No metrics/filter/experiment-runner logic, no live trading.
   Valid/Cancelled/Invalidated, Entry and Exit events, built once, deterministically, from the
   already-final Setup/Entry/Exit state at the end of each replay (two reserved event types,
   Rejection and Filter Result, exist for Phase 10's Filter Engine but are never emitted yet).
-- Runs 74 deterministic, synthetic-data self-tests (T01–T74: T01–T18 Phase 1, T19–T23 Phase 2,
-  T24–T34 Phase 3, T35–T45 Phase 4, T46–T54 Phase 5, T55–T64 Phase 6, T65–T74 Phase 7) and
-  reports PASS/FAIL for each.
-- Prints and saves a full Phase 1+2+3+4+5+6+7 completion report.
-- Does **not** place any live trades, and does **not** implement any Phase 8+ logic
-  (metrics/filters/experiment runner). It stops after the report.
+- **Phase 8:** `CGZMetricsEngine` computes a Phase 8 summary once, post-hoc, from Phase 7's final
+  journal: Trade Metrics (win rate, avg win/loss, profit factor with an explicit
+  undefined/infinite flag, expectancy, net R, average R), Risk (max/avg drawdown in R, drawdown
+  duration in trades, longest winning/losing streak), Behavior (avg MAE/MFE, duration,
+  time-to-MAE/MFE), and Breakdowns by direction, session, hour, day-of-week and month. All
+  metrics are R-based (no position-sizing/currency model exists yet). Filter Diagnostics is a
+  reserved, always-zero stub pending Phase 10's Filter Engine.
+- Runs 86 deterministic, synthetic-data self-tests (T01–T86: T01–T18 Phase 1, T19–T23 Phase 2,
+  T24–T34 Phase 3, T35–T45 Phase 4, T46–T54 Phase 5, T55–T64 Phase 6, T65–T74 Phase 7,
+  T75–T86 Phase 8) and reports PASS/FAIL for each.
+- Prints and saves a full Phase 1+2+3+4+5+6+7+8 completion report.
+- Does **not** place any live trades, and does **not** implement any Phase 9+ logic
+  (filters/experiment runner). It stops after the report.
 
 ## Before trusting the output
 
@@ -66,4 +73,4 @@ not guaranteed correct for your specific broker.
 
 See `Docs/Phase1_TestReport.md` for the Phase 1 report template and required user verification
 steps (the same verification requirement — compile/attach in MetaEditor/MT5 and confirm the
-broker UTC offset — still applies to this Phase 1+2+3+4+5+6+7 build).
+broker UTC offset — still applies to this Phase 1+2+3+4+5+6+7+8 build).

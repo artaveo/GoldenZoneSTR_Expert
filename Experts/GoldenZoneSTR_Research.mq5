@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                    GoldenZoneSTR_Research.mq5    |
 //|                                                                    |
-//| GoldenZone STR - Phase 1+2+3+4+5+6+7 Research EA                  |
+//| GoldenZone STR - Phase 1+2+3+4+5+6+7+8 Research EA                |
 //| Phase 1: Data Layer + Data Validator + Time Engine                |
 //| Phase 2: M5 Structure Engine (swing/pivot detection)               |
 //| Phase 3: Leg Engine + Break Engine                                 |
@@ -9,24 +9,27 @@
 //| Phase 5: Entry Engine + Historical Trade Simulator                 |
 //| Phase 6: Exit Engine (SL/TP/BE)                                    |
 //| Phase 7: MAE/MFE + R-Path + Event Ledger                          |
+//| Phase 8: Metrics + Reporting                                       |
 //|                                                                    |
 //| SCOPE: This EA implements ONLY Phase 1 (Data/Validator/Time/      |
 //| Session/Diagnostics/TestHarness), Phase 2 (M5 swing/pivot         |
 //| detection), Phase 3 (Leg Engine + Break Engine), Phase 4           |
 //| (Fibonacci Engine + Setup State Machine), Phase 5 (Entry Engine + |
-//| Historical Trade Simulator), Phase 6 (Exit Engine: SL/TP/BE) and  |
-//| Phase 7 (MAE/MFE + R-Path + Event Ledger). It contains NO metrics,|
-//| filter or experiment-runner logic (Phase 8+), and it places NO    |
-//| live orders. On init it loads historical M1+M5 data, runs         |
-//| validation, runs swing detection, replays the M1/M5 data through  |
-//| the Leg/Break/Setup/Entry/Exit/Journal/Ledger engines via          |
-//| CGZTradeSimulator, runs the deterministic T01-T74 test harness,   |
-//| and prints a completion report. Then it stops - it does not trade |
-//| and does not proceed to Phase 8 (Metrics + Reporting) logic.       |
+//| Historical Trade Simulator), Phase 6 (Exit Engine: SL/TP/BE),     |
+//| Phase 7 (MAE/MFE + R-Path + Event Ledger) and Phase 8 (Metrics +  |
+//| Reporting). It contains NO filter or experiment-runner logic       |
+//| (Phase 9+), and it places NO live orders. On init it loads         |
+//| historical M1+M5 data, runs validation, runs swing detection,      |
+//| replays the M1/M5 data through the Leg/Break/Setup/Entry/Exit/     |
+//| Journal/Ledger engines via CGZTradeSimulator, computes the Phase 8 |
+//| Metrics summary from the resulting journal via CGZMetricsEngine,   |
+//| runs the deterministic T01-T86 test harness, and prints a          |
+//| completion report. Then it stops - it does not trade and does not  |
+//| proceed to Phase 9 (Experiment Configuration + Runner) logic.      |
 //+------------------------------------------------------------------+
 #property copyright "GoldenZone STR"
-#property version   "1.70"
-#property description "Phase 1+2+3+4+5+6+7: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger (research/diagnostic only, no trading)"
+#property version   "1.80"
+#property description "Phase 1+2+3+4+5+6+7+8: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting (research/diagnostic only, no trading)"
 
 #include <GoldenZoneSTR\Core\GZ_Types.mqh>
 #include <GoldenZoneSTR\Core\GZ_Config.mqh>
@@ -54,6 +57,8 @@
 #include <GoldenZoneSTR\Journal\GZ_JournalEngine.mqh>
 #include <GoldenZoneSTR\Journal\GZ_LedgerTypes.mqh>
 #include <GoldenZoneSTR\Journal\GZ_EventLedger.mqh>
+#include <GoldenZoneSTR\Metrics\GZ_MetricsTypes.mqh>
+#include <GoldenZoneSTR\Metrics\GZ_MetricsEngine.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
@@ -128,6 +133,7 @@ CGZExitEngine     g_exit_engine(GetPointer(g_logger));
 CGZJournalEngine  g_journal_engine(GetPointer(g_logger));
 CGZEventLedger    g_event_ledger(GetPointer(g_logger));
 CGZTradeSimulator g_trade_simulator(GetPointer(g_logger));
+CGZMetricsEngine  g_metrics_engine(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;
@@ -153,6 +159,9 @@ int               g_exit_count = 0;
 int               g_journal_count = 0;
 int               g_ledger_event_count = 0;
 
+//--- Phase 8 diagnostic result (metrics summary over the loaded range) --------
+GZ_MetricsSummary g_metrics;
+
 //+------------------------------------------------------------------+
 //| Build and print/save the Phase 1 completion report                |
 //+------------------------------------------------------------------+
@@ -160,8 +169,8 @@ void BuildAndEmitReport()
   {
    string report = "";
    report += "===================================================\n";
-   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 + PHASE 6 + PHASE 7 COMPLETION REPORT\n";
-   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + " | " + GZ_PROJECT_VERSION_P6 + " | " + GZ_PROJECT_VERSION_P7 + "\n";
+   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 + PHASE 6 + PHASE 7 + PHASE 8 COMPLETION REPORT\n";
+   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + " | " + GZ_PROJECT_VERSION_P6 + " | " + GZ_PROJECT_VERSION_P7 + " | " + GZ_PROJECT_VERSION_P8 + "\n";
    report += " Generated (terminal local time, diagnostic only): " + TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS) + "\n";
    report += "===================================================\n\n";
 
@@ -174,14 +183,16 @@ void BuildAndEmitReport()
    report += "Phase 5 files: GZ_EntryTypes, GZ_EntryEngine, GZ_TradeSimulator\n";
    report += "Phase 6 files: GZ_ExitTypes, GZ_ExitEngine\n";
    report += "Phase 7 files: GZ_JournalTypes, GZ_JournalEngine, GZ_LedgerTypes, GZ_EventLedger\n";
+   report += "Phase 8 files: GZ_MetricsTypes, GZ_MetricsEngine\n";
    report += "Interfaces: GZ_TimeContext, CGZDatasetInfo (Phase 1), GZ_Swing / CGZSwingEngine (Phase 2),\n";
    report += "            GZ_Leg / CGZLegEngine / CGZBreakEngine (Phase 3), GZ_Setup / CGZFibEngine /\n";
    report += "            CGZSetupStateMachine (Phase 4), GZ_Trade / CGZEntryEngine / CGZTradeSimulator\n";
    report += "            (Phase 5), GZ_TradeExit / CGZExitEngine (Phase 6), GZ_TradeJournal /\n";
-   report += "            CGZJournalEngine / GZ_LedgerEvent / CGZEventLedger (Phase 7) - all consumed\n";
-   report += "            by later phases; Update()/UpdateBar()/OnBar()/CheckBreak()/OnLegCreated()/\n";
-   report += "            OnLegBroken()/MarkEntered()/CancelForInvalidPenetration()/OnTradeEntered()\n";
-   report += "            are live-safe, DetectAll()/CGZTradeSimulator.Run()/BuildFromFinalState() are\n";
+   report += "            CGZJournalEngine / GZ_LedgerEvent / CGZEventLedger (Phase 7), GZ_MetricsSummary /\n";
+   report += "            CGZMetricsEngine (Phase 8) - all consumed by later phases; Update()/UpdateBar()/\n";
+   report += "            OnBar()/CheckBreak()/OnLegCreated()/OnLegBroken()/MarkEntered()/\n";
+   report += "            CancelForInvalidPenetration()/OnTradeEntered() are live-safe, DetectAll()/\n";
+   report += "            CGZTradeSimulator.Run()/BuildFromFinalState()/CGZMetricsEngine.Compute() are\n";
    report += "            research-batch\n\n";
 
    report += "--- Data Validation: M1 ---\n";
@@ -292,7 +303,41 @@ void BuildAndEmitReport()
    report += "reserved event types with no producer until Phase 10's Filter Engine and are never\n";
    report += "emitted in this build (see T72).\n\n";
 
-   report += "--- Automated Test Results (T01-T74: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7) ---\n";
+   report += "--- Phase 8: Metrics + Reporting ---\n";
+   report += StringFormat("ClosedTrades=%d  Winners=%d  Losers=%d  WinRate=%.1f%%  NetR=%.3f  AvgR/Expectancy=%.3f  ProfitFactor=%s\n",
+              g_metrics.trade.trade_count, g_metrics.trade.winners, g_metrics.trade.losers, g_metrics.trade.win_rate*100.0,
+              g_metrics.trade.net_r, g_metrics.trade.avg_r,
+              g_metrics.trade.profit_factor_undefined ? "UNDEFINED(inf)" : DoubleToString(g_metrics.trade.profit_factor,3));
+   report += StringFormat("AvgWinR=%.3f  AvgLossR=%.3f  MaxDD=%.3fR  AvgDD=%.3fR  MaxDDLen=%d trades  MaxWinStreak=%d  MaxLoseStreak=%d\n",
+              g_metrics.trade.avg_win_r, g_metrics.trade.avg_loss_r, g_metrics.risk.max_drawdown_r, g_metrics.risk.avg_drawdown_r,
+              g_metrics.risk.max_drawdown_duration_trades, g_metrics.risk.max_winning_streak, g_metrics.risk.max_losing_streak);
+   report += StringFormat("Behavior: AvgMAE=%.3fR  AvgMFE=%.3fR  AvgDuration=%.0fs  AvgTimeToMAE=%.0fs  AvgTimeToMFE=%.0fs\n",
+              g_metrics.behavior.avg_mae_r, g_metrics.behavior.avg_mfe_r, g_metrics.behavior.avg_duration_seconds,
+              g_metrics.behavior.avg_time_to_mae_seconds, g_metrics.behavior.avg_time_to_mfe_seconds);
+   report += StringFormat("Range covered: %s .. %s\n",
+              TimeToString(g_metrics.range_start), TimeToString(g_metrics.range_end));
+   report += StringFormat("By direction: LONG n=%d net_r=%.3f win_rate=%.1f%%  |  SHORT n=%d net_r=%.3f win_rate=%.1f%%\n",
+              g_metrics.by_direction[0].stats.trade_count, g_metrics.by_direction[0].stats.net_r, g_metrics.by_direction[0].stats.win_rate*100.0,
+              g_metrics.by_direction[1].stats.trade_count, g_metrics.by_direction[1].stats.net_r, g_metrics.by_direction[1].stats.win_rate*100.0);
+   report += StringFormat("By session:   INSIDE n=%d net_r=%.3f win_rate=%.1f%%  |  OUTSIDE n=%d net_r=%.3f win_rate=%.1f%%\n",
+              g_metrics.by_session[0].stats.trade_count, g_metrics.by_session[0].stats.net_r, g_metrics.by_session[0].stats.win_rate*100.0,
+              g_metrics.by_session[1].stats.trade_count, g_metrics.by_session[1].stats.net_r, g_metrics.by_session[1].stats.win_rate*100.0);
+   report += "Population: CLOSED trades only (an open trade contributes to no total/bucket - see\n";
+   report += "GZ_MetricsTypes.mqh design note 1). All metrics are R-based, not account currency (no\n";
+   report += "position-sizing/leverage model exists anywhere in Phases 1-7 - design note 2). Expectancy\n";
+   report += "and Average R are intentionally identical (design note 3). Profit Factor is flagged\n";
+   report += "UNDEFINED, never a fabricated finite number, when winners exist with zero losing R\n";
+   report += "(design note 4, see T76). Drawdown/streaks run over the closed-trade R equity curve in\n";
+   report += "exit-chronological order; Max Drawdown Duration is in TRADE COUNT, not wall-clock time\n";
+   report += "(design note 5, see T77/T78). Hour/Day-of-week/Month/Direction/Session breakdowns use the\n";
+   report += "same formulas as the overall total, applied per bucket (design note 6, see T80-T82);\n";
+   report += "'Date range' is reported as the population's own [range_start,range_end] span rather than\n";
+   report += "re-implemented as arbitrary slicing, which is Phase 9's Experiment Runner job (see T85).\n";
+   report += "Filter Diagnostics (Setups/Trades before-after, Rejections, metric deltas) is a RESERVED,\n";
+   report += "always-zero stub - it needs Phase 10's Filter Engine to produce a WITH/WITHOUT population\n";
+   report += "to diff, which does not exist yet (design note 7, see T84) - DEFERRED TO PHASE 10/11.\n\n";
+
+   report += "--- Automated Test Results (T01-T86: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -303,12 +348,12 @@ void BuildAndEmitReport()
    report += StringFormat("\nTOTAL: %d PASS / %d FAIL (of %d)\n\n", pass, fail, g_harness.ResultCount());
 
    report += "--- Known Limitations / Deferred Work ---\n";
-   report += "DEFERRED TO PHASE 8+: Metrics/Reporting (Phase 8), Experiment Runner (Phase 9), Filter\n";
-   report += "Engine (Phase 10, and therefore the Event Ledger's REJECTION/FILTER_RESULT event types -\n";
-   report += "reserved now, never emitted here), Filter Combination Research (Phase 11), Robustness/\n";
-   report += "Sensitivity (Phase 12), Walk-Forward (Phase 13), Monte Carlo (Phase 14), Final OOS\n";
-   report += "(Phase 15), Research Freeze (Phase 16), Future Execution Adapter (Phase 17) - not\n";
-   report += "implemented, by design.\n";
+   report += "DEFERRED TO PHASE 9+: Experiment Runner (Phase 9), Filter\n";
+   report += "Engine (Phase 10, and therefore the Event Ledger's REJECTION/FILTER_RESULT event types AND\n";
+   report += "Phase 8's Filter Diagnostics stub - reserved now, never emitted/populated here), Filter\n";
+   report += "Combination Research (Phase 11), Robustness/Sensitivity (Phase 12), Walk-Forward (Phase 13),\n";
+   report += "Monte Carlo (Phase 14), Final OOS (Phase 15), Research Freeze (Phase 16), Future Execution\n";
+   report += "Adapter (Phase 17) - not implemented, by design.\n";
    report += "Weekend-gap classification uses a Saturday-presence heuristic; broker-specific holiday\n";
    report += "calendars are not modeled and would need broker session data if required later.\n";
    report += "SESSION_END (Phase 4, pre-entry setup cancellation) only fires when\n";
@@ -333,28 +378,28 @@ void BuildAndEmitReport()
    string final_status;
    bool data_ok = (g_info_m1.total_bars>0 && g_info_m5.total_bars>0);
    if(fail>0)
-      final_status = "PHASE 1+2+3+4+5+6+7 BLOCKED (automated test failure - see detail above)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8 BLOCKED (automated test failure - see detail above)";
    else if(!data_ok)
-      final_status = "PHASE 1+2+3+4+5+6+7 BLOCKED (historical data unavailable for requested symbol/range)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8 BLOCKED (historical data unavailable for requested symbol/range)";
    else if(!InpBrokerOffsetKnown)
-      final_status = "PHASE 1+2+3+4+5+6+7 BLOCKED (broker UTC offset not yet verified by user)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8 BLOCKED (broker UTC offset not yet verified by user)";
    else
       // This report is only ever printed by the EA's own OnInit() running
       // inside MT5, so reaching this branch already proves compile+attach
       // succeeded - there is nothing further to "wait" on.
-      final_status = "PHASE 1+2+3+4+5+6+7 COMPLETE";
+      final_status = "PHASE 1+2+3+4+5+6+7+8 COMPLETE";
 
    report += "--- Final Status ---\n" + final_status + "\n";
    report += "===================================================\n";
 
    Print(report);
 
-   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_8_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle!=INVALID_HANDLE)
      {
       FileWriteString(handle, report);
       FileClose(handle);
-      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_Report.txt");
+      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_8_Report.txt");
      }
    else
      {
@@ -370,7 +415,7 @@ int OnInit()
    // Runtime marker: proves the EA currently attached/running is compiled
    // from THIS source file. Printed first, before anything else, and via
    // raw Print() (not CGZLogger) so nothing upstream can suppress it.
-   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260923_V8_PHASE7");
+   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260923_V9_PHASE8");
 
    // Runtime Inputs marker: prints the ACTUAL live values of the inputs
    // this specific EA instance is running with (per-attachment values from
@@ -385,7 +430,7 @@ int OnInit()
       InpBrokerOffsetKnown ? "true" : "false"));
 
    g_logger.EnableVerbose(InpVerboseLogging);
-   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7 starting up (research/diagnostic mode - no trading).");
+   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8 starting up (research/diagnostic mode - no trading).");
 
    //--- Time engine configuration -----------------------------------------
    GZ_TimeConfig time_cfg;
@@ -531,6 +576,7 @@ int OnInit()
    g_setup_count = 0;
    g_trade_count = 0;
    g_exit_count = 0;
+   g_metrics.Clear();
    if(n5>0)
      {
       g_trade_simulator.Run(m1, m5, g_swings, g_swing_count,
@@ -635,6 +681,30 @@ int OnInit()
         }
       if(g_journal_count>show_journals)
          g_logger.Info("Journal", StringFormat("  ... and %d more journal(s)", g_journal_count-show_journals));
+
+      //--- Phase 8: Metrics + Reporting - one deterministic, post-hoc pass
+      //--- over the now-final Phase 7 journal (see GZ_MetricsEngine.mqh).
+      g_metrics_engine.Compute(g_journal_engine, g_time_engine, g_session_engine, session_profile, g_metrics);
+      g_logger.Info("Metrics", StringFormat(
+         "Phase 8: closed_trades=%d winners=%d losers=%d win_rate=%.1f%% net_r=%.3f avg_r=%.3f pf=%s | max_dd=%.3fR avg_dd=%.3fR dd_len=%d win_streak=%d lose_streak=%d",
+         g_metrics.trade.trade_count, g_metrics.trade.winners, g_metrics.trade.losers, g_metrics.trade.win_rate*100.0,
+         g_metrics.trade.net_r, g_metrics.trade.avg_r,
+         g_metrics.trade.profit_factor_undefined ? "UNDEFINED(inf)" : DoubleToString(g_metrics.trade.profit_factor,3),
+         g_metrics.risk.max_drawdown_r, g_metrics.risk.avg_drawdown_r, g_metrics.risk.max_drawdown_duration_trades,
+         g_metrics.risk.max_winning_streak, g_metrics.risk.max_losing_streak));
+      g_logger.Info("Metrics", StringFormat(
+         "  Behavior: avg_mae=%.3fR avg_mfe=%.3fR avg_duration=%.0fs avg_time_to_mae=%.0fs avg_time_to_mfe=%.0fs | range=[%s .. %s]",
+         g_metrics.behavior.avg_mae_r, g_metrics.behavior.avg_mfe_r, g_metrics.behavior.avg_duration_seconds,
+         g_metrics.behavior.avg_time_to_mae_seconds, g_metrics.behavior.avg_time_to_mfe_seconds,
+         TimeToString(g_metrics.range_start), TimeToString(g_metrics.range_end)));
+      g_logger.Info("Metrics", StringFormat(
+         "  By direction: LONG n=%d net_r=%.3f win_rate=%.1f%% | SHORT n=%d net_r=%.3f win_rate=%.1f%%",
+         g_metrics.by_direction[0].stats.trade_count, g_metrics.by_direction[0].stats.net_r, g_metrics.by_direction[0].stats.win_rate*100.0,
+         g_metrics.by_direction[1].stats.trade_count, g_metrics.by_direction[1].stats.net_r, g_metrics.by_direction[1].stats.win_rate*100.0));
+      g_logger.Info("Metrics", StringFormat(
+         "  By session:   INSIDE n=%d net_r=%.3f win_rate=%.1f%% | OUTSIDE n=%d net_r=%.3f win_rate=%.1f%%",
+         g_metrics.by_session[0].stats.trade_count, g_metrics.by_session[0].stats.net_r, g_metrics.by_session[0].stats.win_rate*100.0,
+         g_metrics.by_session[1].stats.trade_count, g_metrics.by_session[1].stats.net_r, g_metrics.by_session[1].stats.win_rate*100.0));
      }
    else
       g_logger.Warning("Leg", "No M5 data loaded - leg/break/setup/entry/exit detection skipped.");
@@ -645,7 +715,7 @@ int OnInit()
    //--- Report ------------------------------------------------------------------
    BuildAndEmitReport();
 
-   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7 diagnostics complete. STOPPING - not proceeding to Phase 8 (Metrics + Reporting) logic.");
+   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8 diagnostics complete. STOPPING - not proceeding to Phase 9 (Experiment Configuration + Runner) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.
@@ -657,7 +727,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7 EA removed.");
+   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7+8 EA removed.");
   }
 
 //+------------------------------------------------------------------+

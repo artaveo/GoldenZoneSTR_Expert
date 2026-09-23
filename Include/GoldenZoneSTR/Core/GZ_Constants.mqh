@@ -82,4 +82,11 @@
 // version marker for the phase completion report.
 #define GZ_PROJECT_VERSION_P7         "GZ-P7-ROADMAP v1.0"
 
+// Phase 8 - Metrics + Reporting.
+// No tunable research parameters of its own (a pure post-hoc aggregator
+// over Phase 7's already-final CGZJournalEngine - see GZ_MetricsEngine.mqh
+// header); kept here only as a version marker for the phase completion
+// report, same pattern as GZ_PROJECT_VERSION_P7.
+#define GZ_PROJECT_VERSION_P8         "GZ-P8-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__
