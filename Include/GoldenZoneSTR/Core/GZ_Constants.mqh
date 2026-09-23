@@ -121,4 +121,24 @@
 #define GZ_DEFAULT_MAX_FILTER_COMBO_BATCH_SIZE   50
 #define GZ_PROJECT_VERSION_P11                   "GZ-P11-ROADMAP v1.0"
 
+// Phase 12 - Robustness + Sensitivity Research.
+// UNLIKE Phase 11 (a post-hoc mask over an already-final population), a robustness
+// axis (e.g. break/SL ATR multiple) changes the underlying Leg/Break/Setup/Trade
+// population ITSELF, so each swept value requires a FULL Phase 2-8 re-simulation via
+// Phase 9's own CGZExperimentRunner (see GZ_RobustnessTypes.mqh design note 1) - no
+// re-simulation avoidance is possible here.
+// Flag thresholds below have no Roadmap-stated formula ("Narrow peak / Flat region /
+// Unstable zone / Parameter sensitivity" are named, not defined) - conventional,
+// documented defaults (same pattern as GZ_DEFAULT_ATR_PERIOD in Phase 3); see
+// GZ_RobustnessEngine.mqh::Analyze() for the exact rules that use them.
+#define GZ_ROBUST_NARROW_PEAK_DROP_PCT         0.30  // peak's BOTH immediate neighbors must fall below (1-this)*peak to flag NARROW_PEAK
+#define GZ_ROBUST_FLAT_REGION_MIN_POINTS       3     // contiguous points needed to flag FLAT_REGION
+#define GZ_ROBUST_FLAT_REGION_TOL_PCT          0.15  // max-min within a flat window, as a fraction of the window's own max
+#define GZ_ROBUST_UNSTABLE_SIGN_FLIPS_MIN      2     // consecutive-pair sign flips (above the noise floor) needed to flag UNSTABLE_ZONE
+#define GZ_ROBUST_NOISE_FLOOR_R                0.05  // |expectancy| below this (in R) is treated as noise, not a real sign, for the flip count
+#define GZ_ROBUST_PARAM_SENSITIVE_RANGE_PCT    0.75  // (max-min) over the whole sweep vs |best expectancy|, above which PARAMETER_SENSITIVE is flagged
+#define GZ_ROBUST_PARAM_SENSITIVE_ABS_FLOOR    0.20  // absolute R floor used for the above when |best expectancy| is ~0
+#define GZ_DEFAULT_MAX_ROBUSTNESS_BATCH_SIZE   20    // Roadmap "stage research, don't run one huge Grid at once" cap, reapplied to Phase 12 (axes per RunSweepBatch call)
+#define GZ_PROJECT_VERSION_P12                 "GZ-P12-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__

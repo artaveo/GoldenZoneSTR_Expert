@@ -12,6 +12,7 @@
 //| Phase 9 (T87-T96): Experiment Configuration + Runner               |
 //| Phase 10 (T97-T106): Filter Engine                                 |
 //| Phase 11 (T107-T116): Filter Combination Research                  |
+//| Phase 12 (T117-T127): Robustness + Sensitivity Research            |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -55,6 +56,8 @@
 #include "..\Filter\GZ_FilterEngine.mqh"
 #include "..\Filter\GZ_FilterComboTypes.mqh"
 #include "..\Filter\GZ_FilterComboEngine.mqh"
+#include "..\Robustness\GZ_RobustnessTypes.mqh"
+#include "..\Robustness\GZ_RobustnessEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -3921,6 +3924,336 @@ public:
                 reconstructed_pass_count, results[0].diagnostics.setups_after));
      }
 
+   //--- T117: AxisBaselineValue()/GetAxisValue()/ApplyAxisValue() are
+   //--- correct AND isolated - sweeping GZ_ROBUST_SL_ATR_MULT changes
+   //--- ONLY exit_config.sl_atr_mult in every produced point's own
+   //--- GZ_ExperimentResult.config (CGZExperimentRunner::Execute() always
+   //--- stores the exact cfg it ran with - see GZ_ExperimentRunner.mqh),
+   //--- leaving tp_r_multiple and break_config.buffer_atr_mult exactly at
+   //--- their base_config defaults on every point. Also proves
+   //--- BuildNeighborhoodRequest()'s auto-baseline (no caller-supplied
+   //--- center) reads the CURRENT config value (1.5, GZ_DEFAULT_SL_ATR_MULT),
+   //--- not a hard-coded one. -----------------------------------------------
+   void T117_AxisValueAccessorsAndApply()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates m1[]; BuildPhase9M1Series(m1, m5[10].time);
+
+      GZ_ExperimentConfig base; base.Default();
+      base.time_config.broker_offset_known = true;
+
+      CGZRobustnessEngine eng(m_logger);
+      bool baseline_ok = (MathAbs(eng.GetAxisValue(base, GZ_ROBUST_SL_ATR_MULT)-1.5)<0.0001);
+
+      double offs[2] = {0.0, 1.0};
+      GZ_RobustnessSweepRequest req;
+      int n = eng.BuildNeighborhoodRequest(base, GZ_ROBUST_SL_ATR_MULT, offs, 2, req);
+
+      GZ_RobustnessSweepResult r;
+      eng.RunSweep(req, m1, m5, "DS_AXIS", GZ_VAL_VALID, GZ_VAL_VALID, r);
+
+      bool ok = baseline_ok && (n==2) && (MathAbs(r.baseline_value-1.5)<0.0001) && (r.point_count==2) &&
+                (MathAbs(r.points[0].param_value-1.5)<0.0001) && (MathAbs(r.points[1].param_value-2.5)<0.0001) &&
+                (MathAbs(r.points[0].result.config.exit_config.sl_atr_mult-1.5)<0.0001) &&
+                (MathAbs(r.points[1].result.config.exit_config.sl_atr_mult-2.5)<0.0001) &&
+                (MathAbs(r.points[0].result.config.exit_config.tp_r_multiple-2.0)<0.0001) &&
+                (MathAbs(r.points[1].result.config.exit_config.tp_r_multiple-2.0)<0.0001) &&
+                (MathAbs(r.points[0].result.config.break_config.buffer_atr_mult)<0.0001) &&
+                (MathAbs(r.points[1].result.config.break_config.buffer_atr_mult)<0.0001);
+      AddResult("T117", ok, StringFormat("baseline=%.4f p0.sl=%.4f p1.sl=%.4f p0.tp=%.4f p1.tp=%.4f (tp must stay 2.0 - untouched)",
+                r.baseline_value, r.points[0].result.config.exit_config.sl_atr_mult, r.points[1].result.config.exit_config.sl_atr_mult,
+                r.points[0].result.config.exit_config.tp_r_multiple, r.points[1].result.config.exit_config.tp_r_multiple));
+     }
+
+   //--- T118: an out-of-domain requested value (sl_atr_mult baseline 1.5,
+   //--- offset -2.0 -> -0.5, invalid: domain is >0) is SKIPPED, never
+   //--- silently clamped or run anyway - point_count reflects only the
+   //--- valid value, and a SKIPPED note documents why the other one is
+   //--- missing (Roadmap Section 26 "do not fabricate data" discipline,
+   //--- reapplied to Phase 12's own domain checks). -------------------------
+   void T118_DomainValidationSkipsInvalidValues()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates m1[]; BuildPhase9M1Series(m1, m5[10].time);
+
+      GZ_ExperimentConfig base; base.Default();
+      base.time_config.broker_offset_known = true;
+
+      CGZRobustnessEngine eng(m_logger);
+      double offs[2] = {-2.0, 0.0};
+      GZ_RobustnessSweepRequest req;
+      eng.BuildNeighborhoodRequest(base, GZ_ROBUST_SL_ATR_MULT, offs, 2, req);
+
+      GZ_RobustnessSweepResult r;
+      eng.RunSweep(req, m1, m5, "DS_SKIP", GZ_VAL_VALID, GZ_VAL_VALID, r);
+
+      bool has_skip_note = false;
+      for(int i=0;i<r.note_count;i++)
+         if(StringFind(r.notes[i], "SKIPPED")>=0) has_skip_note = true;
+
+      bool ok = (r.point_count==1) && (MathAbs(r.points[0].param_value-1.5)<0.0001) && has_skip_note;
+      AddResult("T118", ok, StringFormat("point_count=%d (expected 1) has_skip_note=%s", r.point_count, has_skip_note?"true":"false"));
+     }
+
+   //--- T119: BuildNeighborhoodRequest() is a pure builder (no simulation
+   //--- needed to test it) - auto-baseline reads tp_r_multiple's own
+   //--- current value (2.0), values[]=baseline+offsets in the SUPPLIED
+   //--- order (sorting happens later, in ExecutePoints), default label
+   //--- falls back to GZRobustnessParamToString(), and base_config is a
+   //--- full copy of the caller's config (spot-checked via symbol). -------
+   void T119_BuildNeighborhoodRequestAutoBaseline()
+     {
+      GZ_ExperimentConfig cfg; cfg.Default();
+      cfg.symbol = "XAUUSD_TEST";
+
+      CGZRobustnessEngine eng(m_logger);
+      double offs[2] = {0.0, 1.0};
+      GZ_RobustnessSweepRequest req;
+      int n = eng.BuildNeighborhoodRequest(cfg, GZ_ROBUST_TP_R_MULTIPLE, offs, 2, req);
+
+      bool ok = (n==2) && (req.value_count==2) && (req.param==GZ_ROBUST_TP_R_MULTIPLE) &&
+                (req.label=="TP_R_MULTIPLE") && (MathAbs(req.values[0]-2.0)<0.0001) && (MathAbs(req.values[1]-3.0)<0.0001) &&
+                (req.base_config.symbol=="XAUUSD_TEST");
+      AddResult("T119", ok, StringFormat("n=%d values=[%.2f,%.2f] label=%s", n, req.values[0], req.values[1], req.label));
+     }
+
+   //--- T120: RunSweep() integration over GZ_ROBUST_PIVOT_STRENGTH (an
+   //--- INTEGER axis) against the SAME raw M1/M5 fixture T89/T91 already
+   //--- prove full-pipeline correctness on. pivot_strength=2 (the sweep's
+   //--- own baseline, GZ_DEFAULT_PIVOT_STRENGTH) must reproduce T91's own
+   //--- known swing_count=2; pivot_strength=1 must produce MORE swings
+   //--- (T91's own already-proven relation) - this is a genuine, if small,
+   //--- re-simulation per point, unlike Phase 11's post-hoc masking. -------
+   void T120_RunSweepPivotStrengthIntegration()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates m1[]; BuildPhase9M1Series(m1, m5[10].time);
+
+      GZ_ExperimentConfig base; base.Default();
+      base.time_config.broker_offset_known = true;
+
+      CGZRobustnessEngine eng(m_logger);
+      double offs[2] = {-1.0, 0.0};
+      GZ_RobustnessSweepRequest req;
+      eng.BuildNeighborhoodRequest(base, GZ_ROBUST_PIVOT_STRENGTH, offs, 2, req);
+
+      GZ_RobustnessSweepResult r;
+      eng.RunSweep(req, m1, m5, "DS_PIVOT_SWEEP", GZ_VAL_VALID, GZ_VAL_VALID, r);
+
+      bool ok = (r.point_count==2) && (MathAbs(r.points[0].param_value-1.0)<0.0001) && (MathAbs(r.points[1].param_value-2.0)<0.0001) &&
+                (r.points[1].result.swing_count==2) && (r.points[0].result.swing_count>r.points[1].result.swing_count);
+      AddResult("T120", ok, StringFormat("strength1_swings=%d strength2_swings=%d (expect 1st > 2nd, 2nd==2)",
+                r.points[0].result.swing_count, r.points[1].result.swing_count));
+     }
+
+   //--- T121: NARROW_PEAK - a hand-built 3-point curve (expectancy
+   //--- 0.2/1.0/0.2, all with trades) peaking sharply in the middle: both
+   //--- neighbors fall well below 70% of the peak. Directly exercises
+   //--- Analyze() on a SYNTHETIC result - no simulation needed, same
+   //--- "test only the new logic" pattern as CGZFilterComboEngine's own
+   //--- R11-C ranking test (T111). -----------------------------------------
+   void T121_NarrowPeakDetection()
+     {
+      GZ_RobustnessSweepResult r; r.Clear();
+      r.param_label = "TEST_AXIS";
+      r.baseline_value = 2.0;
+      r.point_count = 3;
+      double pv[3] = {1.0, 2.0, 3.0};
+      double ex[3] = {0.2, 1.0, 0.2};
+      for(int i=0;i<3;i++)
+        {
+         r.points[i].Clear();
+         r.points[i].param_value = pv[i];
+         r.points[i].result.metrics.trade.trade_count = 5;
+         r.points[i].result.metrics.trade.expectancy  = ex[i];
+        }
+
+      CGZRobustnessEngine eng(m_logger);
+      eng.Analyze(r);
+
+      bool ok = (r.best_idx==1) && r.narrow_peak && !r.safe_to_adopt_best;
+      AddResult("T121", ok, StringFormat("best_idx=%d narrow_peak=%s safe_to_adopt=%s",
+                r.best_idx, r.narrow_peak?"true":"false", r.safe_to_adopt_best?"true":"false"));
+     }
+
+   //--- T122: FLAT_REGION - 4 hand-built points whose expectancy stays
+   //--- within 15% of each other (1.00/1.05/0.98/1.02) - a stable plateau,
+   //--- the opposite finding from T121. ------------------------------------
+   void T122_FlatRegionDetection()
+     {
+      GZ_RobustnessSweepResult r; r.Clear();
+      r.param_label = "TEST_AXIS";
+      r.baseline_value = 2.5;
+      r.point_count = 4;
+      double pv[4] = {1.0, 2.0, 3.0, 4.0};
+      double ex[4] = {1.00, 1.05, 0.98, 1.02};
+      for(int i=0;i<4;i++)
+        {
+         r.points[i].Clear();
+         r.points[i].param_value = pv[i];
+         r.points[i].result.metrics.trade.trade_count = 5;
+         r.points[i].result.metrics.trade.expectancy  = ex[i];
+        }
+
+      CGZRobustnessEngine eng(m_logger);
+      eng.Analyze(r);
+
+      bool ok = r.flat_region;
+      AddResult("T122", ok, StringFormat("flat_region=%s", r.flat_region?"true":"false"));
+     }
+
+   //--- T123: UNSTABLE_ZONE - 4 hand-built points alternating sign well
+   //--- above the noise floor (0.5/-0.5/0.5/-0.5) -> 3 consecutive-pair
+   //--- sign flips, >= the 2-flip threshold. -------------------------------
+   void T123_UnstableZoneDetection()
+     {
+      GZ_RobustnessSweepResult r; r.Clear();
+      r.param_label = "TEST_AXIS";
+      r.baseline_value = 2.5;
+      r.point_count = 4;
+      double pv[4] = {1.0, 2.0, 3.0, 4.0};
+      double ex[4] = {0.5, -0.5, 0.5, -0.5};
+      for(int i=0;i<4;i++)
+        {
+         r.points[i].Clear();
+         r.points[i].param_value = pv[i];
+         r.points[i].result.metrics.trade.trade_count = 5;
+         r.points[i].result.metrics.trade.expectancy  = ex[i];
+        }
+
+      CGZRobustnessEngine eng(m_logger);
+      eng.Analyze(r);
+
+      bool ok = r.unstable_zone;
+      AddResult("T123", ok, StringFormat("unstable_zone=%s", r.unstable_zone?"true":"false"));
+     }
+
+   //--- T124: PARAMETER_SENSITIVE - 2 hand-built points whose expectancy
+   //--- spans 0.1 to 2.0 (range 1.9 > 75% of the 2.0 best). ---------------
+   void T124_ParameterSensitiveDetection()
+     {
+      GZ_RobustnessSweepResult r; r.Clear();
+      r.param_label = "TEST_AXIS";
+      r.baseline_value = 1.5;
+      r.point_count = 2;
+      double pv[2] = {1.0, 2.0};
+      double ex[2] = {0.1, 2.0};
+      for(int i=0;i<2;i++)
+        {
+         r.points[i].Clear();
+         r.points[i].param_value = pv[i];
+         r.points[i].result.metrics.trade.trade_count = 5;
+         r.points[i].result.metrics.trade.expectancy  = ex[i];
+        }
+
+      CGZRobustnessEngine eng(m_logger);
+      eng.Analyze(r);
+
+      bool ok = r.parameter_sensitive && (r.best_idx==1);
+      AddResult("T124", ok, StringFormat("parameter_sensitive=%s best_idx=%d", r.parameter_sensitive?"true":"false", r.best_idx));
+     }
+
+   //--- T125: best_idx tie-break - 3 points with IDENTICAL expectancy
+   //--- (1.0) at param_value 1/2/3, baseline=2 -> the middle point (exact
+   //--- distance 0) must win the tie over the two equally-scored but
+   //--- farther-away points. A clean, non-narrow, non-unstable tie also
+   //--- must leave safe_to_adopt_best true (flat_region alone never blocks
+   //--- adoption - design note 5, GZ_RobustnessTypes.mqh). -----------------
+   void T125_BestIdxTieBreakAndSafeToAdopt()
+     {
+      GZ_RobustnessSweepResult r; r.Clear();
+      r.param_label = "TEST_AXIS";
+      r.baseline_value = 2.0;
+      r.point_count = 3;
+      double pv[3] = {1.0, 2.0, 3.0};
+      for(int i=0;i<3;i++)
+        {
+         r.points[i].Clear();
+         r.points[i].param_value = pv[i];
+         r.points[i].result.metrics.trade.trade_count = 5;
+         r.points[i].result.metrics.trade.expectancy  = 1.0;
+        }
+
+      CGZRobustnessEngine eng(m_logger);
+      eng.Analyze(r);
+
+      bool ok = (r.best_idx==1) && !r.narrow_peak && !r.unstable_zone && r.safe_to_adopt_best;
+      AddResult("T125", ok, StringFormat("best_idx=%d (expect 1 - nearest to baseline on a tie) safe_to_adopt=%s",
+                r.best_idx, r.safe_to_adopt_best?"true":"false"));
+     }
+
+   //--- T126: RunSweepBatch() enforces the Roadmap's own "stage research,
+   //--- don't run one huge Grid at once" cap (mirrors T92/T113) - REJECTED
+   //--- outright above the cap, and the empty-list case is its own,
+   //--- distinct rejection (mirrors T93/T114). -----------------------------
+   void T126_SweepBatchCapAndEmptyRejection()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates m1[]; BuildPhase9M1Series(m1, m5[10].time);
+
+      GZ_ExperimentConfig base; base.Default();
+      base.time_config.broker_offset_known = true;
+
+      CGZRobustnessEngine eng(m_logger);
+      double offs[1] = {0.0};
+      GZ_RobustnessSweepRequest reqs[3];
+      for(int i=0;i<3;i++)
+         eng.BuildNeighborhoodRequest(base, GZ_ROBUST_PIVOT_STRENGTH, offs, 1, reqs[i]);
+
+      eng.SetMaxBatchSize(2);
+      long seq_before = eng.NextSequence();
+      GZ_RobustnessSweepResult results[];
+      ENUM_GZ_ROBUSTNESS_BATCH_STATUS status = eng.RunSweepBatch(reqs, 3, m1, m5, "DS_TOO_BIG",
+                                                                   GZ_VAL_VALID, GZ_VAL_VALID, results);
+      bool cap_ok = (status==GZ_ROBUST_BATCH_REJECTED_TOO_LARGE) && (ArraySize(results)==0) && (eng.NextSequence()==seq_before);
+
+      GZ_RobustnessSweepRequest empty_reqs[];
+      GZ_RobustnessSweepResult empty_results[];
+      ENUM_GZ_ROBUSTNESS_BATCH_STATUS empty_status = eng.RunSweepBatch(empty_reqs, 0, m1, m5, "DS_TOO_BIG",
+                                                                        GZ_VAL_VALID, GZ_VAL_VALID, empty_results);
+      bool empty_ok = (empty_status==GZ_ROBUST_BATCH_REJECTED_EMPTY) && (ArraySize(empty_results)==0);
+
+      bool ok = cap_ok && empty_ok;
+      AddResult("T126", ok, StringFormat("cap_status=%s empty_status=%s", EnumToString(status), EnumToString(empty_status)));
+     }
+
+   //--- T127: determinism - two INDEPENDENT CGZRobustnessEngine instances
+   //--- over identical config+offsets+data produce field-for-field
+   //--- identical results, id included (both start their own sequence at
+   //--- ROB_000001 - same reasoning as T94). --------------------------------
+   void T127_SweepDeterminism()
+     {
+      MqlRates m5[]; BuildPhase9M5Series(m5);
+      MqlRates m1[]; BuildPhase9M1Series(m1, m5[10].time);
+
+      GZ_ExperimentConfig base; base.Default();
+      base.time_config.broker_offset_known = true;
+      double offs[2] = {-1.0, 0.0};
+
+      CGZRobustnessEngine engA(m_logger);
+      GZ_RobustnessSweepRequest reqA;
+      engA.BuildNeighborhoodRequest(base, GZ_ROBUST_PIVOT_STRENGTH, offs, 2, reqA);
+      GZ_RobustnessSweepResult rA;
+      engA.RunSweep(reqA, m1, m5, "DS_DET", GZ_VAL_VALID, GZ_VAL_VALID, rA);
+
+      CGZRobustnessEngine engB(m_logger);
+      GZ_RobustnessSweepRequest reqB;
+      engB.BuildNeighborhoodRequest(base, GZ_ROBUST_PIVOT_STRENGTH, offs, 2, reqB);
+      GZ_RobustnessSweepResult rB;
+      engB.RunSweep(reqB, m1, m5, "DS_DET", GZ_VAL_VALID, GZ_VAL_VALID, rB);
+
+      bool ok = (rA.id==rB.id) && (rA.point_count==rB.point_count) && (rA.point_count==2) &&
+                (rA.best_idx==rB.best_idx) && (rA.narrow_peak==rB.narrow_peak) && (rA.unstable_zone==rB.unstable_zone);
+      for(int i=0;i<rA.point_count && ok;i++)
+        {
+         ok = (MathAbs(rA.points[i].param_value-rB.points[i].param_value)<0.00001) &&
+              (rA.points[i].result.swing_count==rB.points[i].result.swing_count) &&
+              (rA.points[i].result.trade_count==rB.points[i].result.trade_count) &&
+              (MathAbs(rA.points[i].result.metrics.trade.net_r-rB.points[i].result.metrics.trade.net_r)<0.00001);
+        }
+      AddResult("T127", ok, StringFormat("idA=%s idB=%s point_count=%d identical=%s", rA.id, rB.id, rA.point_count, ok?"true":"false"));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -4041,6 +4374,17 @@ public:
       T114_BatchEmptyRejection();
       T115_FilterComboDeterminism();
       T116_ComboConfigReconstructable();
+      T117_AxisValueAccessorsAndApply();
+      T118_DomainValidationSkipsInvalidValues();
+      T119_BuildNeighborhoodRequestAutoBaseline();
+      T120_RunSweepPivotStrengthIntegration();
+      T121_NarrowPeakDetection();
+      T122_FlatRegionDetection();
+      T123_UnstableZoneDetection();
+      T124_ParameterSensitiveDetection();
+      T125_BestIdxTieBreakAndSafeToAdopt();
+      T126_SweepBatchCapAndEmptyRejection();
+      T127_SweepDeterminism();
      }
 
    int               PassCount() const

@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                    GoldenZoneSTR_Research.mq5    |
 //|                                                                    |
-//| GoldenZone STR - Phase 1+2+3+4+5+6+7+8+9+10+11 Research EA        |
+//| GoldenZone STR - Phase 1+2+3+4+5+6+7+8+9+10+11+12 Research EA        |
 //| Phase 1: Data Layer + Data Validator + Time Engine                |
 //| Phase 2: M5 Structure Engine (swing/pivot detection)               |
 //| Phase 3: Leg Engine + Break Engine                                 |
@@ -16,6 +16,10 @@
 //| Phase 11: Filter Combination Research (R11-A single / R11-B two /  |
 //|           R11-C limited multi-filter sweeps over Phase 10's own    |
 //|           CGZFilterEngine)                                          |
+//| Phase 12: Robustness + Sensitivity Research (axis-neighborhood       |
+//|           sweeps via Phase 9's own CGZExperimentRunner, flagging     |
+//|           Narrow Peak / Flat Region / Unstable Zone / Parameter      |
+//|           Sensitive)                                                  |
 //|                                                                    |
 //| SCOPE: This EA implements ONLY Phase 1 (Data/Validator/Time/      |
 //| Session/Diagnostics/TestHarness), Phase 2 (M5 swing/pivot         |
@@ -24,13 +28,14 @@
 //| Historical Trade Simulator), Phase 6 (Exit Engine: SL/TP/BE),     |
 //| Phase 7 (MAE/MFE + R-Path + Event Ledger), Phase 8 (Metrics +      |
 //| Reporting), Phase 9 (Experiment Configuration + Runner), Phase 10  |
-//| (Filter Engine) and Phase 11 (Filter Combination Research). It     |
-//| places NO live orders. On init it loads historical M1+M5 data,     |
-//| runs validation, runs swing detection, replays the M1/M5 data      |
-//| through the Leg/Break/Setup/Entry/Exit/Journal/Ledger engines      |
-//| directly via CGZTradeSimulator (full requested range), computes    |
-//| the Phase 8 Metrics summary via CGZMetricsEngine, evaluates Phase  |
-//| 10's CGZFilterEngine against every setup and diffs a WITH/WITHOUT- |
+//| (Filter Engine), Phase 11 (Filter Combination Research) and Phase  |
+//| 12 (Robustness + Sensitivity Research). It places NO live orders.  |
+//| On init it loads historical M1+M5 data, runs validation, runs      |
+//| swing detection, replays the M1/M5 data through the Leg/Break/     |
+//| Setup/Entry/Exit/Journal/Ledger engines directly via                |
+//| CGZTradeSimulator (full requested range), computes the Phase 8     |
+//| Metrics summary via CGZMetricsEngine, evaluates Phase 10's          |
+//| CGZFilterEngine against every setup and diffs a WITH/WITHOUT-      |
 //| filter population into GZ_FilterDiagnostics, then runs Phase 11's  |
 //| CGZFilterComboEngine (R11-A single-filter sweep, R11-B two-filter   |
 //| sweep, R11-C limited multi-filter sweep ranked off R11-A's own      |
@@ -40,14 +45,20 @@
 //| CGZExperimentRunner as one SINGLE-mode GZ_ExperimentResult over a  |
 //| recent window of the SAME already-loaded/validated data (see       |
 //| BuildAndEmitReport()'s Phase 9 section for why a window, not the   |
-//| full range, is used there), runs the deterministic T01-T116 test   |
-//| harness, and prints a completion report. Then it stops - it does   |
-//| not trade and does not proceed to Phase 12 (Robustness/Sensitivity |
-//| Research) logic.                                                    |
+//| full range, is used there), then runs Phase 12's                    |
+//| CGZRobustnessEngine over that SAME recent window - sweeping         |
+//| InpRobustnessAxis1/2's own neighborhood through a FULL Phase 2-8    |
+//| re-simulation PER swept value (unlike Phase 11's post-hoc masking - |
+//| see GZ_RobustnessTypes.mqh design note 1) and flagging Narrow Peak/ |
+//| Flat Region/Unstable Zone/Parameter Sensitive so no single highest  |
+//| historical value is ever presented as a safe final choice on its    |
+//| own - runs the deterministic T01-T127 test harness, and prints a    |
+//| completion report. Then it stops - it does not trade and does not  |
+//| proceed to Phase 13 (Walk-Forward Research) logic.                  |
 //+------------------------------------------------------------------+
 #property copyright "GoldenZone STR"
-#property version   "1.110"
-#property description "Phase 1+2+3+4+5+6+7+8+9+10+11: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting + Experiment Configuration/Runner + Filter Engine + Filter Combination Research (research/diagnostic only, no trading)"
+#property version   "1.120"
+#property description "Phase 1+2+3+4+5+6+7+8+9+10+11+12: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting + Experiment Configuration/Runner + Filter Engine + Filter Combination Research + Robustness/Sensitivity Research (research/diagnostic only, no trading)"
 
 #include <GoldenZoneSTR\Core\GZ_Types.mqh>
 #include <GoldenZoneSTR\Core\GZ_Config.mqh>
@@ -83,6 +94,8 @@
 #include <GoldenZoneSTR\Filter\GZ_FilterEngine.mqh>
 #include <GoldenZoneSTR\Filter\GZ_FilterComboTypes.mqh>
 #include <GoldenZoneSTR\Filter\GZ_FilterComboEngine.mqh>
+#include <GoldenZoneSTR\Robustness\GZ_RobustnessTypes.mqh>
+#include <GoldenZoneSTR\Robustness\GZ_RobustnessEngine.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
@@ -190,6 +203,24 @@ input int                  InpFilterComboR11CTopN        = 4;      // R11-C: bui
 input int                  InpFilterComboMaxBatchSize    = GZ_DEFAULT_MAX_FILTER_COMBO_BATCH_SIZE; // Roadmap "stage research,
                                                                     // don't run one huge Grid at once" cap, reapplied to Phase 11
 
+//--- Phase 12: Robustness + Sensitivity Research --------------------------------
+//--- UNLIKE Phase 11 (a post-hoc mask, no re-simulation), each swept value here
+//--- changes the underlying Leg/Break/Setup/Trade population itself and needs its
+//--- own FULL Phase 2-8 re-simulation via CGZExperimentRunner - so, exactly like
+//--- Phase 9's own live demonstration above (see BuildAndEmitReport()'s Phase 9
+//--- section), this runs over a RECENT WINDOW of the data (the SAME window/config
+//--- Phase 9 already built just above), not the full requested range - re-running
+//--- the full multi-month pipeline many times over (one per swept value, per axis)
+//--- would multiply this EA's already-real Phase 9 runtime cost for no new
+//--- information about Phase 12's own axis-sweep/sensitivity-analysis logic itself.
+//--- Two axes are demonstrated by default, reproducing the Roadmap's OWN worked
+//--- example ("مثال برای 1.50 ATR"): break-buffer ATR multiple and SL ATR multiple.
+input bool                  InpRunPhase12                 = true;   // set false to skip Phase 12 entirely (Phase 1-11 unaffected either way)
+input ENUM_GZ_ROBUSTNESS_PARAM InpRobustnessAxis1          = GZ_ROBUST_BREAK_BUFFER_ATR; // first axis to sweep (do not select the GZ_ROBUST_PARAM_COUNT sentinel)
+input ENUM_GZ_ROBUSTNESS_PARAM InpRobustnessAxis2          = GZ_ROBUST_SL_ATR_MULT;       // second axis to sweep (do not select the GZ_ROBUST_PARAM_COUNT sentinel)
+input int                   InpRobustnessMaxBatchSize     = GZ_DEFAULT_MAX_ROBUSTNESS_BATCH_SIZE; // Roadmap "stage research,
+                                                                    // don't run one huge Grid at once" cap, reapplied to Phase 12 (axes/call)
+
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
 CGZDataProvider   g_provider(GetPointer(g_logger));
@@ -210,6 +241,7 @@ CGZMetricsEngine  g_metrics_engine(GetPointer(g_logger));
 CGZExperimentRunner g_experiment_runner(GetPointer(g_logger));
 CGZFilterEngine   g_filter_engine(GetPointer(g_logger));
 CGZFilterComboEngine g_filter_combo_engine(GetPointer(g_logger));
+CGZRobustnessEngine  g_robustness_engine(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;
@@ -255,6 +287,11 @@ GZ_FilterComboResult g_r11c_results[];  // R11-C: limited multi-filter (ranked o
 int                  g_r11a_best_idx = -1; // index into g_r11a_results with the highest expectancy_delta (trades_after>0)
 int                  g_r11b_best_idx = -1;
 int                  g_r11c_best_idx = -1;
+
+//--- Phase 12 diagnostic results (robustness/sensitivity sweeps over the SAME
+//--- recent window Phase 9 uses - see the Phase 12 input block above for why)
+bool                     g_phase12_ran = false;
+GZ_RobustnessSweepResult g_robustness_results[]; // one per swept axis (InpRobustnessAxis1/2)
 
 //+------------------------------------------------------------------+
 //| Phase 11 helper: index of the combo with the highest                |
@@ -307,6 +344,7 @@ void BuildAndEmitReport()
    report += "Phase 9 files: GZ_ExperimentTypes, GZ_ExperimentRunner\n";
    report += "Phase 10 files: GZ_FilterTypes, GZ_FilterEngine\n";
    report += "Phase 11 files: GZ_FilterComboTypes, GZ_FilterComboEngine\n";
+   report += "Phase 12 files: GZ_RobustnessTypes, GZ_RobustnessEngine\n";
    report += "Interfaces: GZ_TimeContext, CGZDatasetInfo (Phase 1), GZ_Swing / CGZSwingEngine (Phase 2),\n";
    report += "            GZ_Leg / CGZLegEngine / CGZBreakEngine (Phase 3), GZ_Setup / CGZFibEngine /\n";
    report += "            CGZSetupStateMachine (Phase 4), GZ_Trade / CGZEntryEngine / CGZTradeSimulator\n";
@@ -315,12 +353,14 @@ void BuildAndEmitReport()
    report += "            CGZMetricsEngine (Phase 8), GZ_ExperimentConfig / GZ_ExperimentResult /\n";
    report += "            CGZExperimentRunner (Phase 9), GZ_FilterSetConfig / GZ_SetupFilterOutcome /\n";
    report += "            CGZFilterEngine (Phase 10), GZ_FilterComboRequest / GZ_FilterComboResult /\n";
-   report += "            CGZFilterComboEngine (Phase 11) - all consumed by later phases; Update()/UpdateBar()/\n";
-   report += "            OnBar()/CheckBreak()/OnLegCreated()/OnLegBroken()/MarkEntered()/\n";
-   report += "            CancelForInvalidPenetration()/OnTradeEntered() are live-safe, DetectAll()/\n";
-   report += "            CGZTradeSimulator.Run()/BuildFromFinalState()/CGZMetricsEngine.Compute()/\n";
+   report += "            CGZFilterComboEngine (Phase 11), GZ_RobustnessSweepRequest /\n";
+   report += "            GZ_RobustnessSweepResult / CGZRobustnessEngine (Phase 12) - all consumed by later\n";
+   report += "            phases; Update()/UpdateBar()/OnBar()/CheckBreak()/OnLegCreated()/OnLegBroken()/\n";
+   report += "            MarkEntered()/CancelForInvalidPenetration()/OnTradeEntered() are live-safe,\n";
+   report += "            DetectAll()/CGZTradeSimulator.Run()/BuildFromFinalState()/CGZMetricsEngine.Compute()/\n";
    report += "            CGZExperimentRunner.RunSingle()/RunBatch()/CGZFilterEngine.Evaluate()/\n";
-   report += "            CGZFilterComboEngine.RunBatch() are research-batch\n\n";
+   report += "            CGZFilterComboEngine.RunBatch()/CGZRobustnessEngine.RunSweep()/RunSweepBatch()/\n";
+   report += "            Analyze() are research-batch\n\n";
 
    report += "--- Data Validation: M1 ---\n";
    report += StringFormat("Symbol=%s Bars=%d First=%s Last=%s\n",
@@ -590,7 +630,39 @@ void BuildAndEmitReport()
    report += StringFormat("clamped to however many are eligible). InpFilterComboMaxBatchSize=%d enforces the\n", InpFilterComboMaxBatchSize);
    report += "Roadmap's own \"stage research, don't run one huge Grid at once\" rule (see T113).\n\n";
 
-   report += "--- Automated Test Results (T01-T116: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11) ---\n";
+   report += "--- Phase 12: Robustness + Sensitivity Research ---\n";
+   if(g_phase12_ran)
+     {
+      report += StringFormat("%d axis-sweep(s) run over the SAME recent window Phase 9 used (window=[%s .. %s]):\n",
+                 ArraySize(g_robustness_results), TimeToString(g_experiment_result.range_start), TimeToString(g_experiment_result.range_end));
+      for(int rr=0; rr<ArraySize(g_robustness_results); rr++)
+        {
+         GZ_RobustnessSweepResult res = g_robustness_results[rr];
+         report += StringFormat("  %s axis=%s baseline=%.4f points=%d/%d run:\n",
+                    res.id, res.param_label, res.baseline_value, res.point_count, res.point_count);
+         for(int pi=0; pi<res.point_count; pi++)
+            report += StringFormat("    %s=%.4f -> trades=%d net_r=%.3f expectancy=%.4f%s\n",
+                       res.param_label, res.points[pi].param_value, res.points[pi].result.trade_count,
+                       res.points[pi].result.metrics.trade.net_r, res.points[pi].result.metrics.trade.expectancy,
+                       (pi==res.best_idx)?"  <-- best (see flags below before adopting)":"");
+         report += StringFormat("  Flags: narrow_peak=%s flat_region=%s unstable_zone=%s parameter_sensitive=%s | safe_to_adopt_best=%s\n",
+                    res.narrow_peak?"true":"false", res.flat_region?"true":"false", res.unstable_zone?"true":"false",
+                    res.parameter_sensitive?"true":"false", res.safe_to_adopt_best?"true":"false");
+         for(int ni=0; ni<res.note_count; ni++)
+            report += StringFormat("    note: %s\n", res.notes[ni]);
+        }
+      report += "safe_to_adopt_best=false means the Roadmap's own warning applies here: \"the single highest\n";
+      report += "historical value must NOT be accepted alone as the final choice\" - see narrow_peak/\n";
+      report += "unstable_zone above. Each point above is a FULL, independent Phase 2-8 re-simulation\n";
+      report += "(NOT a post-hoc mask like Phase 11 - see GZ_RobustnessTypes.mqh design note 1); an\n";
+      report += "out-of-domain requested value is skipped and noted, never silently clamped or run anyway.\n";
+     }
+   else
+      report += "Skipped (InpRunPhase12=false).\n";
+   report += StringFormat("InpRobustnessAxis1=%s InpRobustnessAxis2=%s InpRobustnessMaxBatchSize=%d.\n\n",
+              EnumToString(InpRobustnessAxis1), EnumToString(InpRobustnessAxis2), InpRobustnessMaxBatchSize);
+
+   report += "--- Automated Test Results (T01-T127: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -601,10 +673,13 @@ void BuildAndEmitReport()
    report += StringFormat("\nTOTAL: %d PASS / %d FAIL (of %d)\n\n", pass, fail, g_harness.ResultCount());
 
    report += "--- Known Limitations / Deferred Work ---\n";
-   report += "DEFERRED: Robustness/Sensitivity (Phase 12), Walk-Forward (Phase 13), Monte Carlo (Phase 14),\n";
-   report += "Final OOS (Phase 15), Research Freeze (Phase 16), Future Execution Adapter (Phase 17) - not\n";
-   report += "implemented, by design. Phase 11 (Filter Combination Research) IS now implemented (see the\n";
-   report += "Phase 11 section above) - R11-A/B/C sweep Phase 10's own CGZFilterEngine directly as post-hoc\n";
+   report += "DEFERRED: Walk-Forward (Phase 13), Monte Carlo (Phase 14), Final OOS (Phase 15), Research\n";
+   report += "Freeze (Phase 16), Future Execution Adapter (Phase 17) - not implemented, by design. Phase 11\n";
+   report += "(Filter Combination Research) and Phase 12 (Robustness/Sensitivity Research) ARE now\n";
+   report += "implemented (see their sections above). Phase 12's axis sweeps demonstrate 2 axes by default\n";
+   report += "(InpRobustnessAxis1/2); the other 9 defined in ENUM_GZ_ROBUSTNESS_PARAM (GZ_RobustnessTypes.mqh)\n";
+   report += "are equally usable by changing those inputs - no code change needed to sweep a different axis.\n";
+   report += "Phase 11: R11-A/B/C sweep Phase 10's own CGZFilterEngine directly as post-hoc\n";
    report += "masks over the already-final Phase 2-9 setup/trade population, rather than through\n";
    report += "CGZExperimentRunner's SINGLE/SWEEP/GRID/BATCH (that runner varies STRATEGY config - pivot\n";
    report += "strength, break/entry/exit parameters, etc. - and re-simulates the full pipeline per config;\n";
@@ -639,28 +714,28 @@ void BuildAndEmitReport()
    string final_status;
    bool data_ok = (g_info_m1.total_bars>0 && g_info_m5.total_bars>0);
    if(fail>0)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11 BLOCKED (automated test failure - see detail above)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12 BLOCKED (automated test failure - see detail above)";
    else if(!data_ok)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11 BLOCKED (historical data unavailable for requested symbol/range)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12 BLOCKED (historical data unavailable for requested symbol/range)";
    else if(!InpBrokerOffsetKnown)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11 BLOCKED (broker UTC offset not yet verified by user)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12 BLOCKED (broker UTC offset not yet verified by user)";
    else
       // This report is only ever printed by the EA's own OnInit() running
       // inside MT5, so reaching this branch already proves compile+attach
       // succeeded - there is nothing further to "wait" on.
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11 COMPLETE";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12 COMPLETE";
 
    report += "--- Final Status ---\n" + final_status + "\n";
    report += "===================================================\n";
 
    Print(report);
 
-   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_8_9_10_11_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle!=INVALID_HANDLE)
      {
       FileWriteString(handle, report);
       FileClose(handle);
-      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_8_9_10_11_Report.txt");
+      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_Report.txt");
      }
    else
      {
@@ -691,7 +766,7 @@ int OnInit()
       InpBrokerOffsetKnown ? "true" : "false"));
 
    g_logger.EnableVerbose(InpVerboseLogging);
-   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11 starting up (research/diagnostic mode - no trading).");
+   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12 starting up (research/diagnostic mode - no trading).");
 
    //--- Time engine configuration -----------------------------------------
    GZ_TimeConfig time_cfg;
@@ -1187,6 +1262,71 @@ int OnInit()
          g_experiment_result.warning_count));
       for(int w=0; w<g_experiment_result.warning_count; w++)
          g_logger.Info("Experiment", StringFormat("  Warning: %s", g_experiment_result.warnings[w]));
+
+      //--- Phase 12: Robustness + Sensitivity Research - sweep
+      //--- InpRobustnessAxis1/2 around exp_cfg's OWN current value for
+      //--- each (auto-baseline, see CGZRobustnessEngine::
+      //--- BuildNeighborhoodRequest()), over the SAME recent
+      //--- m1_window/m5_window Phase 9 just used above (see the Phase 12
+      //--- input block for why a window, not the full range). ATR-
+      //--- multiple-style axes (break buffer / SL ATR mult / SL buffer /
+      //--- entry penetration) use the Roadmap's OWN worked-example
+      //--- offsets; everything else falls back to a small integer or
+      //--- ratio neighborhood - see GZRobustnessDefault*Offsets() in
+      //--- GZ_RobustnessTypes.mqh.
+      if(InpRunPhase12)
+        {
+         g_robustness_engine.SetMaxBatchSize(InpRobustnessMaxBatchSize);
+
+         ENUM_GZ_ROBUSTNESS_PARAM axes[2] = {InpRobustnessAxis1, InpRobustnessAxis2};
+         GZ_RobustnessSweepRequest rob_reqs[2];
+         int rob_req_count = 0;
+         for(int a=0; a<2; a++)
+           {
+            if(axes[a]==GZ_ROBUST_PARAM_COUNT) continue; // sentinel - not a real axis, skip if mistakenly selected
+            double offs[];
+            switch(axes[a])
+              {
+               case GZ_ROBUST_BREAK_BUFFER_ATR:
+               case GZ_ROBUST_SL_ATR_MULT:
+               case GZ_ROBUST_SL_BUFFER_ATR:
+               case GZ_ROBUST_ENTRY_PENETRATION_ATR:
+                  GZRobustnessDefaultAtrOffsets(offs); break;
+               case GZ_ROBUST_FIB_ZONE_MIN_RATIO:
+               case GZ_ROBUST_FIB_ZONE_MAX_RATIO:
+                  GZRobustnessDefaultRatioOffsets(offs); break;
+               default:
+                  GZRobustnessDefaultIntOffsets(offs); break; // PIVOT_STRENGTH/ATR_PERIOD/CONFIRMATION_CANDLES/TP_R_MULTIPLE/BE_TRIGGER_R
+              }
+            g_robustness_engine.BuildNeighborhoodRequest(exp_cfg, axes[a], offs, ArraySize(offs), rob_reqs[rob_req_count]);
+            rob_req_count++;
+           }
+
+         if(rob_req_count>0)
+            g_robustness_engine.RunSweepBatch(rob_reqs, rob_req_count, m1_window, m5_window, dataset_id,
+                                               g_info_m1.validation_status, g_info_m5.validation_status, g_robustness_results);
+         else
+            ArrayResize(g_robustness_results, 0);
+
+         g_phase12_ran = true;
+         for(int ri=0; ri<ArraySize(g_robustness_results); ri++)
+           {
+            GZ_RobustnessSweepResult rr = g_robustness_results[ri];
+            g_logger.Info("Robustness", StringFormat(
+               "Phase 12: %s [%s] baseline=%.4f points=%d best=%s expectancy=%s safe_to_adopt=%s | flags: narrow_peak=%s flat_region=%s unstable_zone=%s parameter_sensitive=%s",
+               rr.id, rr.param_label, rr.baseline_value, rr.point_count,
+               (rr.best_idx>=0)?DoubleToString(rr.points[rr.best_idx].param_value,4):"n/a",
+               (rr.best_idx>=0)?DoubleToString(rr.points[rr.best_idx].result.metrics.trade.expectancy,4):"n/a",
+               rr.safe_to_adopt_best?"true":"false", rr.narrow_peak?"true":"false", rr.flat_region?"true":"false",
+               rr.unstable_zone?"true":"false", rr.parameter_sensitive?"true":"false"));
+            for(int pi=0; pi<rr.point_count; pi++)
+               g_logger.Info("Robustness", StringFormat("  %s=%.4f -> trades=%d net_r=%.3f expectancy=%.4f",
+                              rr.param_label, rr.points[pi].param_value, rr.points[pi].result.trade_count,
+                              rr.points[pi].result.metrics.trade.net_r, rr.points[pi].result.metrics.trade.expectancy));
+           }
+        }
+      else
+         g_logger.Info("Robustness", "Phase 12: skipped (InpRunPhase12=false).");
      }
    else
       g_logger.Warning("Leg", "No M5 data loaded - leg/break/setup/entry/exit detection skipped.");
@@ -1197,7 +1337,7 @@ int OnInit()
    //--- Report ------------------------------------------------------------------
    BuildAndEmitReport();
 
-   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11 diagnostics complete. STOPPING - not proceeding to Phase 12 (Robustness/Sensitivity Research) logic.");
+   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12 diagnostics complete. STOPPING - not proceeding to Phase 13 (Walk-Forward Research) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.
@@ -1209,7 +1349,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11 EA removed.");
+   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12 EA removed.");
   }
 
 //+------------------------------------------------------------------+
