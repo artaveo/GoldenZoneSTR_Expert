@@ -2119,41 +2119,46 @@ public:
      {
       datetime t0 = MakeTime(2026,1,9,15,0);
 
+      // Single shared leg engine for BOTH setups (mirrors real usage - one
+      // CGZLegEngine per replay - see GZ_TradeSimulator.mqh). Using two
+      // separate engines here previously caused legA.id and legB.id to
+      // collide (each engine's id counter starts at 1 independently),
+      // which made OnLegBroken()'s FindByLegId() match the wrong (already
+      // terminal) setup and silently skip the FIB_ACTIVE cascade for
+      // Setup B - a test-construction bug, not an CGZEventLedger one.
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      GZ_BreakConfig bcfg; bcfg.Default();
+      CGZBreakEngine breakEngine(m_logger); breakEngine.Configure(bcfg);
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+
       // Setup A: LEG_DETECTED only, never locked. A same-direction Setup B
       // created afterwards cancels it with the ordinary NEW_VALID_SETUP
       // reason (not one of the two INVALID_* reasons) - this is the
       // "ordinary cancellation" case the classification must bucket as
       // SETUP_CANCELLED, whichever ordinary reason actually fires.
       GZ_Swing lowA = MakeSwing(GZ_SWING_LOW, 50.0, t0, t0+2*300, 101);
-      CGZLegEngine legEngineA(m_logger); legEngineA.Init(GZ_LEG_VARIANT_LAST_SWING);
-      int ia=-1; legEngineA.Update(lowA,0.0,false,ia);
+      int ia=-1; legEngine.Update(lowA,0.0,false,ia);
       GZ_Swing highA = MakeSwing(GZ_SWING_HIGH, 60.0, t0+5*300, t0+7*300, 102);
-      int ia2=-1; legEngineA.Update(highA,0.0,false,ia2);
-      GZ_Leg legA = legEngineA.GetLeg(ia2);
-
-      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      int ia2=-1; legEngine.Update(highA,0.0,false,ia2);
+      GZ_Leg legA = legEngine.GetLeg(ia2);
       sm.OnLegCreated(legA); // Setup #1, LEG_DETECTED (bullish)
 
       // Setup B: LEG_DETECTED -> broken -> FIB_ACTIVE -> invalidated. Also
       // bullish, so creating it below cancels Setup A (NEW_VALID_SETUP).
       GZ_Swing lowB  = MakeSwing(GZ_SWING_LOW,  90.0,  t0+10*300, t0+12*300, 201);
       GZ_Swing highB = MakeSwing(GZ_SWING_HIGH, 110.0, t0+15*300, t0+17*300, 202);
-      CGZLegEngine legEngineB(m_logger); legEngineB.Init(GZ_LEG_VARIANT_LAST_SWING);
-      int ib=-1; legEngineB.Update(lowB,0.0,false,ib);
-      int ib2=-1; legEngineB.Update(highB,0.0,false,ib2);
-      GZ_Leg legB = legEngineB.GetLeg(ib2);
+      int ib=-1; legEngine.Update(lowB,0.0,false,ib);
+      int ib2=-1; legEngine.Update(highB,0.0,false,ib2);
+      GZ_Leg legB = legEngine.GetLeg(ib2);
       int siB = sm.OnLegCreated(legB); // Setup #2
 
-      GZ_BreakConfig bcfgB; bcfgB.Default();
-      CGZBreakEngine breakEngineB(m_logger); breakEngineB.Configure(bcfgB);
-
       MqlRates breakBarB = MakeBar(t0+18*300, 109,112,108,111);
-      legEngineB.UpdateBar(breakBarB);
-      GZ_Leg legBAfterExtreme = legEngineB.GetLeg(ib2);
-      breakEngineB.OnBar(breakBarB);
-      bool brokeB = breakEngineB.CheckBreak(legBAfterExtreme, breakBarB); // sets .broken/.break_time in place
-      legEngineB.SetLeg(ib2, legBAfterExtreme);
-      sm.OnLegBroken(legBAfterExtreme); // -> FIB_ACTIVE
+      legEngine.UpdateBar(breakBarB);
+      GZ_Leg legBAfterExtreme = legEngine.GetLeg(ib2);
+      breakEngine.OnBar(breakBarB);
+      bool brokeB = breakEngine.CheckBreak(legBAfterExtreme, breakBarB); // sets .broken/.break_time in place
+      legEngine.SetLeg(ib2, legBAfterExtreme);
+      sm.OnLegBroken(legBAfterExtreme); // -> FIB_ACTIVE (legB.id is now unique, so FindByLegId matches Setup B)
       GZ_Setup setupB = sm.GetSetup(siB);
       sm.CancelForInvalidPenetration(setupB.id, t0+19*300);
 
