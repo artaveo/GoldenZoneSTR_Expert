@@ -2791,7 +2791,7 @@ public:
    //  PHASE 9: EXPERIMENT CONFIGURATION + RUNNER  (T87-T96)
    //=====================================================================
 
-   //--- Shared fixture for T88-T96: a real, contiguous 11-bar M5 series
+   //--- Shared fixture for T88-T96: a real, contiguous 13-bar M5 series
    //--- (NOT hand-injected GZ_Swing records like BuildPhase7Scenario -
    //--- CGZExperimentRunner detects swings itself via CGZSwingEngine, so
    //--- this must be genuine raw OHLC with real pivot windows) that,
@@ -2800,16 +2800,37 @@ public:
    //--- HIGH=140 (pivot idx6, confirmed idx8) - which the baseline
    //--- LAST_SWING Leg Engine turns into one bullish leg, broken on the
    //--- very next bar (idx9, CLOSE=141>140), which dips back into the
-   //--- default [0.30,0.90] fib zone on the bar after that (idx10,
-   //--- range [95,139] overlaps zone [86,122]) to reach WAITING_ENTRY.
-   //--- Every other bar in the array is deliberately NOT a pivot at any
-   //--- strength>=2 (verified by hand - see GZ_ExperimentRunner.mqh
-   //--- design notes for the reasoning) so this fixture is exactly two
-   //--- swings, no more, at the baseline strength.
+   //--- fib zone on the bar after that (idx10). idx11/idx12 are TRAILING
+   //--- FILLER bars, present ONLY so CGZTradeSimulator has a "next M5
+   //--- candle" for M1 bars anchored after idx10 to belong to - it
+   //--- deliberately never evaluates M1 bars at/after the LAST M5 bar's
+   //--- close time (no lookahead - see GZ_TradeSimulator.mqh), the exact
+   //--- same reason BuildPhase7Scenario's own m5[] carries two bars past
+   //--- its own zone-touch bar. idx11's H=145/L=90 are deliberately WIDE
+   //--- (not tight filler values) so that, once idx9/idx10 each gain a
+   //--- FULL pivot-strength=2 window (2 bars on both sides) from these
+   //--- additions, neither accidentally starts qualifying as its OWN
+   //--- spurious pivot (idx9 would otherwise beat idx10/idx11 as a new
+   //--- HIGH; idx10 would otherwise beat idx11/idx12 as a new LOW) -
+   //--- verified by hand, see the fixture's own design notes in
+   //--- GZ_ExperimentRunner.mqh. Every bar besides idx2/idx6 stays a
+   //--- non-pivot at strength>=2, so this fixture is exactly two swings,
+   //--- no more, at the baseline strength.
+   //---
+   //--- IMPORTANT (extreme-price freeze): CGZLegEngine.UpdateBar() stops
+   //--- extending a leg's extreme_price the instant leg.broken==true
+   //--- (`if(m_legs[i].broken) continue;`). idx9 itself still runs
+   //--- BEFORE break_engine.CheckBreak() sets broken=true that same
+   //--- iteration, so idx9's own H=142 DOES extend extreme_price from
+   //--- 140 to 142 first - the fib zone/entry level below are therefore
+   //--- computed off 142 (the leg's true post-break extreme), NOT the
+   //--- original 140 pivot price. idx11/idx12 run AFTER the leg is
+   //--- already broken, so their H/L never move it further no matter how
+   //--- wide they are.
    void BuildPhase9M5Series(MqlRates &m5[])
      {
       datetime t0 = MakeTime(2026,3,2,9,0);
-      ArrayResize(m5,11);
+      ArrayResize(m5,13);
       m5[0]  = MakeHL(t0+0*300,  105,100);
       m5[1]  = MakeHL(t0+1*300,  103,98);
       m5[2]  = MakeHL(t0+2*300,  102,80);   // pivot LOW candidate (L=80)
@@ -2819,21 +2840,29 @@ public:
       m5[6]  = MakeHL(t0+6*300,  140,100);  // pivot HIGH candidate (H=140)
       m5[7]  = MakeHL(t0+7*300,  115,101);
       m5[8]  = MakeHL(t0+8*300,  112,98);   // HIGH confirmed here (t0+8*300), close=105<140, no break yet
-      m5[9]  = MakeBar(t0+9*300, 112,142,110,141); // BREAK bar: close=141>140 (baseline CLOSE break)
-      m5[10] = MakeHL(t0+10*300, 139,95);   // zone-touch bar: range [95,139] overlaps zone [86,122]
+      m5[9]  = MakeBar(t0+9*300, 112,142,110,141); // BREAK bar: close=141>140 (baseline CLOSE break); extreme_price -> 142 (see note above)
+      m5[10] = MakeHL(t0+10*300, 139,95);   // zone-touch bar: overlaps the (extreme=142-based) fib zone
+      m5[11] = MakeHL(t0+11*300, 145,90);   // trailing filler: wide H/L so idx9/idx10 stay non-pivots once their window completes (see note above)
+      m5[12] = MakeHL(t0+12*300, 100,95);   // trailing filler: gives m1[1] (exit bar) somewhere to belong
      }
 
    //--- M1 bars that, layered on BuildPhase9M5Series()'s zone-touch bar
    //--- (m5[10], time T), trigger a baseline TOUCH entry at the default
-   //--- entry_fib_ratio=0.618 (price=140-0.618*60=102.92, inside m1[0]'s
-   //--- [102,104.5] range) and then a comfortable TP_HIT exit (baseline
-   //--- STRUCTURE SL=leg origin=80, TP=2R - m1[1] clears any realistic
-   //--- TP regardless of the exact entry fill price).
+   //--- entry_fib_ratio=0.618. Entry level uses the leg's POST-BREAK
+   //--- extreme_price=142 (see BuildPhase9M5Series design note), not the
+   //--- original pivot 140: 142-0.618*(142-80)=103.684, inside m1[0]'s
+   //--- [102,104.5] range. m1[0] falls within idx11's forming M5 candle
+   //--- (T+300 <= m1[0].time < T+600), so it is evaluated using structure
+   //--- state as of idx10 (already WAITING_ENTRY) - no lookahead. m1[1]
+   //--- falls within idx12's forming candle and delivers a comfortable
+   //--- TP_HIT (baseline STRUCTURE SL=leg origin=80, TP=2R - m1[1]
+   //--- clears any realistic TP regardless of the exact entry fill
+   //--- price).
    void BuildPhase9M1Series(MqlRates &m1[], datetime m5_touch_time)
      {
       datetime T = m5_touch_time;
       ArrayResize(m1,2);
-      m1[0] = MakeBar(T+300+60, 104,104.5,102,102.5);   // crosses 102.92 -> TOUCH entry
+      m1[0] = MakeBar(T+300+60, 104,104.5,102,102.5);   // crosses 103.684 -> TOUCH entry
       m1[1] = MakeBar(T+600+60, 155,160,154,158);        // well past TP
      }
 
@@ -2900,7 +2929,7 @@ public:
                 (r.trade_count>=1) && (r.exit_count==r.trade_count) &&
                 (!r.HasWarning("NO_TRADES_PRODUCED")) && (!r.HasWarning("NO_SWINGS_DETECTED")) &&
                 (r.metrics.trade.trade_count==r.trade_count) &&
-                (r.range_start==m5[0].time) && (r.range_end==m5[10].time);
+                (r.range_start==m5[0].time) && (r.range_end==m5[ArraySize(m5)-1].time);
       AddResult("T89", ok, StringFormat("swings=%d legs=%d setups=%d trades=%d exits=%d net_r=%.3f warnings=%d",
                 r.swing_count, r.leg_count, r.setup_count, r.trade_count, r.exit_count, r.metrics.trade.net_r, r.warning_count));
      }
