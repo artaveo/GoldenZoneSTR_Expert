@@ -11,6 +11,7 @@
 //| Phase 8 (T75-T86): Metrics + Reporting                            |
 //| Phase 9 (T87-T96): Experiment Configuration + Runner               |
 //| Phase 10 (T97-T106): Filter Engine                                 |
+//| Phase 11 (T107-T116): Filter Combination Research                  |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -52,6 +53,8 @@
 #include "..\Experiment\GZ_ExperimentRunner.mqh"
 #include "..\Filter\GZ_FilterTypes.mqh"
 #include "..\Filter\GZ_FilterEngine.mqh"
+#include "..\Filter\GZ_FilterComboTypes.mqh"
+#include "..\Filter\GZ_FilterComboEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -3533,6 +3536,391 @@ public:
                 before.trade.trade_count, before.trade.net_r, after.trade.trade_count, after.trade.net_r, after.trade.winners));
      }
 
+   //=====================================================================
+   //  PHASE 11: FILTER COMBINATION RESEARCH  (T107-T116)
+   //=====================================================================
+
+   //--- Shared fixture for T109-T116: 20 flat M5 bars (half_range=1.0 ->
+   //--- ATR(5)=2.0 for any idx>=5, same MakeFlatBars derivation T98 already
+   //--- uses), 4 BROKEN bullish setups (ids 1-4) with deliberately
+   //--- different Break Quality metrics against a 0.20 ATR-mult threshold
+   //--- (atr_period=5):
+   //---   Setup 1: break_dist=0.5 -> metric=0.25 -> PASS
+   //---   Setup 2: break_dist=0.1 -> metric=0.05 -> FAIL
+   //---   Setup 3: break_dist=1.0 -> metric=0.50 -> PASS
+   //---   Setup 4: break_dist=0.05-> metric=0.025-> FAIL
+   //--- and one closed trade per setup (trade_id==setup_id, via
+   //--- AddClosedJournalTrade - same join field CGZFilterComboEngine
+   //--- itself uses), realized_r = +2, -1, +1, -2 (unfiltered net_r=0,
+   //--- expectancy=0). A BREAK_QUALITY INCLUDE @0.20 filter therefore
+   //--- keeps exactly setups/trades {1,3}: net_r=3.0, expectancy=1.5,
+   //--- expectancy_delta=+1.5 - the hand-derived numbers T109/T115/T116
+   //--- check against.
+   void BuildFilterComboFixture(MqlRates &bars[], GZ_Setup &setups[], CGZJournalEngine &journal)
+     {
+      MakeFlatBars(bars, MakeTime(2026,4,6,10,0), 20, 1.0);
+
+      ArrayResize(setups, 4);
+      setups[0] = MakeBrokenSetup(1, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.5,  bars[10].time);
+      setups[1] = MakeBrokenSetup(2, GZ_LEG_BULLISH, 90.0, 100.0, 102.0, 100.1,  bars[11].time);
+      setups[2] = MakeBrokenSetup(3, GZ_LEG_BULLISH, 90.0, 100.0, 103.0, 101.0,  bars[12].time);
+      setups[3] = MakeBrokenSetup(4, GZ_LEG_BULLISH, 90.0, 100.0, 100.5, 100.05, bars[13].time);
+
+      journal.Init();
+      datetime t0 = MakeTime(2026,4,6,12,0);
+      AddClosedJournalTrade(journal, 1, GZ_LEG_BULLISH, t0,          t0+60,           2.0);
+      AddClosedJournalTrade(journal, 2, GZ_LEG_BULLISH, t0+3600,     t0+3600+60,     -1.0);
+      AddClosedJournalTrade(journal, 3, GZ_LEG_BULLISH, t0+7200,     t0+7200+60,      1.0);
+      AddClosedJournalTrade(journal, 4, GZ_LEG_BULLISH, t0+10800,    t0+10800+60,    -2.0);
+     }
+
+   GZ_FilterSetConfig FilterComboFixtureBaseCfg()
+     {
+      GZ_FilterSetConfig cfg; cfg.Default();
+      cfg.atr_period = 5;
+      cfg.break_quality_min_atr_mult = 0.20;
+      return cfg;
+     }
+
+   //--- T107: R11-A builder - one request per IMPLEMENTED, non-reserved
+   //--- filter (5: Break Quality/Leg Quality/Volume/Volatility/Session),
+   //--- each with EXACTLY that one filter INCLUDE and every other OFF;
+   //--- include_reserved=true appends the 3 reserved filters (8 total). --
+   void T107_R11ASingleRequestBuilder()
+     {
+      GZ_FilterSetConfig base = FilterComboFixtureBaseCfg();
+      CGZFilterComboEngine combo(m_logger);
+
+      GZ_FilterComboRequest reqs[];
+      int n = combo.BuildR11ASingleRequests(base, reqs, false);
+
+      bool shape_ok = (n==5);
+      for(int i=0;i<n && shape_ok;i++)
+        {
+         int enabled=0;
+         for(int k=0;k<GZ_FILTER_COUNT;k++)
+            if(reqs[i].config.mode[k]!=GZ_FILTER_OFF) enabled++;
+         if(enabled!=1 || reqs[i].stage!=GZ_COMBO_R11A_SINGLE) shape_ok=false;
+        }
+
+      GZ_FilterComboRequest reqsAll[];
+      int nAll = combo.BuildR11ASingleRequests(base, reqsAll, true);
+
+      bool ok = shape_ok && (nAll==8);
+      AddResult("T107", ok, StringFormat("non_reserved_count=%d (expected 5) with_reserved_count=%d (expected 8) shape_ok=%s",
+                n, nAll, shape_ok?"true":"false"));
+     }
+
+   //--- T108: R11-B builder - default (include_reserved=false) keeps only
+   //--- the pairs where BOTH filters are non-reserved (8 of the 11 listed
+   //--- pairs; the 3 naming VWAP/M15 are skipped); include_reserved=true
+   //--- returns all 11. Every returned request has exactly 2 filters ON. -
+   void T108_R11BTwoFilterRequestBuilder()
+     {
+      GZ_FilterSetConfig base = FilterComboFixtureBaseCfg();
+      CGZFilterComboEngine combo(m_logger);
+
+      GZ_FilterComboRequest reqs[];
+      int n = combo.BuildR11BTwoFilterRequests(base, reqs, false);
+
+      bool shape_ok = (n==8);
+      for(int i=0;i<n && shape_ok;i++)
+        {
+         int enabled=0;
+         for(int k=0;k<GZ_FILTER_COUNT;k++)
+            if(reqs[i].config.mode[k]!=GZ_FILTER_OFF) enabled++;
+         if(enabled!=2 || reqs[i].stage!=GZ_COMBO_R11B_TWO) shape_ok=false;
+        }
+
+      GZ_FilterComboRequest reqsAll[];
+      int nAll = combo.BuildR11BTwoFilterRequests(base, reqsAll, true);
+
+      bool ok = shape_ok && (nAll==11);
+      AddResult("T108", ok, StringFormat("non_reserved_pairs=%d (expected 8) with_reserved_pairs=%d (expected 11) shape_ok=%s",
+                n, nAll, shape_ok?"true":"false"));
+     }
+
+   //--- T109: one single-filter combo (Break Quality INCLUDE @0.20) run
+   //--- through CGZFilterComboEngine against the shared fixture reproduces
+   //--- the hand-derived numbers exactly: setups_after=2, trades_after=2,
+   //--- net_r=3.0, expectancy_delta=+1.5 (see BuildFilterComboFixture()). -
+   void T109_SingleFilterComboKnownNumbers()
+     {
+      MqlRates bars[]; GZ_Setup setups[]; CGZJournalEngine journal(m_logger);
+      BuildFilterComboFixture(bars, setups, journal);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary baseline;
+      metrics.Compute(journal, te, se, profile, baseline);
+
+      GZ_FilterSetConfig cfg = FilterComboFixtureBaseCfg();
+      cfg.mode[GZ_FILTER_BREAK_QUALITY] = GZ_FILTER_INCLUDE;
+
+      GZ_FilterComboRequest reqs[1];
+      reqs[0].Clear();
+      reqs[0].stage  = GZ_COMBO_R11A_SINGLE;
+      reqs[0].label  = "BREAK_QUALITY";
+      reqs[0].config = cfg;
+
+      CGZFilterComboEngine combo(m_logger);
+      GZ_FilterComboResult results[];
+      ENUM_GZ_FILTER_COMBO_BATCH_STATUS status = combo.RunBatch(reqs, 1, setups, ArraySize(setups), bars,
+                                                                 journal, te, se, profile, baseline, results);
+
+      bool ok = (status==GZ_COMBO_BATCH_OK) && (ArraySize(results)==1) &&
+                (results[0].diagnostics.setups_after==2) && (results[0].diagnostics.trades_after==2) &&
+                (MathAbs(results[0].metrics_with.trade.net_r-3.0)<0.0001) &&
+                (MathAbs(results[0].diagnostics.expectancy_delta-1.5)<0.0001) &&
+                (!results[0].reserved_filter_used);
+      AddResult("T109", ok, StringFormat("setups_after=%d trades_after=%d net_r=%.3f expectancy_delta=%.3f",
+                results[0].diagnostics.setups_after, results[0].diagnostics.trades_after,
+                results[0].metrics_with.trade.net_r, results[0].diagnostics.expectancy_delta));
+     }
+
+   //--- T110: a combo enabling a RESERVED filter (VWAP) always rejects
+   //--- every setup (NOT_AVAILABLE never auto-passes, design note 4,
+   //--- GZ_FilterComboTypes.mqh) - setups_after=0, trades_after=0, and the
+   //--- RESERVED_FILTER_ALWAYS_REJECTS warning is set. -------------------
+   void T110_ReservedFilterComboRejectsAll()
+     {
+      MqlRates bars[]; GZ_Setup setups[]; CGZJournalEngine journal(m_logger);
+      BuildFilterComboFixture(bars, setups, journal);
+
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary baseline;
+      metrics.Compute(journal, te, se, profile, baseline);
+
+      GZ_FilterSetConfig cfg = FilterComboFixtureBaseCfg();
+      cfg.mode[GZ_FILTER_VWAP] = GZ_FILTER_INCLUDE;
+
+      GZ_FilterComboRequest reqs[1];
+      reqs[0].Clear();
+      reqs[0].stage  = GZ_COMBO_R11A_SINGLE;
+      reqs[0].label  = "VWAP";
+      reqs[0].config = cfg;
+
+      CGZFilterComboEngine combo(m_logger);
+      GZ_FilterComboResult results[];
+      combo.RunBatch(reqs, 1, setups, ArraySize(setups), bars, journal, te, se, profile, baseline, results);
+
+      bool has_warning = false;
+      for(int i=0;i<results[0].warning_count;i++)
+         if(results[0].warnings[i]=="RESERVED_FILTER_ALWAYS_REJECTS") has_warning=true;
+
+      bool ok = (ArraySize(results)==1) && (results[0].diagnostics.setups_after==0) &&
+                (results[0].diagnostics.trades_after==0) && results[0].reserved_filter_used && has_warning;
+      AddResult("T110", ok, StringFormat("setups_after=%d trades_after=%d reserved_used=%s warning=%s",
+                results[0].diagnostics.setups_after, results[0].diagnostics.trades_after,
+                results[0].reserved_filter_used?"true":"false", has_warning?"true":"false"));
+     }
+
+   //--- T111: R11-C ranking + sizes - 5 hand-built R11-A results with
+   //--- known expectancy_delta scores (VOLUME=2.0, SESSION=2.0 (tie),
+   //--- BREAK_QUALITY=1.5, LEG_QUALITY=0.5, VOLATILITY=-0.3). Expected
+   //--- rank order (score desc, ties by ascending ENUM_GZ_FILTER_ID):
+   //--- VOLUME(id=2), SESSION(id=6), BREAK_QUALITY(id=0)... wait - ranked
+   //--- by SCORE first: VOLUME/SESSION tie at 2.0 -> VOLUME(id=2) before
+   //--- SESSION(id=6); then BREAK_QUALITY(1.5); LEG_QUALITY(0.5);
+   //--- VOLATILITY(-0.3). top_n=4 -> exactly 2 combos: size-3
+   //--- {VOLUME,SESSION,BREAK_QUALITY} and size-4 {..,LEG_QUALITY}. -------
+   void T111_R11CRankingAndSizes()
+     {
+      GZ_FilterComboResult r11a[5];
+      ENUM_GZ_FILTER_ID ids[5]    = {GZ_FILTER_BREAK_QUALITY, GZ_FILTER_LEG_QUALITY, GZ_FILTER_VOLUME, GZ_FILTER_VOLATILITY, GZ_FILTER_SESSION};
+      double             scores[5] = {1.5, 0.5, 2.0, -0.3, 2.0};
+      for(int i=0;i<5;i++)
+        {
+         r11a[i].Clear();
+         r11a[i].stage = GZ_COMBO_R11A_SINGLE;
+         r11a[i].filter_count = 1;
+         r11a[i].filter_ids[0] = ids[i];
+         r11a[i].diagnostics.expectancy_delta = scores[i];
+        }
+
+      GZ_FilterSetConfig base = FilterComboFixtureBaseCfg();
+      CGZFilterComboEngine combo(m_logger);
+      GZ_FilterComboRequest reqs[];
+      int n = combo.BuildR11CMultiFilterRequests(r11a, 5, base, reqs, 4);
+
+      bool size3_ok = false, size4_ok = false;
+      if(n==2)
+        {
+         int cnt3=0, cnt4=0;
+         for(int k=0;k<GZ_FILTER_COUNT;k++) if(reqs[0].config.mode[k]!=GZ_FILTER_OFF) cnt3++;
+         for(int k=0;k<GZ_FILTER_COUNT;k++) if(reqs[1].config.mode[k]!=GZ_FILTER_OFF) cnt4++;
+         size3_ok = (cnt3==3) && (reqs[0].config.mode[GZ_FILTER_VOLUME]==GZ_FILTER_INCLUDE) &&
+                    (reqs[0].config.mode[GZ_FILTER_SESSION]==GZ_FILTER_INCLUDE) &&
+                    (reqs[0].config.mode[GZ_FILTER_BREAK_QUALITY]==GZ_FILTER_INCLUDE) &&
+                    (reqs[0].stage==GZ_COMBO_R11C_MULTI);
+         size4_ok = (cnt4==4) && (reqs[1].config.mode[GZ_FILTER_VOLUME]==GZ_FILTER_INCLUDE) &&
+                    (reqs[1].config.mode[GZ_FILTER_SESSION]==GZ_FILTER_INCLUDE) &&
+                    (reqs[1].config.mode[GZ_FILTER_BREAK_QUALITY]==GZ_FILTER_INCLUDE) &&
+                    (reqs[1].config.mode[GZ_FILTER_LEG_QUALITY]==GZ_FILTER_INCLUDE);
+        }
+
+      bool ok = (n==2) && size3_ok && size4_ok;
+      AddResult("T111", ok, StringFormat("combo_count=%d (expected 2) size3_ok=%s size4_ok=%s labels=[%s | %s]",
+                n, size3_ok?"true":"false", size4_ok?"true":"false",
+                n>0?reqs[0].label:"", n>1?reqs[1].label:""));
+     }
+
+   //--- T112: fewer than 3 eligible (non-reserved, single-filter) R11-A
+   //--- candidates -> R11-C builds NOTHING (a "multi" combo needs at
+   //--- least 3 filters; never pads with an arbitrary extra). -----------
+   void T112_R11CInsufficientCandidatesReturnsEmpty()
+     {
+      GZ_FilterComboResult r11a[2];
+      r11a[0].Clear(); r11a[0].stage=GZ_COMBO_R11A_SINGLE; r11a[0].filter_count=1; r11a[0].filter_ids[0]=GZ_FILTER_BREAK_QUALITY; r11a[0].diagnostics.expectancy_delta=1.0;
+      r11a[1].Clear(); r11a[1].stage=GZ_COMBO_R11A_SINGLE; r11a[1].filter_count=1; r11a[1].filter_ids[0]=GZ_FILTER_VOLUME;        r11a[1].diagnostics.expectancy_delta=0.5;
+
+      GZ_FilterSetConfig base = FilterComboFixtureBaseCfg();
+      CGZFilterComboEngine combo(m_logger);
+      GZ_FilterComboRequest reqs[];
+      int n = combo.BuildR11CMultiFilterRequests(r11a, 2, base, reqs, 4);
+
+      bool ok = (n==0) && (ArraySize(reqs)==0);
+      AddResult("T112", ok, StringFormat("combo_count=%d (expected 0 - only 2 eligible candidates)", n));
+     }
+
+   //--- T113: RunBatch enforces the Roadmap's own "stage research, don't
+   //--- run one huge Grid at once" cap (mirrors CGZExperimentRunner's own
+   //--- T92) - a request count above SetMaxBatchSize() is REJECTED
+   //--- outright, results resized to 0, nothing executed. -----------------
+   void T113_BatchCapRejection()
+     {
+      MqlRates bars[]; GZ_Setup setups[]; CGZJournalEngine journal(m_logger);
+      BuildFilterComboFixture(bars, setups, journal);
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_MetricsSummary baseline; baseline.Clear();
+
+      GZ_FilterSetConfig base = FilterComboFixtureBaseCfg();
+      CGZFilterComboEngine combo(m_logger);
+      combo.SetMaxBatchSize(2);
+
+      GZ_FilterComboRequest reqs[];
+      combo.BuildR11ASingleRequests(base, reqs, false); // 5 requests > cap of 2
+
+      long seq_before = combo.NextSequence();
+      GZ_FilterComboResult results[];
+      ENUM_GZ_FILTER_COMBO_BATCH_STATUS status = combo.RunBatch(reqs, ArraySize(reqs), setups, ArraySize(setups), bars,
+                                                                 journal, te, se, profile, baseline, results);
+
+      bool ok = (status==GZ_COMBO_BATCH_REJECTED_TOO_LARGE) && (ArraySize(results)==0) && (combo.NextSequence()==seq_before);
+      AddResult("T113", ok, StringFormat("status=%s results=%d seq_unchanged=%s",
+                EnumToString(status), ArraySize(results), (combo.NextSequence()==seq_before)?"true":"false"));
+     }
+
+   //--- T114: RunBatch with an empty request list is REJECTED (not
+   //--- silently a no-op success) - mirrors CGZExperimentRunner's own
+   //--- empty-batch handling (T93). ---------------------------------------
+   void T114_BatchEmptyRejection()
+     {
+      MqlRates bars[]; GZ_Setup setups[]; CGZJournalEngine journal(m_logger);
+      BuildFilterComboFixture(bars, setups, journal);
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_MetricsSummary baseline; baseline.Clear();
+
+      CGZFilterComboEngine combo(m_logger);
+      GZ_FilterComboRequest reqs[];
+      GZ_FilterComboResult results[];
+      ENUM_GZ_FILTER_COMBO_BATCH_STATUS status = combo.RunBatch(reqs, 0, setups, ArraySize(setups), bars,
+                                                                 journal, te, se, profile, baseline, results);
+
+      bool ok = (status==GZ_COMBO_BATCH_REJECTED_EMPTY) && (ArraySize(results)==0);
+      AddResult("T114", ok, StringFormat("status=%s results=%d", EnumToString(status), ArraySize(results)));
+     }
+
+   //--- T115: determinism - the SAME batch, run twice against the SAME
+   //--- fixture (fresh CGZFilterComboEngine each time - no cross-run
+   //--- state), produces field-for-field identical results. --------------
+   void T115_FilterComboDeterminism()
+     {
+      MqlRates bars[]; GZ_Setup setups[]; CGZJournalEngine journal(m_logger);
+      BuildFilterComboFixture(bars, setups, journal);
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      CGZMetricsEngine metrics(m_logger);
+      GZ_MetricsSummary baseline;
+      metrics.Compute(journal, te, se, profile, baseline);
+
+      GZ_FilterSetConfig base = FilterComboFixtureBaseCfg();
+
+      CGZFilterComboEngine comboA(m_logger);
+      GZ_FilterComboRequest reqsA[];
+      comboA.BuildR11BTwoFilterRequests(base, reqsA, false);
+      GZ_FilterComboResult resultsA[];
+      comboA.RunBatch(reqsA, ArraySize(reqsA), setups, ArraySize(setups), bars, journal, te, se, profile, baseline, resultsA);
+
+      CGZFilterComboEngine comboB(m_logger);
+      GZ_FilterComboRequest reqsB[];
+      comboB.BuildR11BTwoFilterRequests(base, reqsB, false);
+      GZ_FilterComboResult resultsB[];
+      comboB.RunBatch(reqsB, ArraySize(reqsB), setups, ArraySize(setups), bars, journal, te, se, profile, baseline, resultsB);
+
+      bool ok = (ArraySize(resultsA)==ArraySize(resultsB)) && (ArraySize(resultsA)>0);
+      for(int i=0;i<ArraySize(resultsA) && ok;i++)
+        {
+         ok = (resultsA[i].label==resultsB[i].label) &&
+              (resultsA[i].diagnostics.setups_after==resultsB[i].diagnostics.setups_after) &&
+              (resultsA[i].diagnostics.trades_after==resultsB[i].diagnostics.trades_after) &&
+              (MathAbs(resultsA[i].metrics_with.trade.net_r-resultsB[i].metrics_with.trade.net_r)<0.00001) &&
+              (MathAbs(resultsA[i].diagnostics.expectancy_delta-resultsB[i].diagnostics.expectancy_delta)<0.00001);
+        }
+      AddResult("T115", ok, StringFormat("results_count=%d identical=%s", ArraySize(resultsA), ok?"true":"false"));
+     }
+
+   //--- T116: reconstructability (Roadmap: "تمام Configurationها باید      |
+   //--- بازسازی باشند") - re-evaluating a combo's OWN STORED config       |
+   //--- (result.config) via a fresh CGZFilterEngine reproduces the exact  |
+   //--- same per-setup overall_pass decisions CGZFilterComboEngine used   |
+   //--- internally to compute setups_after - the config alone is enough   |
+   //--- to rebuild the result, nothing else needs to be remembered. ------ 
+   void T116_ComboConfigReconstructable()
+     {
+      MqlRates bars[]; GZ_Setup setups[]; CGZJournalEngine journal(m_logger);
+      BuildFilterComboFixture(bars, setups, journal);
+      CGZTimeEngine te(m_logger); GZ_TimeConfig tc; tc.Default(); te.Configure(tc);
+      CGZSessionEngine se;
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_MetricsSummary baseline; baseline.Clear();
+
+      GZ_FilterSetConfig cfg = FilterComboFixtureBaseCfg();
+      cfg.mode[GZ_FILTER_BREAK_QUALITY] = GZ_FILTER_INCLUDE;
+
+      GZ_FilterComboRequest reqs[1];
+      reqs[0].Clear(); reqs[0].stage=GZ_COMBO_R11A_SINGLE; reqs[0].label="BREAK_QUALITY"; reqs[0].config=cfg;
+
+      CGZFilterComboEngine combo(m_logger);
+      GZ_FilterComboResult results[];
+      combo.RunBatch(reqs, 1, setups, ArraySize(setups), bars, journal, te, se, profile, baseline, results);
+
+      // Reconstruct independently, using ONLY results[0].config (never the
+      // original cfg variable), against a FRESH CGZFilterEngine.
+      CGZFilterEngine fe(m_logger);
+      int reconstructed_pass_count = 0;
+      for(int i=0;i<ArraySize(setups);i++)
+        {
+         GZ_SetupFilterOutcome outcome;
+         fe.Evaluate(setups[i], bars, results[0].config, te, se, outcome);
+         if(outcome.overall_pass) reconstructed_pass_count++;
+        }
+
+      bool ok = (reconstructed_pass_count==results[0].diagnostics.setups_after) && (reconstructed_pass_count==2);
+      AddResult("T116", ok, StringFormat("reconstructed_pass_count=%d original_setups_after=%d",
+                reconstructed_pass_count, results[0].diagnostics.setups_after));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -3643,6 +4031,16 @@ public:
       T104_ReservedFiltersAlwaysNotAvailable();
       T105_FilterEngineDeterminism();
       T106_MetricsComputeFilteredDiff();
+      T107_R11ASingleRequestBuilder();
+      T108_R11BTwoFilterRequestBuilder();
+      T109_SingleFilterComboKnownNumbers();
+      T110_ReservedFilterComboRejectsAll();
+      T111_R11CRankingAndSizes();
+      T112_R11CInsufficientCandidatesReturnsEmpty();
+      T113_BatchCapRejection();
+      T114_BatchEmptyRejection();
+      T115_FilterComboDeterminism();
+      T116_ComboConfigReconstructable();
      }
 
    int               PassCount() const

@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                    GoldenZoneSTR_Research.mq5    |
 //|                                                                    |
-//| GoldenZone STR - Phase 1+2+3+4+5+6+7+8+9+10 Research EA           |
+//| GoldenZone STR - Phase 1+2+3+4+5+6+7+8+9+10+11 Research EA        |
 //| Phase 1: Data Layer + Data Validator + Time Engine                |
 //| Phase 2: M5 Structure Engine (swing/pivot detection)               |
 //| Phase 3: Leg Engine + Break Engine                                 |
@@ -13,6 +13,9 @@
 //| Phase 9: Experiment Configuration + Runner                         |
 //| Phase 10: Filter Engine (Break/Leg Quality, Volume, Volatility,    |
 //|           Session real; VWAP/M15 Context/News reserved stubs)      |
+//| Phase 11: Filter Combination Research (R11-A single / R11-B two /  |
+//|           R11-C limited multi-filter sweeps over Phase 10's own    |
+//|           CGZFilterEngine)                                          |
 //|                                                                    |
 //| SCOPE: This EA implements ONLY Phase 1 (Data/Validator/Time/      |
 //| Session/Diagnostics/TestHarness), Phase 2 (M5 swing/pivot         |
@@ -20,26 +23,31 @@
 //| (Fibonacci Engine + Setup State Machine), Phase 5 (Entry Engine + |
 //| Historical Trade Simulator), Phase 6 (Exit Engine: SL/TP/BE),     |
 //| Phase 7 (MAE/MFE + R-Path + Event Ledger), Phase 8 (Metrics +      |
-//| Reporting), Phase 9 (Experiment Configuration + Runner) and        |
-//| Phase 10 (Filter Engine). It places NO live orders. On init it    |
-//| loads historical M1+M5 data, runs validation, runs swing           |
-//| detection, replays the M1/M5 data through the Leg/Break/Setup/    |
-//| Entry/Exit/Journal/Ledger engines directly via CGZTradeSimulator   |
-//| (full requested range), computes the Phase 8 Metrics summary via   |
-//| CGZMetricsEngine, evaluates Phase 10's CGZFilterEngine against     |
-//| every setup and diffs a WITH/WITHOUT-filter population into        |
-//| GZ_FilterDiagnostics, then demonstrates Phase 9's                  |
+//| Reporting), Phase 9 (Experiment Configuration + Runner), Phase 10  |
+//| (Filter Engine) and Phase 11 (Filter Combination Research). It     |
+//| places NO live orders. On init it loads historical M1+M5 data,     |
+//| runs validation, runs swing detection, replays the M1/M5 data      |
+//| through the Leg/Break/Setup/Entry/Exit/Journal/Ledger engines      |
+//| directly via CGZTradeSimulator (full requested range), computes    |
+//| the Phase 8 Metrics summary via CGZMetricsEngine, evaluates Phase  |
+//| 10's CGZFilterEngine against every setup and diffs a WITH/WITHOUT- |
+//| filter population into GZ_FilterDiagnostics, then runs Phase 11's  |
+//| CGZFilterComboEngine (R11-A single-filter sweep, R11-B two-filter   |
+//| sweep, R11-C limited multi-filter sweep ranked off R11-A's own      |
+//| results) over that SAME already-final setup/trade population (no   |
+//| pipeline re-simulation - filters are post-hoc masks, see            |
+//| GZ_FilterComboTypes.mqh), then demonstrates Phase 9's               |
 //| CGZExperimentRunner as one SINGLE-mode GZ_ExperimentResult over a  |
 //| recent window of the SAME already-loaded/validated data (see       |
 //| BuildAndEmitReport()'s Phase 9 section for why a window, not the   |
-//| full range, is used there), runs the deterministic T01-T106 test   |
+//| full range, is used there), runs the deterministic T01-T116 test   |
 //| harness, and prints a completion report. Then it stops - it does   |
-//| not trade and does not proceed to Phase 11 (Filter Combination     |
+//| not trade and does not proceed to Phase 12 (Robustness/Sensitivity |
 //| Research) logic.                                                    |
 //+------------------------------------------------------------------+
 #property copyright "GoldenZone STR"
-#property version   "1.100"
-#property description "Phase 1+2+3+4+5+6+7+8+9+10: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting + Experiment Configuration/Runner + Filter Engine (research/diagnostic only, no trading)"
+#property version   "1.110"
+#property description "Phase 1+2+3+4+5+6+7+8+9+10+11: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting + Experiment Configuration/Runner + Filter Engine + Filter Combination Research (research/diagnostic only, no trading)"
 
 #include <GoldenZoneSTR\Core\GZ_Types.mqh>
 #include <GoldenZoneSTR\Core\GZ_Config.mqh>
@@ -73,6 +81,8 @@
 #include <GoldenZoneSTR\Experiment\GZ_ExperimentRunner.mqh>
 #include <GoldenZoneSTR\Filter\GZ_FilterTypes.mqh>
 #include <GoldenZoneSTR\Filter\GZ_FilterEngine.mqh>
+#include <GoldenZoneSTR\Filter\GZ_FilterComboTypes.mqh>
+#include <GoldenZoneSTR\Filter\GZ_FilterComboEngine.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
@@ -162,6 +172,24 @@ input int                  InpFilterVolatilityLookback     = 50;    // bars in t
 input double               InpFilterVolatilityMinMult      = 0.50;  // current ATR / baseline ATR must be in [min,max]
 input double               InpFilterVolatilityMaxMult      = 2.00;
 
+//--- Phase 11: Filter Combination Research --------------------------------------
+//--- Runs R11-A (single filter) / R11-B (two-filter) / R11-C (limited multi-
+//--- filter, ranked off R11-A) sweeps of Phase 10's own CGZFilterEngine over the
+//--- SAME already-final setup/trade population the direct pipeline above already
+//--- produced - no pipeline re-simulation (see GZ_FilterComboTypes.mqh design
+//--- note 2). Thresholds/session window reuse the SAME InpFilter* values already
+//--- configured above (Phase 10 section) as every combo's shared baseline -
+//--- Phase 11 only varies WHICH filters are turned on, never their thresholds
+//--- (a threshold sweep is a different, not-yet-specified research question).
+input bool                 InpRunPhase11                 = true;   // set false to skip Phase 11 entirely (Phase 1-10 unaffected either way)
+input bool                 InpFilterComboIncludeReserved = false;  // if true, ALSO builds/runs combos naming VWAP/M15 Context/News -
+                                                                    // documented to deterministically reject every setup in this build
+                                                                    // (design note 4, GZ_FilterComboTypes.mqh); OFF by default
+input int                  InpFilterComboR11CTopN        = 4;      // R11-C: builds one combo per size from 3 up to this many top-ranked
+                                                                    // R11-A filters (clamped to however many are actually eligible)
+input int                  InpFilterComboMaxBatchSize    = GZ_DEFAULT_MAX_FILTER_COMBO_BATCH_SIZE; // Roadmap "stage research,
+                                                                    // don't run one huge Grid at once" cap, reapplied to Phase 11
+
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
 CGZDataProvider   g_provider(GetPointer(g_logger));
@@ -181,6 +209,7 @@ CGZTradeSimulator g_trade_simulator(GetPointer(g_logger));
 CGZMetricsEngine  g_metrics_engine(GetPointer(g_logger));
 CGZExperimentRunner g_experiment_runner(GetPointer(g_logger));
 CGZFilterEngine   g_filter_engine(GetPointer(g_logger));
+CGZFilterComboEngine g_filter_combo_engine(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;
@@ -218,6 +247,41 @@ int                  g_filter_setups_after = 0;   // setups whose combined filte
 int                  g_filter_rejections   = 0;   // closed trades whose setup's combined decision rejected them
 GZ_MetricsSummary    g_filter_metrics_after;       // WITH-filter population (see BuildAndEmitReport() Phase 10)
 
+//--- Phase 11 diagnostic results (filter combination sweeps over the same setups)
+bool                 g_phase11_ran = false;
+GZ_FilterComboResult g_r11a_results[];  // R11-A: single filter
+GZ_FilterComboResult g_r11b_results[];  // R11-B: two-filter
+GZ_FilterComboResult g_r11c_results[];  // R11-C: limited multi-filter (ranked off R11-A)
+int                  g_r11a_best_idx = -1; // index into g_r11a_results with the highest expectancy_delta (trades_after>0)
+int                  g_r11b_best_idx = -1;
+int                  g_r11c_best_idx = -1;
+
+//+------------------------------------------------------------------+
+//| Phase 11 helper: index of the combo with the highest                |
+//| expectancy_delta among those that still produced at least one       |
+//| closed trade (a combo that zeroed the population - e.g. a reserved  |
+//| filter - carries no comparable expectancy and is excluded). Report/ |
+//| log summary only - NEVER used to auto-select a "winning" config;    |
+//| picking the single best historical number is explicitly what        |
+//| Roadmap Phase 12 (Robustness/Sensitivity) warns against.             |
+//+------------------------------------------------------------------+
+int BestFilterComboIndex(const GZ_FilterComboResult &results[])
+  {
+   int best = -1;
+   double best_score = 0.0;
+   for(int i=0;i<ArraySize(results);i++)
+     {
+      if(results[i].diagnostics.trades_after<=0)
+         continue;
+      if(best==-1 || results[i].diagnostics.expectancy_delta>best_score)
+        {
+         best = i;
+         best_score = results[i].diagnostics.expectancy_delta;
+        }
+     }
+   return best;
+  }
+
 //+------------------------------------------------------------------+
 //| Build and print/save the Phase 1 completion report                |
 //+------------------------------------------------------------------+
@@ -225,8 +289,8 @@ void BuildAndEmitReport()
   {
    string report = "";
    report += "===================================================\n";
-   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 + PHASE 6 + PHASE 7 + PHASE 8 + PHASE 9 COMPLETION REPORT\n";
-   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + " | " + GZ_PROJECT_VERSION_P6 + " | " + GZ_PROJECT_VERSION_P7 + " | " + GZ_PROJECT_VERSION_P8 + " | " + GZ_PROJECT_VERSION_P9 + "\n";
+   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 + PHASE 6 + PHASE 7 + PHASE 8 + PHASE 9 + PHASE 10 + PHASE 11 COMPLETION REPORT\n";
+   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + " | " + GZ_PROJECT_VERSION_P6 + " | " + GZ_PROJECT_VERSION_P7 + " | " + GZ_PROJECT_VERSION_P8 + " | " + GZ_PROJECT_VERSION_P9 + " | " + GZ_PROJECT_VERSION_P10 + " | " + GZ_PROJECT_VERSION_P11 + "\n";
    report += " Generated (terminal local time, diagnostic only): " + TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS) + "\n";
    report += "===================================================\n\n";
 
@@ -241,17 +305,22 @@ void BuildAndEmitReport()
    report += "Phase 7 files: GZ_JournalTypes, GZ_JournalEngine, GZ_LedgerTypes, GZ_EventLedger\n";
    report += "Phase 8 files: GZ_MetricsTypes, GZ_MetricsEngine\n";
    report += "Phase 9 files: GZ_ExperimentTypes, GZ_ExperimentRunner\n";
+   report += "Phase 10 files: GZ_FilterTypes, GZ_FilterEngine\n";
+   report += "Phase 11 files: GZ_FilterComboTypes, GZ_FilterComboEngine\n";
    report += "Interfaces: GZ_TimeContext, CGZDatasetInfo (Phase 1), GZ_Swing / CGZSwingEngine (Phase 2),\n";
    report += "            GZ_Leg / CGZLegEngine / CGZBreakEngine (Phase 3), GZ_Setup / CGZFibEngine /\n";
    report += "            CGZSetupStateMachine (Phase 4), GZ_Trade / CGZEntryEngine / CGZTradeSimulator\n";
    report += "            (Phase 5), GZ_TradeExit / CGZExitEngine (Phase 6), GZ_TradeJournal /\n";
    report += "            CGZJournalEngine / GZ_LedgerEvent / CGZEventLedger (Phase 7), GZ_MetricsSummary /\n";
    report += "            CGZMetricsEngine (Phase 8), GZ_ExperimentConfig / GZ_ExperimentResult /\n";
-   report += "            CGZExperimentRunner (Phase 9) - all consumed by later phases; Update()/UpdateBar()/\n";
+   report += "            CGZExperimentRunner (Phase 9), GZ_FilterSetConfig / GZ_SetupFilterOutcome /\n";
+   report += "            CGZFilterEngine (Phase 10), GZ_FilterComboRequest / GZ_FilterComboResult /\n";
+   report += "            CGZFilterComboEngine (Phase 11) - all consumed by later phases; Update()/UpdateBar()/\n";
    report += "            OnBar()/CheckBreak()/OnLegCreated()/OnLegBroken()/MarkEntered()/\n";
    report += "            CancelForInvalidPenetration()/OnTradeEntered() are live-safe, DetectAll()/\n";
    report += "            CGZTradeSimulator.Run()/BuildFromFinalState()/CGZMetricsEngine.Compute()/\n";
-   report += "            CGZExperimentRunner.RunSingle()/RunBatch() are research-batch\n\n";
+   report += "            CGZExperimentRunner.RunSingle()/RunBatch()/CGZFilterEngine.Evaluate()/\n";
+   report += "            CGZFilterComboEngine.RunBatch() are research-batch\n\n";
 
    report += "--- Data Validation: M1 ---\n";
    report += StringFormat("Symbol=%s Bars=%d First=%s Last=%s\n",
@@ -462,7 +531,66 @@ void BuildAndEmitReport()
    report += "carries one FILTER_RESULT row per evaluated setup and one REJECTION row per closed trade whose\n";
    report += "setup's combined decision rejected it (see Phase 7 section above for the updated counts).\n\n";
 
-   report += "--- Automated Test Results (T01-T106: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10) ---\n";
+   report += "--- Phase 11: Filter Combination Research ---\n";
+   if(g_phase11_ran)
+     {
+      report += StringFormat("R11-A (single filter): %d combos run  |  R11-B (two-filter): %d combos run  |  R11-C (limited multi-filter): %d combos run\n",
+                 ArraySize(g_r11a_results), ArraySize(g_r11b_results), ArraySize(g_r11c_results));
+      report += "R11-A results (setups_after/trades_after vs unfiltered, deltas = filtered-unfiltered):\n";
+      for(int ra=0; ra<ArraySize(g_r11a_results); ra++)
+        {
+         GZ_FilterComboResult r = g_r11a_results[ra];
+         report += StringFormat("  %s %s setups=%d/%d trades=%d/%d net_r=%.3f exp_delta=%.4f pf_delta=%.4f dd_delta=%.4f%s\n",
+                    r.id, r.label, r.diagnostics.setups_after, r.diagnostics.setups_before,
+                    r.diagnostics.trades_after, r.diagnostics.trades_before, r.metrics_with.trade.net_r,
+                    r.diagnostics.expectancy_delta, r.diagnostics.profit_factor_delta, r.diagnostics.max_drawdown_delta,
+                    r.reserved_filter_used ? "  [RESERVED-ALWAYS-REJECTS]" : "");
+        }
+      report += "R11-B results:\n";
+      for(int rb=0; rb<ArraySize(g_r11b_results); rb++)
+        {
+         GZ_FilterComboResult r = g_r11b_results[rb];
+         report += StringFormat("  %s %s setups=%d/%d trades=%d/%d net_r=%.3f exp_delta=%.4f pf_delta=%.4f dd_delta=%.4f%s\n",
+                    r.id, r.label, r.diagnostics.setups_after, r.diagnostics.setups_before,
+                    r.diagnostics.trades_after, r.diagnostics.trades_before, r.metrics_with.trade.net_r,
+                    r.diagnostics.expectancy_delta, r.diagnostics.profit_factor_delta, r.diagnostics.max_drawdown_delta,
+                    r.reserved_filter_used ? "  [RESERVED-ALWAYS-REJECTS]" : "");
+        }
+      if(ArraySize(g_r11c_results)>0)
+        {
+         report += "R11-C results (limited multi-filter, filters chosen only from R11-A's own ranking):\n";
+         for(int rc=0; rc<ArraySize(g_r11c_results); rc++)
+           {
+            GZ_FilterComboResult r = g_r11c_results[rc];
+            report += StringFormat("  %s %s setups=%d/%d trades=%d/%d net_r=%.3f exp_delta=%.4f pf_delta=%.4f dd_delta=%.4f\n",
+                       r.id, r.label, r.diagnostics.setups_after, r.diagnostics.setups_before,
+                       r.diagnostics.trades_after, r.diagnostics.trades_before, r.metrics_with.trade.net_r,
+                       r.diagnostics.expectancy_delta, r.diagnostics.profit_factor_delta, r.diagnostics.max_drawdown_delta);
+           }
+        }
+      else
+         report += "R11-C: no combo built (fewer than 3 eligible non-reserved R11-A candidates - a \"multi\" combo needs at least 3).\n";
+      report += StringFormat("Best (highest expectancy_delta, trades_after>0): R11-A=%s  R11-B=%s  R11-C=%s\n",
+                 (g_r11a_best_idx>=0)?g_r11a_results[g_r11a_best_idx].label:"n/a",
+                 (g_r11b_best_idx>=0)?g_r11b_results[g_r11b_best_idx].label:"n/a",
+                 (g_r11c_best_idx>=0)?g_r11c_results[g_r11c_best_idx].label:"n/a");
+      report += "\"Best\" above is a report convenience ONLY - it is never auto-selected as a chosen strategy;\n";
+      report += "picking a single best historical number without checking its neighborhood is exactly what\n";
+      report += "Roadmap Phase 12 (Robustness/Sensitivity) exists to catch. Filters are POST-HOC masks over\n";
+      report += "the SAME Phase 2-9 setup/trade population every combo in this sweep shares - no pipeline\n";
+      report += "re-simulation per combo (design note 2, GZ_FilterComboTypes.mqh); every combo's config is\n";
+      report += "fully reconstructable from its own stored GZ_FilterSetConfig (design note 3, see T116).\n";
+     }
+   else
+      report += "Skipped (InpRunPhase11=false).\n";
+   report += StringFormat("InpFilterComboIncludeReserved=%s (VWAP/M15 Context/News combos %s; see T110 - a reserved\n",
+              InpFilterComboIncludeReserved?"true":"false", InpFilterComboIncludeReserved?"WERE attempted and deterministically rejected every setup":"were NOT attempted");
+   report += "filter is always NOT_AVAILABLE and never silently auto-passes). InpFilterComboR11CTopN=";
+   report += StringFormat("%d (R11-C builds one combo per size from 3 up to this many top-ranked R11-A filters,\n", InpFilterComboR11CTopN);
+   report += StringFormat("clamped to however many are eligible). InpFilterComboMaxBatchSize=%d enforces the\n", InpFilterComboMaxBatchSize);
+   report += "Roadmap's own \"stage research, don't run one huge Grid at once\" rule (see T113).\n\n";
+
+   report += "--- Automated Test Results (T01-T116: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -473,16 +601,20 @@ void BuildAndEmitReport()
    report += StringFormat("\nTOTAL: %d PASS / %d FAIL (of %d)\n\n", pass, fail, g_harness.ResultCount());
 
    report += "--- Known Limitations / Deferred Work ---\n";
-   report += "DEFERRED: Filter Combination Research (Phase 11 - systematic single/two/multi-filter sweeps\n";
-   report += "using Phase 10's CGZFilterEngine, e.g. via CGZExperimentRunner GRID/SWEEP), Robustness/\n";
-   report += "Sensitivity (Phase 12), Walk-Forward (Phase 13), Monte Carlo (Phase 14), Final OOS (Phase 15),\n";
-   report += "Research Freeze (Phase 16), Future Execution Adapter (Phase 17) - not implemented, by design.\n";
-   report += "Phase 10 itself is standalone (evaluated once against the full pipeline's setups, in\n";
-   report += "OnInit() - not yet wired into CGZExperimentRunner's own SINGLE/SWEEP/GRID/BATCH config, which\n";
-   report += "is explicitly Phase 11 scope, since a per-experiment filter sweep is what 'Filter Combination\n";
-   report += "Research' means). VWAP/M15 Context/News filters are reserved NOT_AVAILABLE stubs (see Phase\n";
-   report += "10 section above) - no VWAP engine, M15 structure engine, or news/economic-calendar data\n";
-   report += "source exists anywhere in Phases 1-10; each was explicitly out of scope through this point.\n";
+   report += "DEFERRED: Robustness/Sensitivity (Phase 12), Walk-Forward (Phase 13), Monte Carlo (Phase 14),\n";
+   report += "Final OOS (Phase 15), Research Freeze (Phase 16), Future Execution Adapter (Phase 17) - not\n";
+   report += "implemented, by design. Phase 11 (Filter Combination Research) IS now implemented (see the\n";
+   report += "Phase 11 section above) - R11-A/B/C sweep Phase 10's own CGZFilterEngine directly as post-hoc\n";
+   report += "masks over the already-final Phase 2-9 setup/trade population, rather than through\n";
+   report += "CGZExperimentRunner's SINGLE/SWEEP/GRID/BATCH (that runner varies STRATEGY config - pivot\n";
+   report += "strength, break/entry/exit parameters, etc. - and re-simulates the full pipeline per config;\n";
+   report += "a filter never changes what the strategy engines themselves produce, only which already-\n";
+   report += "produced setups/trades are counted, so re-simulating per combo would be wasted, incorrect-by-\n";
+   report += "design work - see GZ_FilterComboTypes.mqh design note 2). Any pair naming VWAP/M15 Context is\n";
+   report += "still built by the R11-B request list (architecture stays extensible) but is NOT run unless\n";
+   report += "InpFilterComboIncludeReserved=true - VWAP/M15 Context/News remain reserved NOT_AVAILABLE stubs\n";
+   report += "(see Phase 10 section above) - no VWAP engine, M15 structure engine, or news/economic-calendar\n";
+   report += "data source exists anywhere in Phases 1-11; each was explicitly out of scope through this point.\n";
    report += "Weekend-gap classification uses a Saturday-presence heuristic; broker-specific holiday\n";
    report += "calendars are not modeled and would need broker session data if required later.\n";
    report += "SESSION_END (Phase 4, pre-entry setup cancellation) only fires when\n";
@@ -507,28 +639,28 @@ void BuildAndEmitReport()
    string final_status;
    bool data_ok = (g_info_m1.total_bars>0 && g_info_m5.total_bars>0);
    if(fail>0)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10 BLOCKED (automated test failure - see detail above)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11 BLOCKED (automated test failure - see detail above)";
    else if(!data_ok)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10 BLOCKED (historical data unavailable for requested symbol/range)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11 BLOCKED (historical data unavailable for requested symbol/range)";
    else if(!InpBrokerOffsetKnown)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10 BLOCKED (broker UTC offset not yet verified by user)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11 BLOCKED (broker UTC offset not yet verified by user)";
    else
       // This report is only ever printed by the EA's own OnInit() running
       // inside MT5, so reaching this branch already proves compile+attach
       // succeeded - there is nothing further to "wait" on.
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10 COMPLETE";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11 COMPLETE";
 
    report += "--- Final Status ---\n" + final_status + "\n";
    report += "===================================================\n";
 
    Print(report);
 
-   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_8_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_8_9_10_11_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle!=INVALID_HANDLE)
      {
       FileWriteString(handle, report);
       FileClose(handle);
-      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_8_9_Report.txt");
+      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_8_9_10_11_Report.txt");
      }
    else
      {
@@ -544,7 +676,7 @@ int OnInit()
    // Runtime marker: proves the EA currently attached/running is compiled
    // from THIS source file. Printed first, before anything else, and via
    // raw Print() (not CGZLogger) so nothing upstream can suppress it.
-   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260923_V10_PHASE9");
+   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260923_V11_PHASE11");
 
    // Runtime Inputs marker: prints the ACTUAL live values of the inputs
    // this specific EA instance is running with (per-attachment values from
@@ -559,7 +691,7 @@ int OnInit()
       InpBrokerOffsetKnown ? "true" : "false"));
 
    g_logger.EnableVerbose(InpVerboseLogging);
-   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10 starting up (research/diagnostic mode - no trading).");
+   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11 starting up (research/diagnostic mode - no trading).");
 
    //--- Time engine configuration -----------------------------------------
    GZ_TimeConfig time_cfg;
@@ -932,6 +1064,63 @@ int OnInit()
          GZFilterModeToString(InpFilterVwapMode), GZFilterModeToString(InpFilterM15ContextMode),
          GZFilterModeToString(InpFilterSessionMode), GZFilterModeToString(InpFilterNewsMode)));
 
+      //--- Phase 11: Filter Combination Research - R11-A/B/C sweeps of
+      //--- Phase 10's own CGZFilterEngine over the SAME g_setup_count
+      //--- setups / g_journal_engine trades already produced above - NO
+      //--- pipeline re-simulation (filters are post-hoc masks, see
+      //--- GZ_FilterComboTypes.mqh design note 2). filter_cfg (built just
+      //--- above for the single Phase 10 diagnostic run) is reused as
+      //--- every combo's shared baseline threshold/session config - Phase
+      //--- 11 only varies WHICH filters are turned on, never their
+      //--- thresholds. g_metrics (Phase 8's unfiltered summary, already
+      //--- computed above) is the one unfiltered baseline every combo in
+      //--- this sweep is diffed against (design note 2).
+      if(InpRunPhase11)
+        {
+         g_filter_combo_engine.SetMaxBatchSize(InpFilterComboMaxBatchSize);
+
+         GZ_Setup all_setups[];
+         ArrayResize(all_setups, g_setup_count);
+         for(int gi=0; gi<g_setup_count; gi++)
+            all_setups[gi] = g_setup_sm.GetSetup(gi);
+
+         GZ_FilterComboRequest r11a_reqs[];
+         g_filter_combo_engine.BuildR11ASingleRequests(filter_cfg, r11a_reqs, InpFilterComboIncludeReserved);
+         g_filter_combo_engine.RunBatch(r11a_reqs, ArraySize(r11a_reqs), all_setups, g_setup_count, m5,
+                                         g_journal_engine, g_time_engine, g_session_engine, session_profile,
+                                         g_metrics, g_r11a_results);
+
+         GZ_FilterComboRequest r11b_reqs[];
+         g_filter_combo_engine.BuildR11BTwoFilterRequests(filter_cfg, r11b_reqs, InpFilterComboIncludeReserved);
+         g_filter_combo_engine.RunBatch(r11b_reqs, ArraySize(r11b_reqs), all_setups, g_setup_count, m5,
+                                         g_journal_engine, g_time_engine, g_session_engine, session_profile,
+                                         g_metrics, g_r11b_results);
+
+         GZ_FilterComboRequest r11c_reqs[];
+         g_filter_combo_engine.BuildR11CMultiFilterRequests(g_r11a_results, ArraySize(g_r11a_results), filter_cfg,
+                                                              r11c_reqs, InpFilterComboR11CTopN);
+         if(ArraySize(r11c_reqs)>0)
+            g_filter_combo_engine.RunBatch(r11c_reqs, ArraySize(r11c_reqs), all_setups, g_setup_count, m5,
+                                            g_journal_engine, g_time_engine, g_session_engine, session_profile,
+                                            g_metrics, g_r11c_results);
+         else
+            ArrayResize(g_r11c_results, 0);
+
+         g_phase11_ran  = true;
+         g_r11a_best_idx = BestFilterComboIndex(g_r11a_results);
+         g_r11b_best_idx = BestFilterComboIndex(g_r11b_results);
+         g_r11c_best_idx = BestFilterComboIndex(g_r11c_results);
+
+         g_logger.Info("FilterCombo", StringFormat(
+            "Phase 11: R11-A=%d combos  R11-B=%d combos  R11-C=%d combos | best expectancy_delta: A=%s B=%s C=%s",
+            ArraySize(g_r11a_results), ArraySize(g_r11b_results), ArraySize(g_r11c_results),
+            (g_r11a_best_idx>=0)?StringFormat("%s(%.4f)", g_r11a_results[g_r11a_best_idx].label, g_r11a_results[g_r11a_best_idx].diagnostics.expectancy_delta):"n/a",
+            (g_r11b_best_idx>=0)?StringFormat("%s(%.4f)", g_r11b_results[g_r11b_best_idx].label, g_r11b_results[g_r11b_best_idx].diagnostics.expectancy_delta):"n/a",
+            (g_r11c_best_idx>=0)?StringFormat("%s(%.4f)", g_r11c_results[g_r11c_best_idx].label, g_r11c_results[g_r11c_best_idx].diagnostics.expectancy_delta):"n/a"));
+        }
+      else
+         g_logger.Info("FilterCombo", "Phase 11: skipped (InpRunPhase11=false).");
+
       //--- Phase 9: Experiment Configuration + Runner - demonstrate
       //--- CGZExperimentRunner as one SINGLE-mode experiment, reusing the
       //--- EXACT config the direct Phase 2-8 pipeline above just used
@@ -1008,7 +1197,7 @@ int OnInit()
    //--- Report ------------------------------------------------------------------
    BuildAndEmitReport();
 
-   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10 diagnostics complete. STOPPING - not proceeding to Phase 11 (Filter Combination Research) logic.");
+   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11 diagnostics complete. STOPPING - not proceeding to Phase 12 (Robustness/Sensitivity Research) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.
@@ -1020,7 +1209,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10 EA removed.");
+   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11 EA removed.");
   }
 
 //+------------------------------------------------------------------+

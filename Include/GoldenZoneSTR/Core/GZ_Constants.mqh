@@ -110,4 +110,15 @@
 // enabled via EA input), atr_period=14 mirrors GZ_DEFAULT_ATR_PERIOD (Phase 3).
 #define GZ_PROJECT_VERSION_P10                  "GZ-P10-ROADMAP v1.0"
 
+// Phase 11 - Filter Combination Research.
+// GZ_DEFAULT_MAX_FILTER_COMBO_BATCH_SIZE mirrors GZ_DEFAULT_MAX_EXPERIMENT_BATCH_SIZE's
+// own "stage research, don't run one huge Grid at once" cap (Phase 9), reapplied to
+// CGZFilterComboEngine::RunBatch() - see GZ_FilterComboEngine.mqh. Kept as its own,
+// smaller constant (not the Phase 9 one reused) because Phase 11's batches are
+// combination counts (single/pair/multi-filter requests), a much smaller space than
+// Phase 9's full strategy-config sweeps; 50 comfortably covers R11-A (5) + R11-B
+// (up to 11) + R11-C (a handful) in one run with room to grow.
+#define GZ_DEFAULT_MAX_FILTER_COMBO_BATCH_SIZE   50
+#define GZ_PROJECT_VERSION_P11                   "GZ-P11-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__

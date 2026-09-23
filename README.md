@@ -1,10 +1,11 @@
-# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9
+# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11
 
 Data Layer + Data Validator + Time Engine (Phase 1), M5 Structure/Swing Engine (Phase 2),
 Leg Engine + Break Engine (Phase 3), Fibonacci Engine + Setup State Machine (Phase 4),
 Entry Engine + Historical Trade Simulator (Phase 5), Exit Engine SL/TP/BE (Phase 6),
 MAE/MFE + R-Path + Event Ledger (Phase 7), Metrics + Reporting (Phase 8), Experiment
-Configuration + Runner (Phase 9). No filter engine logic, no live trading.
+Configuration + Runner (Phase 9), Filter Engine (Phase 10), Filter Combination Research
+(Phase 11). No live trading.
 
 ## Install
 
@@ -17,7 +18,7 @@ Configuration + Runner (Phase 9). No filter engine logic, no live trading.
 5. Attach the compiled EA to an XAUUSD chart (any chart timeframe — the EA loads its own M1/M5
    internally, independent of the chart's timeframe).
 6. Check the **Experts** log tab for the report, and
-   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_8_9_Report.txt` (common Files folder) for the saved copy.
+   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_8_9_10_11_Report.txt` (common Files folder) for the saved copy.
 
 ## What this does
 
@@ -69,12 +70,34 @@ Configuration + Runner (Phase 9). No filter engine logic, no live trading.
   recent window (`InpExperimentWindowM5Bars`) of the same already-loaded/validated data, reusing
   the exact configuration the direct Phase 2-8 pipeline above already used (full-range
   correctness was already proven there and in T01-T86).
-- Runs 96 deterministic, synthetic-data self-tests (T01–T96: T01–T18 Phase 1, T19–T23 Phase 2,
+- **Phase 10:** `CGZFilterEngine` evaluates 8 named filters (Break Quality, Leg Quality, Volume,
+  Volatility, VWAP, M15 Context, Session, News) per setup as PASS/FAIL/NOT_AVAILABLE, each
+  independently OFF/INCLUDE/EXCLUDE (`InpFilter*Mode`). 5 are real/data-backed (Break
+  Quality/Leg Quality/Volume/Volatility measured in ATR or rolling-average multiples at the
+  setup's own break moment, no lookahead; Session reuses the Phase 1 Time/Session Engine); VWAP/
+  M15 Context/News are reserved stubs that always report NOT_AVAILABLE (no producer exists yet)
+  — NOT_AVAILABLE never silently becomes PASS. The EA evaluates every setup once and diffs an
+  unfiltered vs. filtered population (`CGZMetricsEngine::ComputeFiltered()`) into
+  `GZ_FilterDiagnostics` (setups/trades before-after, rejections, win-rate/PF/expectancy/DD/
+  trade-count deltas).
+- **Phase 11:** `CGZFilterComboEngine` sweeps Phase 10's own `CGZFilterEngine` as post-hoc masks
+  over the SAME already-final Phase 2-9 setup/trade population (no pipeline re-simulation) —
+  R11-A (one request per real filter, alone), R11-B (the Roadmap's named two-filter pairs plus a
+  few documented, justified extras — pairs naming VWAP/M15 are built but skipped unless
+  `InpFilterComboIncludeReserved=true`, since a reserved filter deterministically rejects every
+  setup), and R11-C (a limited multi-filter combo — one per size from 3 up to
+  `InpFilterComboR11CTopN`, built ONLY from R11-A's own top-ranked filters by expectancy delta,
+  deterministic tie-break by filter ID). Every combo's full `GZ_FilterSetConfig` is stored on its
+  result, so any combination is reconstructable. `RunBatch()` enforces the same "stage research,
+  don't run one huge Grid at once" cap as Phase 9 (`InpFilterComboMaxBatchSize`). Set
+  `InpRunPhase11=false` to skip it.
+- Runs 116 deterministic, synthetic-data self-tests (T01–T116: T01–T18 Phase 1, T19–T23 Phase 2,
   T24–T34 Phase 3, T35–T45 Phase 4, T46–T54 Phase 5, T55–T64 Phase 6, T65–T74 Phase 7,
-  T75–T86 Phase 8, T87–T96 Phase 9) and reports PASS/FAIL for each.
-- Prints and saves a full Phase 1+2+3+4+5+6+7+8+9 completion report.
-- Does **not** place any live trades, and does **not** implement any Phase 10+ logic
-  (Filter Engine onward). It stops after the report.
+  T75–T86 Phase 8, T87–T96 Phase 9, T97–T106 Phase 10, T107–T116 Phase 11) and reports PASS/FAIL
+  for each.
+- Prints and saves a full Phase 1+2+3+4+5+6+7+8+9+10+11 completion report.
+- Does **not** place any live trades, and does **not** implement any Phase 12+ logic
+  (Robustness/Sensitivity onward). It stops after the report.
 
 ## Before trusting the output
 
@@ -84,4 +107,4 @@ not guaranteed correct for your specific broker.
 
 See `Docs/Phase1_TestReport.md` for the Phase 1 report template and required user verification
 steps (the same verification requirement — compile/attach in MetaEditor/MT5 and confirm the
-broker UTC offset — still applies to this Phase 1+2+3+4+5+6+7+8+9 build).
+broker UTC offset — still applies to this Phase 1+2+3+4+5+6+7+8+9+10+11 build).
