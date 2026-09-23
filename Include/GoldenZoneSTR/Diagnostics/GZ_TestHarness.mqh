@@ -15,6 +15,7 @@
 //| Phase 12 (T117-T127): Robustness + Sensitivity Research            |
 //| Phase 13 (T128-T142): Walk-Forward Research                        |
 //| Phase 14 (T143-T158): Monte Carlo Research                         |
+//| Phase 15 (T159-T166): Final OOS                                    |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -64,6 +65,8 @@
 #include "..\WalkForward\GZ_WalkForwardEngine.mqh"
 #include "..\MonteCarlo\GZ_MonteCarloTypes.mqh"
 #include "..\MonteCarlo\GZ_MonteCarloEngine.mqh"
+#include "..\FinalOOS\GZ_FinalOosTypes.mqh"
+#include "..\FinalOOS\GZ_FinalOosEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -5257,6 +5260,250 @@ public:
       AddResult("T158", ok, StringFormat("first-position counts: %d %d %d %d %d %d (expect ~500 each)", cnt[0],cnt[1],cnt[2],cnt[3],cnt[4],cnt[5]));
      }
 
+
+   //+------------------------------------------------------------------+
+   //| Phase 15 (T159-T166): Final OOS                                    |
+   //| T159-T162 are pure (ranges, boundary trimming, comparison math on  |
+   //| hand-built summaries). T163-T166 run the real engine on the Phase 9|
+   //| fixture replicated over 6 days (days 0-2 = Development, 3-5 = OOS);|
+   //| they assert bookkeeping/equivalence/determinism, not trade counts. |
+   //+------------------------------------------------------------------+
+
+   //--- helper: set the numbers Compare() reads on one summary
+   void OosSetSummary(GZ_MetricsSummary &m, int trades, double win_rate, double expectancy, double pf, double dd, double mae, double mfe)
+     {
+      m.Clear();
+      m.trade.trade_count = trades;
+      m.trade.win_rate    = win_rate;
+      m.trade.expectancy  = expectancy;
+      m.trade.avg_r       = expectancy;
+      m.trade.profit_factor = pf;
+      m.trade.profit_factor_undefined = false;
+      m.risk.max_drawdown_r = dd;
+      m.behavior.avg_mae_r  = mae;
+      m.behavior.avg_mfe_r  = mfe;
+     }
+
+   //--- T159: CheckSeparation(). Development ends 06.13. OOS start 06.13 ->
+   //--- OK (touching is allowed, boundary bars are trimmed later); 06.20 -> OK;
+   //--- 06.12 -> REJECTED_OVERLAP (never silently shifted); end == start or
+   //--- end < start -> REJECTED_BAD_RANGE (checked first). -------------------
+   void T159_OosRangeSeparation()
+     {
+      CGZFinalOosEngine eng(m_logger);
+      datetime dev_end = MakeTime(2026,6,13,0,0);
+      bool ok = (eng.CheckSeparation(dev_end, MakeTime(2026,6,13,0,0), MakeTime(2026,9,23,0,0))==GZ_OOS_OK) &&
+                (eng.CheckSeparation(dev_end, MakeTime(2026,6,20,0,0), MakeTime(2026,9,23,0,0))==GZ_OOS_OK) &&
+                (eng.CheckSeparation(dev_end, MakeTime(2026,6,12,0,0), MakeTime(2026,9,23,0,0))==GZ_OOS_REJECTED_OVERLAP) &&
+                (eng.CheckSeparation(dev_end, MakeTime(2026,7,1,0,0),  MakeTime(2026,7,1,0,0))==GZ_OOS_REJECTED_BAD_RANGE) &&
+                (eng.CheckSeparation(dev_end, MakeTime(2026,7,1,0,0),  MakeTime(2026,6,1,0,0))==GZ_OOS_REJECTED_BAD_RANGE);
+      AddResult("T159", ok, "touching/after = OK, earlier start = REJECTED_OVERLAP, empty/reversed = REJECTED_BAD_RANGE");
+     }
+
+   //--- T160: TrimBoundary(). 10 bars at t0+i*300. after=t0+1200,
+   //--- from=t0 -> only bars strictly after the boundary: i=5..9 (5 bars,
+   //--- first t0+1500). after=t0+1200, from=t0+2100 -> from dominates: i=7..9
+   //--- (3 bars). after before all data -> everything from `from`. -----------
+   void T160_TrimBoundary()
+     {
+      datetime t0 = MakeTime(2026,3,2,9,0);
+      MqlRates bars[]; ArrayResize(bars,10);
+      for(int i=0;i<10;i++) bars[i] = MakeBar(t0 + i*300, 100,101,99,100.5);
+      CGZFinalOosEngine eng(m_logger);
+      MqlRates o[];
+      int a = eng.TrimBoundary(bars, t0+1200, t0, o);
+      bool a_ok = (a==5) && (o[0].time==t0+1500) && (o[4].time==t0+2700);
+      int b = eng.TrimBoundary(bars, t0+1200, t0+2100, o);
+      bool b_ok = (b==3) && (o[0].time==t0+2100);
+      int c = eng.TrimBoundary(bars, t0-1000, t0+600, o);
+      bool c_ok = (c==8) && (o[0].time==t0+600);
+      AddResult("T160", a_ok && b_ok && c_ok, StringFormat("kept %d / %d / %d (expect 5/3/8)", a, b, c));
+     }
+
+   //--- T161: Compare() known numbers. Dev: 100 trades wr 0.50 exp 0.60 pf 2.0
+   //--- dd 6 mae 0.4 mfe 1.2. OOS case A: 40 trades wr 0.45 exp 0.20 pf 1.5 dd 5
+   //--- mae 0.5 mfe 1.0 -> deltas exp -0.40, wr -0.05, pf -0.50, dd -1, mae +0.1,
+   //--- mfe -0.2; retention 0.3333 -> DEGRADED, not low, not negative.
+   //--- Case B: same dev, 40 trades exp 0.45 -> retention 0.75 -> not degraded.
+   //--- Case C: OOS 10 trades -> LOW_OOS_TRADES (min 30). -------------------
+   void T161_CompareKnownNumbers()
+     {
+      CGZFinalOosEngine eng(m_logger);
+      GZ_FinalOosResult r; r.Clear();
+      OosSetSummary(r.dev, 100, 0.50, 0.60, 2.0, 6.0, 0.4, 1.2);
+      OosSetSummary(r.oos, 40, 0.45, 0.20, 1.5, 5.0, 0.5, 1.0);
+      eng.Compare(r, 30);
+      bool a_ok = (MathAbs(r.expectancy_delta+0.40)<0.00001) && (MathAbs(r.win_rate_delta+0.05)<0.00001) &&
+                  r.profit_factor_delta_defined && (MathAbs(r.profit_factor_delta+0.50)<0.00001) &&
+                  (MathAbs(r.max_dd_delta+1.0)<0.00001) && (MathAbs(r.avg_mae_delta-0.1)<0.00001) && (MathAbs(r.avg_mfe_delta+0.2)<0.00001) &&
+                  r.retention_defined && (MathAbs(r.expectancy_retention-(0.20/0.60))<0.00001) &&
+                  r.oos_degraded && !r.low_oos_trades && !r.oos_negative && !r.oos_no_trades;
+
+      GZ_FinalOosResult b; b.Clear();
+      OosSetSummary(b.dev, 100, 0.50, 0.60, 2.0, 6.0, 0.4, 1.2);
+      OosSetSummary(b.oos, 40, 0.50, 0.45, 1.8, 6.0, 0.4, 1.2);
+      eng.Compare(b, 30);
+      bool b_ok = !b.oos_degraded && (MathAbs(b.expectancy_retention-0.75)<0.00001);
+
+      GZ_FinalOosResult c; c.Clear();
+      OosSetSummary(c.dev, 100, 0.50, 0.60, 2.0, 6.0, 0.4, 1.2);
+      OosSetSummary(c.oos, 10, 0.50, 0.60, 2.0, 6.0, 0.4, 1.2);
+      eng.Compare(c, 30);
+      bool c_ok = c.low_oos_trades && !c.oos_no_trades;
+
+      AddResult("T161", a_ok && b_ok && c_ok, StringFormat("A: retention=%.4f degraded=%s | B: retention=%.2f degraded=%s | C: low=%s",
+                r.expectancy_retention, r.oos_degraded?"true":"false", b.expectancy_retention, b.oos_degraded?"true":"false", c.low_oos_trades?"true":"false"));
+     }
+
+   //--- T162: Compare() edge cases never invent numbers. Development
+   //--- expectancy 0.03 (<= noise floor 0.05) -> retention UNDEFINED and never
+   //--- DEGRADED; OOS with 0 trades -> OOS_NO_TRADES (and low); OOS negative
+   //--- (40 trades, exp -0.1) -> OOS_NEGATIVE; profit-factor delta stays
+   //--- undefined when either side's PF is undefined. -------------------------
+   void T162_CompareEdgeCases()
+     {
+      CGZFinalOosEngine eng(m_logger);
+      GZ_FinalOosResult a; a.Clear();
+      OosSetSummary(a.dev, 50, 0.5, 0.03, 1.1, 4.0, 0.4, 1.0);
+      OosSetSummary(a.oos, 40, 0.4, -0.10, 0.8, 5.0, 0.5, 0.9);
+      eng.Compare(a, 30);
+      bool a_ok = !a.retention_defined && !a.oos_degraded && a.oos_negative;
+
+      GZ_FinalOosResult b; b.Clear();
+      OosSetSummary(b.dev, 50, 0.5, 0.60, 2.0, 4.0, 0.4, 1.0);
+      OosSetSummary(b.oos, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+      eng.Compare(b, 30);
+      bool b_ok = b.oos_no_trades && b.low_oos_trades && !b.oos_negative && !b.oos_degraded && !b.profit_factor_delta_defined;
+
+      GZ_FinalOosResult c; c.Clear();
+      OosSetSummary(c.dev, 50, 0.5, 0.60, 2.0, 4.0, 0.4, 1.0);
+      OosSetSummary(c.oos, 40, 0.6, 0.90, 0.0, 3.0, 0.4, 1.0);
+      c.oos.trade.profit_factor_undefined = true;
+      eng.Compare(c, 30);
+      bool c_ok = !c.profit_factor_delta_defined;
+
+      AddResult("T162", a_ok && b_ok && c_ok, StringFormat("noise-floor: retention_defined=%s | no-trades: %s | pf-undefined: delta_defined=%s",
+                a.retention_defined?"true":"false", b.oos_no_trades?"flagged":"MISSED", c.profit_factor_delta_defined?"true":"false"));
+     }
+
+   //--- helper: replicated fixture split into Development (days 0-2) and OOS (days 3-5) arrays
+   void OosBuildSplit(MqlRates &d1[], MqlRates &d5[], MqlRates &o1[], MqlRates &o5[], datetime &split)
+     {
+      MqlRates m1[], m5[];
+      BuildWalkForwardFixture(6, m1, m5);
+      split = (datetime)((long)m5[0].time + 3*86400);
+      CGZWalkForwardEngine w(m_logger);
+      w.SliceByTime(m5, m5[0].time, split, d5);
+      w.SliceByTime(m1, m1[0].time, split, d1);
+      w.SliceByTime(m5, split, (datetime)((long)split + 4*86400), o5);
+      w.SliceByTime(m1, split, (datetime)((long)split + 4*86400), o1);
+     }
+
+   //--- T163: Evaluate() guards leave a well-formed result with NOTHING run.
+   //--- Overlapping request (OOS start before Development end) ->
+   //--- REJECTED_OVERLAP; empty Development M5 -> NO_DEV_DATA; empty OOS M5 ->
+   //--- NO_OOS_DATA. IDs increment. Trade counts stay 0. ---------------------
+   void T163_EvaluateGuards()
+     {
+      MqlRates d1[], d5[], o1[], o5[]; datetime split;
+      OosBuildSplit(d1, d5, o1, o5, split);
+      GZ_ExperimentConfig cfg; cfg.Default(); cfg.time_config.broker_offset_known = true;
+      CGZFinalOosEngine eng(m_logger);
+      datetime t0 = d5[0].time;
+
+      GZ_FinalOosResult a, b, c;
+      eng.Evaluate(cfg, t0, split, (datetime)((long)split-86400), (datetime)((long)split+4*86400), 30, d1, d5, o1, o5,
+                   GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, "G", a);
+      MqlRates e1[], e5[];
+      eng.Evaluate(cfg, t0, split, split, (datetime)((long)split+4*86400), 30, e1, e5, o1, o5,
+                   GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, "G", b);
+      eng.Evaluate(cfg, t0, split, split, (datetime)((long)split+4*86400), 30, d1, d5, e1, e5,
+                   GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, "G", c);
+      bool ok = (a.status==GZ_OOS_REJECTED_OVERLAP) && (b.status==GZ_OOS_NO_DEV_DATA) && (c.status==GZ_OOS_NO_OOS_DATA) &&
+                (a.dev.trade.trade_count==0) && (a.oos.trade.trade_count==0) && (c.oos_m5_bars==0) &&
+                (a.id=="OOS_000001") && (c.id=="OOS_000003") && (a.note_count>0);
+      AddResult("T163", ok, StringFormat("%s / %s / %s", GZOosStatusToString(a.status), GZOosStatusToString(b.status), GZOosStatusToString(c.status)));
+     }
+
+   //--- T164: Evaluate() end-to-end adds NOTHING to the pipeline. Development
+   //--- (days 0-2, 39 M5 bars) and OOS (days 3-5, 39 M5 bars) are disjoint,
+   //--- so no boundary bars are dropped; each range's trade count / net R /
+   //--- max DD equal what Phase 9's runner returns when called DIRECTLY on the
+   //--- same slices with the same config; the frozen config is stored. -------
+   void T164_EvaluateEqualsDirectRuns()
+     {
+      MqlRates d1[], d5[], o1[], o5[]; datetime split;
+      OosBuildSplit(d1, d5, o1, o5, split);
+      GZ_ExperimentConfig cfg; cfg.Default(); cfg.time_config.broker_offset_known = true;
+      CGZFinalOosEngine eng(m_logger);
+      GZ_FinalOosResult r;
+      ENUM_GZ_OOS_STATUS st = eng.Evaluate(cfg, d5[0].time, split, split, (datetime)((long)split+4*86400), 1, d1, d5, o1, o5,
+                                            GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, "DS", r);
+
+      CGZExperimentRunner runner(m_logger);
+      GZ_ExperimentResult rd, ro;
+      GZ_ExperimentConfig dcfg = cfg; dcfg.range_start = d5[0].time; dcfg.range_end = d5[ArraySize(d5)-1].time;
+      GZ_ExperimentConfig ocfg = cfg; ocfg.range_start = o5[0].time; ocfg.range_end = o5[ArraySize(o5)-1].time;
+      runner.RunSingle(dcfg, d1, d5, "DS_DEV", GZ_VAL_VALID, GZ_VAL_VALID, rd);
+      runner.RunSingle(ocfg, o1, o5, "DS_OOS", GZ_VAL_VALID, GZ_VAL_VALID, ro);
+
+      bool ok = (st==GZ_OOS_OK) && (r.dev_m5_bars==39) && (r.oos_m5_bars==39) && (r.oos_boundary_bars_dropped==0) &&
+                (r.dev.trade.trade_count==rd.metrics.trade.trade_count) && (MathAbs(r.dev.trade.net_r-rd.metrics.trade.net_r)<0.00001) &&
+                (r.oos.trade.trade_count==ro.metrics.trade.trade_count) && (MathAbs(r.oos.trade.net_r-ro.metrics.trade.net_r)<0.00001) &&
+                (MathAbs(r.oos.risk.max_drawdown_r-ro.metrics.risk.max_drawdown_r)<0.00001) &&
+                (r.config.pivot_strength==cfg.pivot_strength) && (r.strategy_version==GZ_STRATEGY_VERSION) &&
+                (r.dev_last<r.oos_first);
+      AddResult("T164", ok, StringFormat("status=%s dev: bars=%d trades=%d | oos: bars=%d trades=%d dropped=%d",
+                GZOosStatusToString(st), r.dev_m5_bars, r.dev.trade.trade_count, r.oos_m5_bars, r.oos.trade.trade_count, r.oos_boundary_bars_dropped));
+     }
+
+   //--- T165: boundary bars are dropped, never double-counted. The requested
+   //--- ranges touch at `split`, but the Development ARRAYS were loaded a
+   //--- little past it (through split+1800s = 6 extra M5 bars of day 3, as a
+   //--- loader that includes the end bar could do). Those 6 M5 bars are then
+   //--- removed from the OOS series (dropped=6, M1 none), leaving 33 OOS M5 bars,
+   //--- and the first OOS bar is strictly after the last Development bar. ------
+   void T165_BoundaryBarsDropped()
+     {
+      MqlRates d1[], d5[], o1[], o5[]; datetime split;
+      OosBuildSplit(d1, d5, o1, o5, split);
+
+      MqlRates all1[], all5[];
+      BuildWalkForwardFixture(6, all1, all5);
+      CGZWalkForwardEngine w(m_logger);
+      MqlRates x1[], x5[];
+      w.SliceByTime(all5, all5[0].time, (datetime)((long)split+1800), x5);   // dev + 6 bars of day 3
+      w.SliceByTime(all1, all1[0].time, (datetime)((long)split+1800), x1);
+
+      GZ_ExperimentConfig cfg; cfg.Default(); cfg.time_config.broker_offset_known = true;
+      CGZFinalOosEngine eng(m_logger);
+      GZ_FinalOosResult r;
+      ENUM_GZ_OOS_STATUS st = eng.Evaluate(cfg, all5[0].time, split, split, (datetime)((long)split+4*86400), 1, x1, x5, o1, o5,
+                                            GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, "DS", r);
+      bool ok = (st==GZ_OOS_OK) && (r.dev_m5_bars==ArraySize(x5)) && (r.oos_m5_bars==ArraySize(o5)-6) &&
+                (r.oos_boundary_bars_dropped==6) && (r.oos_first>r.dev_last);
+      AddResult("T165", ok, StringFormat("status=%s dev_bars=%d oos_bars=%d dropped=%d oos_first>dev_last=%s",
+                GZOosStatusToString(st), r.dev_m5_bars, r.oos_m5_bars, r.oos_boundary_bars_dropped, (r.oos_first>r.dev_last)?"true":"false"));
+     }
+
+   //--- T166: determinism - two independent engines, identical inputs ->
+   //--- identical results (id included: both start at OOS_000001). -----------
+   void T166_OosDeterminism()
+     {
+      MqlRates d1[], d5[], o1[], o5[]; datetime split;
+      OosBuildSplit(d1, d5, o1, o5, split);
+      GZ_ExperimentConfig cfg; cfg.Default(); cfg.time_config.broker_offset_known = true;
+      CGZFinalOosEngine e1(m_logger), e2(m_logger);
+      GZ_FinalOosResult a, b;
+      e1.Evaluate(cfg, d5[0].time, split, split, (datetime)((long)split+4*86400), 1, d1, d5, o1, o5, GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, "DS", a);
+      e2.Evaluate(cfg, d5[0].time, split, split, (datetime)((long)split+4*86400), 1, d1, d5, o1, o5, GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, GZ_VAL_VALID, "DS", b);
+      bool ok = (a.id==b.id) && (a.status==b.status) && (a.dev.trade.trade_count==b.dev.trade.trade_count) &&
+                (a.oos.trade.trade_count==b.oos.trade.trade_count) && (MathAbs(a.oos.trade.net_r-b.oos.trade.net_r)<0.00001) &&
+                (MathAbs(a.expectancy_delta-b.expectancy_delta)<0.00001) && (a.oos_degraded==b.oos_degraded) &&
+                (a.oos_first==b.oos_first) && (a.oos_m5_bars==b.oos_m5_bars);
+      AddResult("T166", ok, StringFormat("idA=%s idB=%s oos_trades=%d/%d", a.id, b.id, a.oos.trade.trade_count, b.oos.trade.trade_count));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -5419,6 +5666,14 @@ public:
       T156_BuildRSeriesFromJournal();
       T157_BootstrapSymmetry();
       T158_ShuffleUniformity();
+      T159_OosRangeSeparation();
+      T160_TrimBoundary();
+      T161_CompareKnownNumbers();
+      T162_CompareEdgeCases();
+      T163_EvaluateGuards();
+      T164_EvaluateEqualsDirectRuns();
+      T165_BoundaryBarsDropped();
+      T166_OosDeterminism();
      }
 
    int               PassCount() const

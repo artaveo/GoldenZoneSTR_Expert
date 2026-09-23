@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                    GoldenZoneSTR_Research.mq5    |
 //|                                                                    |
-//| GoldenZone STR - Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14 Research EA     |
+//| GoldenZone STR - Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 Research EA     |
 //| Phase 1: Data Layer + Data Validator + Time Engine                |
 //| Phase 2: M5 Structure Engine (swing/pivot detection)               |
 //| Phase 3: Leg Engine + Break Engine                                 |
@@ -20,6 +20,9 @@
 //|           sweeps via Phase 9's own CGZExperimentRunner, flagging     |
 //|           Narrow Peak / Flat Region / Unstable Zone / Parameter      |
 //|           Sensitive)                                                  |
+//| Phase 15: Final OOS (ONE frozen configuration run on the Development   |
+//|           range and on a separately loaded range that starts at/after   |
+//|           the Development end; reported and compared, never tuned on)   |
 //| Phase 14: Monte Carlo Research (seeded trade-order permutation and    |
 //|           return-sequence bootstrap of the closed-trade R series:     |
 //|           drawdown / losing-streak / net-R distributions, equity-path  |
@@ -70,8 +73,8 @@
 //| logic.                                                              |
 //+------------------------------------------------------------------+
 #property copyright "GoldenZone STR"
-#property version   "1.140"
-#property description "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting + Experiment Configuration/Runner + Filter Engine + Filter Combination Research + Robustness/Sensitivity Research + Walk-Forward Research + Monte Carlo Research (research/diagnostic only, no trading)"
+#property version   "1.150"
+#property description "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting + Experiment Configuration/Runner + Filter Engine + Filter Combination Research + Robustness/Sensitivity Research + Walk-Forward Research + Monte Carlo Research + Final OOS (research/diagnostic only, no trading)"
 
 #include <GoldenZoneSTR\Core\GZ_Types.mqh>
 #include <GoldenZoneSTR\Core\GZ_Config.mqh>
@@ -113,6 +116,8 @@
 #include <GoldenZoneSTR\WalkForward\GZ_WalkForwardEngine.mqh>
 #include <GoldenZoneSTR\MonteCarlo\GZ_MonteCarloTypes.mqh>
 #include <GoldenZoneSTR\MonteCarlo\GZ_MonteCarloEngine.mqh>
+#include <GoldenZoneSTR\FinalOOS\GZ_FinalOosTypes.mqh>
+#include <GoldenZoneSTR\FinalOOS\GZ_FinalOosEngine.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
@@ -269,6 +274,20 @@ input int                   InpMcSimulations              = GZ_DEFAULT_MC_SIMULA
 input uint                  InpMcSeed                     = GZ_DEFAULT_MC_SEED;            // reproducibility seed (recorded in the report)
 input int                   InpMcMaxSimulations           = GZ_DEFAULT_MC_MAX_SIMULATIONS; // cap: a larger InpMcSimulations is REJECTED, never truncated
 
+//--- Phase 15: Final OOS ---------------------------------------------------------
+//--- The Development range is InpRangeStart..InpRangeEnd (the ONLY data Phases 1-14
+//--- ever load). The Final OOS range below is loaded ONLY here, must START AT OR
+//--- AFTER InpRangeEnd (an earlier start is REJECTED, never shifted), and is never
+//--- used to choose or tune anything: the EA's current inputs are run once, frozen,
+//--- on both ranges and compared. Changing parameters after looking at the OOS result
+//--- contaminates it - the Roadmap's answer is Phase 16 (new version + NEW OOS data).
+//--- Default: everything after the Development end up to InpOosEnd (a fixed date, never
+//--- the wall clock, so results stay reproducible).
+input bool                  InpRunPhase15                 = true;   // set false to skip Phase 15 entirely
+input datetime              InpOosStart                   = D'2026.06.13 00:00'; // must be >= InpRangeEnd
+input datetime              InpOosEnd                     = D'2026.09.24 00:00';
+input int                   InpOosMinTrades               = GZ_DEFAULT_OOS_MIN_TRADES; // fewer OOS trades -> LOW_OOS_TRADES flag
+
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
 CGZDataProvider   g_provider(GetPointer(g_logger));
@@ -292,6 +311,7 @@ CGZFilterComboEngine g_filter_combo_engine(GetPointer(g_logger));
 CGZRobustnessEngine  g_robustness_engine(GetPointer(g_logger));
 CGZWalkForwardEngine g_walkforward_engine(GetPointer(g_logger));
 CGZMonteCarloEngine  g_montecarlo_engine(GetPointer(g_logger));
+CGZFinalOosEngine    g_oos_engine(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;
@@ -351,6 +371,12 @@ GZ_WalkForwardResult     g_wf_result;
 bool                     g_phase14_ran = false;
 GZ_McResult              g_mc_order;      // TRADE_ORDER
 GZ_McResult              g_mc_bootstrap;  // RETURN_SEQUENCE
+
+//--- Phase 15 result (frozen config: Development range vs separately loaded Final OOS range)
+bool                     g_phase15_ran = false;
+GZ_FinalOosResult        g_oos_result;
+int                      g_oos_m1_bars = 0;
+int                      g_oos_m5_bars_loaded = 0;
 
 //+------------------------------------------------------------------+
 //| Phase 11 helper: index of the combo with the highest                |
@@ -421,8 +447,8 @@ void BuildAndEmitReport()
   {
    string report = "";
    report += "===================================================\n";
-   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 + PHASE 6 + PHASE 7 + PHASE 8 + PHASE 9 + PHASE 10 + PHASE 11 + PHASE 12 + PHASE 13 + PHASE 14 COMPLETION REPORT\n";
-   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + " | " + GZ_PROJECT_VERSION_P6 + " | " + GZ_PROJECT_VERSION_P7 + " | " + GZ_PROJECT_VERSION_P8 + " | " + GZ_PROJECT_VERSION_P9 + " | " + GZ_PROJECT_VERSION_P10 + " | " + GZ_PROJECT_VERSION_P11 + " | " + GZ_PROJECT_VERSION_P12 + " | " + GZ_PROJECT_VERSION_P13 + " | " + GZ_PROJECT_VERSION_P14 + "\n";
+   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 + PHASE 6 + PHASE 7 + PHASE 8 + PHASE 9 + PHASE 10 + PHASE 11 + PHASE 12 + PHASE 13 + PHASE 14 + PHASE 15 COMPLETION REPORT\n";
+   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + " | " + GZ_PROJECT_VERSION_P6 + " | " + GZ_PROJECT_VERSION_P7 + " | " + GZ_PROJECT_VERSION_P8 + " | " + GZ_PROJECT_VERSION_P9 + " | " + GZ_PROJECT_VERSION_P10 + " | " + GZ_PROJECT_VERSION_P11 + " | " + GZ_PROJECT_VERSION_P12 + " | " + GZ_PROJECT_VERSION_P13 + " | " + GZ_PROJECT_VERSION_P14 + " | " + GZ_PROJECT_VERSION_P15 + "\n";
    report += " Generated (terminal local time, diagnostic only): " + TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS) + "\n";
    report += "===================================================\n\n";
 
@@ -442,6 +468,7 @@ void BuildAndEmitReport()
    report += "Phase 12 files: GZ_RobustnessTypes, GZ_RobustnessEngine\n";
    report += "Phase 13 files: GZ_WalkForwardTypes, GZ_WalkForwardEngine\n";
    report += "Phase 14 files: GZ_MonteCarloTypes, GZ_MonteCarloEngine\n";
+   report += "Phase 15 files: GZ_FinalOosTypes, GZ_FinalOosEngine\n";
    report += "Interfaces: GZ_TimeContext, CGZDatasetInfo (Phase 1), GZ_Swing / CGZSwingEngine (Phase 2),\n";
    report += "            GZ_Leg / CGZLegEngine / CGZBreakEngine (Phase 3), GZ_Setup / CGZFibEngine /\n";
    report += "            CGZSetupStateMachine (Phase 4), GZ_Trade / CGZEntryEngine / CGZTradeSimulator\n";
@@ -876,7 +903,65 @@ void BuildAndEmitReport()
       report += "Skipped (InpRunPhase14=false).\n";
    report += StringFormat("InpMcSimulations=%d InpMcSeed=%u InpMcMaxSimulations=%d.\n\n", InpMcSimulations, InpMcSeed, InpMcMaxSimulations);
 
-   report += "--- Automated Test Results (T01-T158: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13, T143-T158 Phase 14) ---\n";
+   report += "--- Phase 15: Final OOS ---\n";
+   if(g_phase15_ran)
+     {
+      GZ_FinalOosResult fo = g_oos_result;
+      report += StringFormat("%s status=%s strategy=%s\n", fo.id, GZOosStatusToString(fo.status), fo.strategy_version);
+      report += StringFormat("Development range requested [%s .. %s]; Final OOS range requested [%s .. %s] (loaded only by Phase 15)\n",
+                 TimeToString(fo.dev_req_start), TimeToString(fo.dev_req_end), TimeToString(fo.oos_req_start), TimeToString(fo.oos_req_end));
+      report += StringFormat("OOS bars loaded: M1=%d M5=%d | OOS validation: M1=%s M5=%s\n", g_oos_m1_bars, g_oos_m5_bars_loaded,
+                 EnumToString(fo.oos_m1_status), EnumToString(fo.oos_m5_status));
+      if(fo.status==GZ_OOS_OK)
+        {
+         report += StringFormat("Development actual [%s .. %s] M5 bars=%d | OOS actual [%s .. %s] M5 bars=%d boundary bars dropped=%d\n",
+                    TimeToString(fo.dev_first), TimeToString(fo.dev_last), fo.dev_m5_bars,
+                    TimeToString(fo.oos_first), TimeToString(fo.oos_last), fo.oos_m5_bars, fo.oos_boundary_bars_dropped);
+         report += "                              Development        OOS      delta(OOS-Dev)\n";
+         report += StringFormat("  trades                      %11d %10d\n", fo.dev.trade.trade_count, fo.oos.trade.trade_count);
+         report += StringFormat("  win rate                    %10.1f%% %9.1f%% %+12.1f pts\n", fo.dev.trade.win_rate*100.0, fo.oos.trade.win_rate*100.0, fo.win_rate_delta*100.0);
+         report += StringFormat("  profit factor               %11s %10s %13s\n",
+                    fo.dev.trade.profit_factor_undefined ? "undef" : DoubleToString(fo.dev.trade.profit_factor,3),
+                    fo.oos.trade.profit_factor_undefined ? "undef" : DoubleToString(fo.oos.trade.profit_factor,3),
+                    fo.profit_factor_delta_defined ? DoubleToString(fo.profit_factor_delta,3) : "n/a");
+         report += StringFormat("  expectancy (R)              %11.4f %10.4f %+13.4f\n", fo.dev.trade.expectancy, fo.oos.trade.expectancy, fo.expectancy_delta);
+         report += StringFormat("  net R                       %11.3f %10.3f\n", fo.dev.trade.net_r, fo.oos.trade.net_r);
+         report += StringFormat("  max drawdown (R)            %11.3f %10.3f %+13.3f\n", fo.dev.risk.max_drawdown_r, fo.oos.risk.max_drawdown_r, fo.max_dd_delta);
+         report += StringFormat("  max losing streak           %11d %10d\n", fo.dev.risk.max_losing_streak, fo.oos.risk.max_losing_streak);
+         report += StringFormat("  avg MAE (R)                 %11.3f %10.3f %+13.3f\n", fo.dev.behavior.avg_mae_r, fo.oos.behavior.avg_mae_r, fo.avg_mae_delta);
+         report += StringFormat("  avg MFE (R)                 %11.3f %10.3f %+13.3f\n", fo.dev.behavior.avg_mfe_r, fo.oos.behavior.avg_mfe_r, fo.avg_mfe_delta);
+         report += StringFormat("Expectancy retention (OOS/Development): %s\n", fo.retention_defined ? StringFormat("%.1f%%", fo.expectancy_retention*100.0) : "undefined");
+         report += StringFormat("Flags: low_oos_trades=%s oos_no_trades=%s oos_negative=%s oos_degraded=%s\n",
+                    fo.low_oos_trades?"true":"false", fo.oos_no_trades?"true":"false", fo.oos_negative?"true":"false", fo.oos_degraded?"true":"false");
+         report += "OOS distribution by direction:\n";
+         for(int di=0; di<GZ_BREAKDOWN_DIRECTION_COUNT; di++)
+            report += StringFormat("  %-8s trades=%d win_rate=%.1f%% expectancy=%.4f net_r=%.3f\n", fo.oos.by_direction[di].label,
+                       fo.oos.by_direction[di].stats.trade_count, fo.oos.by_direction[di].stats.win_rate*100.0,
+                       fo.oos.by_direction[di].stats.expectancy, fo.oos.by_direction[di].stats.net_r);
+         report += "OOS distribution by month (months with trades):\n";
+         for(int mo=0; mo<GZ_BREAKDOWN_MONTH_COUNT; mo++)
+            if(fo.oos.by_month[mo].stats.trade_count>0)
+               report += StringFormat("  %-8s trades=%d win_rate=%.1f%% expectancy=%.4f net_r=%.3f\n", fo.oos.by_month[mo].label,
+                          fo.oos.by_month[mo].stats.trade_count, fo.oos.by_month[mo].stats.win_rate*100.0,
+                          fo.oos.by_month[mo].stats.expectancy, fo.oos.by_month[mo].stats.net_r);
+         if(g_phase13_ran && g_wf_result.windows_validated>0)
+            report += StringFormat("For reference - Phase 13 walk-forward pooled validation: trades=%d expectancy=%.4f pf=%s\n",
+                       g_wf_result.pooled_trades, g_wf_result.pooled_expectancy,
+                       g_wf_result.pooled_profit_factor_undefined ? "undef" : DoubleToString(g_wf_result.pooled_profit_factor,3));
+        }
+      for(int ni=0; ni<fo.note_count; ni++)
+         report += StringFormat("  note: %s\n", fo.notes[ni]);
+      report += "The OOS range was loaded only by Phase 15 and used for nothing else. ONE frozen configuration was run once on each\n";
+      report += "range; nothing was selected or tuned from this result. If you change parameters after reading it, this OOS is\n";
+      report += "contaminated - use Phase 16 (freeze, new version) and NEW data for the next OOS. Each range is simulated from a\n";
+      report += "cold start (warm-up bars are consumed inside the range).\n";
+     }
+   else
+      report += "Skipped (InpRunPhase15=false).\n";
+   report += StringFormat("InpOosStart=%s InpOosEnd=%s InpOosMinTrades=%d (Development range InpRangeStart=%s InpRangeEnd=%s).\n\n",
+              TimeToString(InpOosStart), TimeToString(InpOosEnd), InpOosMinTrades, TimeToString(InpRangeStart), TimeToString(InpRangeEnd));
+
+   report += "--- Automated Test Results (T01-T166: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13, T143-T158 Phase 14, T159-T166 Phase 15) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -887,16 +972,12 @@ void BuildAndEmitReport()
    report += StringFormat("\nTOTAL: %d PASS / %d FAIL (of %d)\n\n", pass, fail, g_harness.ResultCount());
 
    report += "--- Known Limitations / Deferred Work ---\n";
-   report += "DEFERRED: Final OOS (Phase 15), Research Freeze (Phase 16), Future Execution Adapter (Phase 17) -\n";
-   report += "not implemented, by design. Phase 11 (Filter Combination Research), Phase 12 (Robustness/Sensitivity\n";
-   report += "Research), Phase 13 (Walk-Forward Research) and Phase 14 (Monte Carlo Research) ARE now implemented (see\n";
-   report += "their sections above). Phase 13 selects ONE axis value per window (single-axis walk-forward);\n";
-   report += "multi-axis selection and anchored/expanding training windows are DEFERRED, not silently expanded\n";
-   report += "(GZ_WalkForwardTypes.mqh design notes 1 and 3). Phase 14 randomizes the main pipeline's whole closed-trade\n";
-   report += "R series; Monte Carlo over the walk-forward pooled out-of-sample trades is DEFERRED (Phase 13 keeps only\n";
-   report += "compact per-window statistics, not a trade list). No date range has been reserved as the Final OOS the\n";
-   report += "Roadmap requires (Phase 15) - walk-forward validation windows and this Monte Carlo run are NOT that Final\n";
-   report += "OOS; they are ordinary Development/Validation data over the whole loaded range.\n";
+   report += "DEFERRED: Research Freeze (Phase 16), Future Execution Adapter (Phase 17) - not implemented, by design.\n";
+   report += "Phases 11-15 ARE now implemented (see their sections above). Phase 13 selects ONE axis value per window\n";
+   report += "(single-axis walk-forward); multi-axis selection and anchored/expanding training windows are DEFERRED\n";
+   report += "(GZ_WalkForwardTypes.mqh design notes 1 and 3). Phase 14 randomizes the main pipeline's whole closed-trade R\n";
+   report += "series; Monte Carlo over walk-forward or OOS trades is DEFERRED. Phase 15 evaluates the EA's current inputs as\n";
+   report += "ONE frozen configuration; freezing/versioning it formally is Phase 16 (DEFERRED).\n";
    report += "Phase 12's axis sweeps demonstrate 2 axes by default\n";
    report += "(InpRobustnessAxis1/2); the other 9 defined in ENUM_GZ_ROBUSTNESS_PARAM (GZ_RobustnessTypes.mqh)\n";
    report += "are equally usable by changing those inputs - no code change needed to sweep a different axis.\n";
@@ -935,28 +1016,28 @@ void BuildAndEmitReport()
    string final_status;
    bool data_ok = (g_info_m1.total_bars>0 && g_info_m5.total_bars>0);
    if(fail>0)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14 BLOCKED (automated test failure - see detail above)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 BLOCKED (automated test failure - see detail above)";
    else if(!data_ok)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14 BLOCKED (historical data unavailable for requested symbol/range)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 BLOCKED (historical data unavailable for requested symbol/range)";
    else if(!InpBrokerOffsetKnown)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14 BLOCKED (broker UTC offset not yet verified by user)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 BLOCKED (broker UTC offset not yet verified by user)";
    else
       // This report is only ever printed by the EA's own OnInit() running
       // inside MT5, so reaching this branch already proves compile+attach
       // succeeded - there is nothing further to "wait" on.
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14 COMPLETE";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 COMPLETE";
 
    report += "--- Final Status ---\n" + final_status + "\n";
    report += "===================================================\n";
 
    PrintReportChunked(report);
 
-   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_14_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_14_15_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle!=INVALID_HANDLE)
      {
       FileWriteString(handle, report);
       FileClose(handle);
-      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_14_Report.txt");
+      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_14_15_Report.txt");
      }
    else
      {
@@ -987,7 +1068,7 @@ int OnInit()
       InpBrokerOffsetKnown ? "true" : "false"));
 
    g_logger.EnableVerbose(InpVerboseLogging);
-   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14 starting up (research/diagnostic mode - no trading).");
+   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 starting up (research/diagnostic mode - no trading).");
 
    //--- Time engine configuration -----------------------------------------
    GZ_TimeConfig time_cfg;
@@ -1600,6 +1681,60 @@ int OnInit()
         }
       else
          g_logger.Info("WalkForward", "Phase 13: skipped (InpRunPhase13=false).");
+
+      //--- Phase 15: Final OOS. Loads the OOS range SEPARATELY (nothing above ever saw
+      //--- it), validates it exactly like the Development data, then runs the frozen
+      //--- exp_cfg once on each range and compares. No selection, no tuning.
+      if(InpRunPhase15)
+        {
+         MqlRates oos_m1[], oos_m5[];
+         g_oos_m1_bars        = g_provider.LoadM1(InpSymbol, InpOosStart, InpOosEnd, oos_m1);
+         g_oos_m5_bars_loaded = g_provider.LoadM5(InpSymbol, InpOosStart, InpOosEnd, oos_m5);
+
+         CGZDatasetInfo oos_i1, oos_i5;
+         oos_i1.Clear(); oos_i1.symbol = InpSymbol; oos_i1.execution_timeframe = PERIOD_M1;
+         oos_i1.start_timestamp = InpOosStart; oos_i1.end_timestamp = InpOosEnd;
+         oos_i1.broker_utc_offset_hours = InpBrokerUtcOffsetHrs;
+         oos_i1.broker_tz_status = InpBrokerOffsetKnown ? GZ_TZ_KNOWN : GZ_TZ_UNKNOWN;
+         oos_i1.total_bars = g_oos_m1_bars;
+         if(g_oos_m1_bars>0)
+           {
+            oos_i1.first_bar_time = oos_m1[0].time; oos_i1.last_bar_time = oos_m1[g_oos_m1_bars-1].time;
+            g_validator.ValidateOHLC(oos_m1, oos_i1);
+            g_validator.ValidateTimestamps(oos_m1, GZ_SPACING_M1_SECONDS, oos_i1);
+           }
+         else
+            oos_i1.AddError("No M1 data returned for the Final OOS range.");
+         oos_i1.Finalize();
+
+         oos_i5.Clear(); oos_i5.symbol = InpSymbol; oos_i5.structure_timeframe = PERIOD_M5;
+         oos_i5.start_timestamp = InpOosStart; oos_i5.end_timestamp = InpOosEnd;
+         oos_i5.broker_utc_offset_hours = InpBrokerUtcOffsetHrs;
+         oos_i5.broker_tz_status = InpBrokerOffsetKnown ? GZ_TZ_KNOWN : GZ_TZ_UNKNOWN;
+         oos_i5.total_bars = g_oos_m5_bars_loaded;
+         if(g_oos_m5_bars_loaded>0)
+           {
+            oos_i5.first_bar_time = oos_m5[0].time; oos_i5.last_bar_time = oos_m5[g_oos_m5_bars_loaded-1].time;
+            g_validator.ValidateOHLC(oos_m5, oos_i5);
+            g_validator.ValidateTimestamps(oos_m5, GZ_SPACING_M5_SECONDS, oos_i5);
+           }
+         else
+            oos_i5.AddError("No M5 data returned for the Final OOS range.");
+         oos_i5.Finalize();
+
+         GZ_ExperimentConfig oos_cfg = exp_cfg;   // the frozen configuration - same base Phases 9-14 used
+         string oos_prefix = StringFormat("%s_FINALOOS", InpSymbol);
+         g_oos_engine.Evaluate(oos_cfg, InpRangeStart, InpRangeEnd, InpOosStart, InpOosEnd, InpOosMinTrades,
+                               m1, m5, oos_m1, oos_m5,
+                               g_info_m1.validation_status, g_info_m5.validation_status,
+                               oos_i1.validation_status, oos_i5.validation_status, oos_prefix, g_oos_result);
+         g_phase15_ran = true;
+         g_logger.Info("FinalOOS", StringFormat("Phase 15: %s status=%s OOS M1=%d M5=%d bars loaded | OOS validation M1=%s M5=%s",
+                       g_oos_result.id, GZOosStatusToString(g_oos_result.status), g_oos_m1_bars, g_oos_m5_bars_loaded,
+                       EnumToString(oos_i1.validation_status), EnumToString(oos_i5.validation_status)));
+        }
+      else
+         g_logger.Info("FinalOOS", "Phase 15: skipped (InpRunPhase15=false).");
      }
    else
       g_logger.Warning("Leg", "No M5 data loaded - leg/break/setup/entry/exit detection skipped.");
@@ -1627,7 +1762,7 @@ int OnInit()
    //--- Report ------------------------------------------------------------------
    BuildAndEmitReport();
 
-   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14 diagnostics complete. STOPPING - not proceeding to Phase 15 (Final OOS) logic.");
+   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 diagnostics complete. STOPPING - not proceeding to Phase 16 (Research Freeze) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.
@@ -1639,7 +1774,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14 EA removed.");
+   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 EA removed.");
   }
 
 //+------------------------------------------------------------------+

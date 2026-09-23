@@ -1,11 +1,11 @@
-# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14
+# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15
 
 Data Layer + Data Validator + Time Engine (Phase 1), M5 Structure/Swing Engine (Phase 2),
 Leg Engine + Break Engine (Phase 3), Fibonacci Engine + Setup State Machine (Phase 4),
 Entry Engine + Historical Trade Simulator (Phase 5), Exit Engine SL/TP/BE (Phase 6),
 MAE/MFE + R-Path + Event Ledger (Phase 7), Metrics + Reporting (Phase 8), Experiment
 Configuration + Runner (Phase 9), Filter Engine (Phase 10), Filter Combination Research
-(Phase 11), Robustness + Sensitivity Research (Phase 12), Walk-Forward Research (Phase 13), Monte Carlo Research (Phase 14).
+(Phase 11), Robustness + Sensitivity Research (Phase 12), Walk-Forward Research (Phase 13), Monte Carlo Research (Phase 14), Final OOS (Phase 15).
 No live trading.
 
 ## Install
@@ -19,7 +19,7 @@ No live trading.
 5. Attach the compiled EA to an XAUUSD chart (any chart timeframe — the EA loads its own M1/M5
    internally, independent of the chart's timeframe).
 6. Check the **Experts** log tab for the report, and
-   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_14_Report.txt` (common Files folder) for the saved copy.
+   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_14_15_Report.txt` (common Files folder) for the saved copy.
 
 ## What this does
 
@@ -121,15 +121,24 @@ No live trading.
   (seed, k). More than `InpMcMaxSimulations` is rejected, never truncated. The original ledger is
   never modified. Shuffles assume exchangeable trades (no serial dependence). Set
   `InpRunPhase14=false` to skip it.
-- Runs 158 deterministic, synthetic-data self-tests (T01–T158: T01–T18 Phase 1, T19–T23 Phase 2,
+- **Phase 15:** `CGZFinalOosEngine` runs ONE frozen configuration (the EA's current inputs) once on the
+  Development range (`InpRangeStart..InpRangeEnd`) and once on a separately loaded Final OOS range
+  (`InpOosStart..InpOosEnd`, default = everything after the Development end), through Phase 9's runner,
+  and compares them: trades, win rate, PF, expectancy, net R, drawdown, streak, MAE/MFE, long/short and
+  monthly distribution, expectancy retention, plus `LOW_OOS_TRADES` / `OOS_NO_TRADES` / `OOS_NEGATIVE` /
+  `OOS_DEGRADED` flags. The OOS range is loaded only here; an OOS start before the Development end is
+  REJECTED (never shifted); boundary bars are dropped so no bar is in both ranges. Nothing is selected or
+  tuned from the OOS result - changing parameters afterward contaminates it (Phase 16: freeze + new data).
+  Set `InpRunPhase15=false` to skip it.
+- Runs 166 deterministic, synthetic-data self-tests (T01–T166: T01–T18 Phase 1, T19–T23 Phase 2,
   T24–T34 Phase 3, T35–T45 Phase 4, T46–T54 Phase 5, T55–T64 Phase 6, T65–T74 Phase 7,
   T75–T86 Phase 8, T87–T96 Phase 9, T97–T106 Phase 10, T107–T116 Phase 11, T117–T127 Phase 12,
-  T128–T142 Phase 13, T143–T158 Phase 14) and reports PASS/FAIL
+  T128–T142 Phase 13, T143–T158 Phase 14, T159–T166 Phase 15) and reports PASS/FAIL
   for each.
 - Prints (in chunks, so the Experts log is no longer truncated) and saves a full Phase 1+2+…+13
   completion report.
-- Does **not** place any live trades, and does **not** implement any Phase 15+ logic
-  (Final OOS onward). It stops after the report.
+- Does **not** place any live trades, and does **not** implement any Phase 16+ logic
+  (Research Freeze onward). It stops after the report.
 
 ## Before trusting the output
 

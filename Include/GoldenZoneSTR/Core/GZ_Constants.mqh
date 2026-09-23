@@ -175,4 +175,13 @@
 #define GZ_MC_MIN_TRADES                 2      // a shuffle/bootstrap of fewer trades carries no information
 #define GZ_PROJECT_VERSION_P14           "GZ-P14-ROADMAP v1.0"
 
+// Phase 15 - Final OOS. Roadmap: the Final OOS is never used in optimization, filter
+// selection or parameter tuning, and is reported SEPARATELY, compared with
+// Development/Validation. No numeric thresholds are stated - conventional, documented
+// defaults (same pattern as the other phases).
+#define GZ_DEFAULT_OOS_MIN_TRADES        30    // fewer OOS trades than this -> LOW_OOS_TRADES (weak evidence)
+#define GZ_OOS_RETENTION_MIN             0.50  // OOS expectancy / development expectancy below this -> OOS_DEGRADED
+#define GZ_OOS_NOISE_FLOOR_R             0.05  // development expectancy at/below this (R) -> retention UNDEFINED
+#define GZ_PROJECT_VERSION_P15           "GZ-P15-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__
