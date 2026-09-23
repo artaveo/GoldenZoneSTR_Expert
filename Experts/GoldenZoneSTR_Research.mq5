@@ -118,6 +118,9 @@
 #include <GoldenZoneSTR\MonteCarlo\GZ_MonteCarloEngine.mqh>
 #include <GoldenZoneSTR\FinalOOS\GZ_FinalOosTypes.mqh>
 #include <GoldenZoneSTR\FinalOOS\GZ_FinalOosEngine.mqh>
+#include <GoldenZoneSTR\RewardBe\GZ_RewardBeTypes.mqh>
+#include <GoldenZoneSTR\RewardBe\GZ_RunDetail.mqh>
+#include <GoldenZoneSTR\RewardBe\GZ_RewardBeEngine.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
@@ -288,6 +291,18 @@ input datetime              InpOosStart                   = D'2026.06.13 00:00';
 input datetime              InpOosEnd                     = D'2026.09.24 00:00';
 input int                   InpOosMinTrades               = GZ_DEFAULT_OOS_MIN_TRADES; // fewer OOS trades -> LOW_OOS_TRADES flag
 
+//--- Phase 15.5: Reward / TP x Risk-Free (BE) Research Matrix ------------------------------
+//--- RESEARCH + MEASUREMENT ONLY, on the DEVELOPMENT range (InpRangeStart..InpRangeEnd) ONLY.
+//--- While InpRunPhase155=true, Phase 15 (which loads the Final OOS) is ALWAYS skipped, so the
+//--- Final OOS is never loaded or inspected. Nothing is selected, ranked or frozen.
+input bool                  InpRunPhase155                = true;   // run the Phase 15.5 matrix (also forces Phase 15 / Final OOS OFF)
+input bool                  InpPhase155Only               = true;   // true = also skip the heavy Phase 11-14 studies during this run (unrelated to 15.5)
+input bool                  InpP155IncludeInactiveEquivalent = true; // run trigger>=TP combinations too (validation only; 45 extra runs)
+input double                InpP155RefWinRate             = 0.507;  // Phase 15 Development baseline AS REPORTED (TP 2R, BE off): win rate (fraction)
+input double                InpP155RefExpectancy          = 0.5218; //   ... expectancy (R)
+input double                InpP155RefPF                  = 2.059;  //   ... profit factor
+input double                InpP155RefNetR                = 215.0;  //   ... net R
+
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
 CGZDataProvider   g_provider(GetPointer(g_logger));
@@ -312,6 +327,7 @@ CGZRobustnessEngine  g_robustness_engine(GetPointer(g_logger));
 CGZWalkForwardEngine g_walkforward_engine(GetPointer(g_logger));
 CGZMonteCarloEngine  g_montecarlo_engine(GetPointer(g_logger));
 CGZFinalOosEngine    g_oos_engine(GetPointer(g_logger));
+CGZRewardBeEngine    g_rewardbe_engine(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;
@@ -371,6 +387,11 @@ GZ_WalkForwardResult     g_wf_result;
 bool                     g_phase14_ran = false;
 GZ_McResult              g_mc_order;      // TRADE_ORDER
 GZ_McResult              g_mc_bootstrap;  // RETURN_SEQUENCE
+
+//--- Phase 15.5 result (TP x BE research matrix over the Development range only)
+bool                     g_phase155_ran = false;
+bool                     g_p155_only    = false;   // InpRunPhase155 && InpPhase155Only -> Phases 11-14 skipped
+string                   g_p155_dataset_id = "";
 
 //--- Phase 15 result (frozen config: Development range vs separately loaded Final OOS range)
 bool                     g_phase15_ran = false;
@@ -961,7 +982,7 @@ void BuildAndEmitReport()
    report += StringFormat("InpOosStart=%s InpOosEnd=%s InpOosMinTrades=%d (Development range InpRangeStart=%s InpRangeEnd=%s).\n\n",
               TimeToString(InpOosStart), TimeToString(InpOosEnd), InpOosMinTrades, TimeToString(InpRangeStart), TimeToString(InpRangeEnd));
 
-   report += "--- Automated Test Results (T01-T166: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13, T143-T158 Phase 14, T159-T166 Phase 15) ---\n";
+   report += "--- Automated Test Results (T01-T180: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13, T143-T158 Phase 14, T159-T166 Phase 15, T167-T180 Phase 15.5) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -1046,6 +1067,65 @@ void BuildAndEmitReport()
   }
 
 //+------------------------------------------------------------------+
+//| Phase 15.5: write the human-readable report + machine-readable   |
+//| CSVs (Common\Files). Called after the harness ran, so the        |
+//| T167-T180 unit-test results can be embedded.                      |
+//+------------------------------------------------------------------+
+void EmitPhase155Report()
+  {
+   if(!g_phase155_ran)
+      return;
+
+   string ctx = "";
+   ctx += StringFormat("Symbol=%s | Development range InpRangeStart=%s InpRangeEnd=%s | Final OOS (InpOosStart=%s) NOT loaded, NOT inspected (Phase 15 skipped: %s).\n",
+                       InpSymbol, TimeToString(InpRangeStart), TimeToString(InpRangeEnd), TimeToString(InpOosStart), g_phase15_ran?"NO - it ran!":"yes");
+   ctx += StringFormat("Held identical in every run: entry=%s fib=%.3f penetration=%.2fATR | SL=%s buffer=%.2fATR slATR=%.2f | conflict policy=%s | force_session_exit=%s apply_session_filter=%s | pivot=%d | break buffer=%.2fATR atr_period=%d.\n",
+                       EnumToString(InpEntryModel), InpEntryFibRatio, InpEntryPenetrationAtrMult, EnumToString(InpSlModel), InpSlBufferAtrMult, InpSlAtrMult,
+                       EnumToString(InpIntrabarConflictPolicy), InpForceSessionExit?"true":"false", InpApplySessionFilter?"true":"false",
+                       InpPivotStrength, InpBreakBufferAtrMult, InpAtrPeriod);
+   ctx += "Varied: exit_config.tp_r_multiple and exit_config.be_trigger_r ONLY (BE level = Entry, offset 0R; be_level_mode/offset forced for every run).\n";
+   ctx += "Same-candle rules (UNCHANGED baseline engine, documented in GZ_ExitEngine.mqh): SL/TP evaluated before BE arming; a newly armed BE stop applies from the NEXT M1 candle;\n";
+   ctx += "SL and TP on one candle -> policy SL_FIRST; SL/TP/BE are also evaluated on the trade's own entry candle. Section F counts how often each situation occurs.\n";
+   ctx += "Trade order for drawdown/streaks = journal order = trade-ENTRY order (trades overlap; the Phase 8 source comment says 'exit order' but journals are appended at entry). Kept as-is for reproducibility with Phase 8/15.\n\n";
+
+   string ut = "";
+   int up = 0, uf = 0;
+   for(int i=0;i<g_harness.ResultCount();i++)
+     {
+      GZ_TestResult r = g_harness.GetResult(i);
+      if(StringLen(r.id)<2 || StringGetCharacter(r.id,0)!='T') continue;
+      int num = (int)StringToInteger(StringSubstr(r.id,1));
+      if(num<167) continue;
+      ut += StringFormat("%s: %s - %s\n", r.id, r.passed?"PASS":"FAIL", r.detail);
+      if(r.passed) up++; else uf++;
+     }
+   ut += StringFormat("(Full suite T01-T180: %d PASS / %d FAIL - see the main report.)\n", g_harness.PassCount(), g_harness.FailCount());
+   // a failure ANYWHERE in the suite must also block the 15.5 status
+   if(g_harness.FailCount()>0 && uf==0) uf = g_harness.FailCount();
+
+   string report = g_rewardbe_engine.BuildReport(ctx, ut, up, uf);
+   PrintReportChunked(report);
+
+   string names[3] = {"GZ_Phase155_Report.txt", "GZ_Phase155_Matrix.csv", "GZ_Phase155_Pairwise.csv"};
+   string bodies[3];
+   bodies[0] = report;
+   bodies[1] = g_rewardbe_engine.BuildMatrixCsv();
+   bodies[2] = g_rewardbe_engine.BuildPairCsv();
+   for(int k=0;k<3;k++)
+     {
+      int h = FileOpen(names[k], FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+      if(h!=INVALID_HANDLE)
+        {
+         FileWriteString(h, bodies[k]);
+         FileClose(h);
+         Print("[GZ] Phase 15.5 output written to Common\\Files\\", names[k]);
+        }
+      else
+         Print("[GZ] WARNING: could not open ", names[k], " for writing, error=", GetLastError());
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                    |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -1053,7 +1133,7 @@ int OnInit()
    // Runtime marker: proves the EA currently attached/running is compiled
    // from THIS source file. Printed first, before anything else, and via
    // raw Print() (not CGZLogger) so nothing upstream can suppress it.
-   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260923_V13_PHASE13");
+   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260924_V15_5_REWARD_BE");
 
    // Runtime Inputs marker: prints the ACTUAL live values of the inputs
    // this specific EA instance is running with (per-attachment values from
@@ -1068,6 +1148,9 @@ int OnInit()
       InpBrokerOffsetKnown ? "true" : "false"));
 
    g_logger.EnableVerbose(InpVerboseLogging);
+   g_p155_only = (InpRunPhase155 && InpPhase155Only);
+   if(InpRunPhase155)
+      g_logger.Info("RewardBe", StringFormat("Phase 15.5 mode: Final OOS will NOT be loaded (Phase 15 skipped); Phases 11-14 skipped=%s.", g_p155_only?"true":"false"));
    g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 starting up (research/diagnostic mode - no trading).");
 
    //--- Time engine configuration -----------------------------------------
@@ -1452,7 +1535,7 @@ int OnInit()
       //--- thresholds. g_metrics (Phase 8's unfiltered summary, already
       //--- computed above) is the one unfiltered baseline every combo in
       //--- this sweep is diffed against (design note 2).
-      if(InpRunPhase11)
+      if(InpRunPhase11 && !g_p155_only)
         {
          g_filter_combo_engine.SetMaxBatchSize(InpFilterComboMaxBatchSize);
 
@@ -1576,7 +1659,7 @@ int OnInit()
       //--- offsets; everything else falls back to a small integer or
       //--- ratio neighborhood - see GZRobustnessDefault*Offsets() in
       //--- GZ_RobustnessTypes.mqh.
-      if(InpRunPhase12)
+      if(InpRunPhase12 && !g_p155_only)
         {
          g_robustness_engine.SetMaxBatchSize(InpRobustnessMaxBatchSize);
 
@@ -1637,7 +1720,7 @@ int OnInit()
       //--- that axis + the SAME default offsets Phase 12 uses (see
       //--- GZWalkForwardDefaultOffsets()) - no second grid definition.
       //--- exp_cfg is the base for every window; only the axis value varies.
-      if(InpRunPhase13)
+      if(InpRunPhase13 && !g_p155_only)
         {
          if(InpWfAxis==GZ_ROBUST_PARAM_COUNT)
             g_logger.Warning("WalkForward", "Phase 13: InpWfAxis is the GZ_ROBUST_PARAM_COUNT sentinel, not a real axis - skipped.");
@@ -1685,7 +1768,7 @@ int OnInit()
       //--- Phase 15: Final OOS. Loads the OOS range SEPARATELY (nothing above ever saw
       //--- it), validates it exactly like the Development data, then runs the frozen
       //--- exp_cfg once on each range and compares. No selection, no tuning.
-      if(InpRunPhase15)
+      if(InpRunPhase15 && !InpRunPhase155)   // Phase 15.5 NEVER loads the Final OOS
         {
          MqlRates oos_m1[], oos_m5[];
          g_oos_m1_bars        = g_provider.LoadM1(InpSymbol, InpOosStart, InpOosEnd, oos_m1);
@@ -1735,6 +1818,44 @@ int OnInit()
         }
       else
          g_logger.Info("FinalOOS", "Phase 15: skipped (InpRunPhase15=false).");
+
+      //--- Phase 15.5: Reward / TP x Risk-Free (BE) research matrix. DEVELOPMENT arrays m1/m5
+      //--- ONLY (the Final OOS is never loaded in this run - see the Phase 15 guard above).
+      //--- Only exit_config.tp_r_multiple / be_trigger_r vary between the runs.
+      if(InpRunPhase155)
+        {
+         GZ_ExperimentConfig p155_cfg = exp_cfg;
+         p155_cfg.range_start = m5[0].time;
+         p155_cfg.range_end   = m5[n5-1].time;
+
+         GZ_RewardBeBaselineRef p155_ref; p155_ref.Clear();
+         if(MathAbs(InpTpRMultiple-2.0)<0.000001 && InpBeTriggerR<=0.0)
+           {
+            p155_ref.main_available  = true;
+            p155_ref.main_trades     = g_metrics.trade.trade_count;
+            p155_ref.main_winners    = g_metrics.trade.winners;
+            p155_ref.main_net_r      = g_metrics.trade.net_r;
+            p155_ref.main_expectancy = g_metrics.trade.expectancy;
+           }
+         p155_ref.ext_available   = true;
+         p155_ref.ext_win_rate    = InpP155RefWinRate;
+         p155_ref.ext_expectancy  = InpP155RefExpectancy;
+         p155_ref.ext_pf          = InpP155RefPF;
+         p155_ref.ext_net_r       = InpP155RefNetR;
+
+         g_p155_dataset_id = StringFormat("%s_M1M5_DEV_%s_%s", InpSymbol,
+                              TimeToString(m5[0].time, TIME_DATE), TimeToString(m5[n5-1].time, TIME_DATE));
+         g_logger.Info("RewardBe", StringFormat("Phase 15.5: starting TP x BE matrix on Development data %s (%d M1 / %d M5 bars). This runs ~130 full simulations - expect several minutes.",
+                       g_p155_dataset_id, n1, n5));
+         g_rewardbe_engine.Run(p155_cfg, m1, m5, g_p155_dataset_id, g_info_m1.validation_status, g_info_m5.validation_status,
+                               InpP155IncludeInactiveEquivalent, InpRangeStart, InpRangeEnd, InpOosStart, !g_phase15_ran, p155_ref);
+         g_phase155_ran = true;
+         g_logger.Info("RewardBe", StringFormat("Phase 15.5: %d experiments executed, %d matrix rows, runtime validations failed=%d blocked=%d.",
+                       g_rewardbe_engine.ExperimentCount(), g_rewardbe_engine.RowCount(),
+                       g_rewardbe_engine.ValidationFailCount(), g_rewardbe_engine.ValidationBlockedCount()));
+        }
+      else
+         g_logger.Info("RewardBe", "Phase 15.5: skipped (InpRunPhase155=false).");
      }
    else
       g_logger.Warning("Leg", "No M5 data loaded - leg/break/setup/entry/exit detection skipped.");
@@ -1742,7 +1863,7 @@ int OnInit()
    //--- Phase 14: Monte Carlo Research - reads the main pipeline's journal
    //--- (closed trades only, journal order) into a plain R series; the journal
    //--- itself is never modified. Both randomization modes, same seed.
-   if(InpRunPhase14)
+   if(InpRunPhase14 && !g_p155_only)
      {
       g_montecarlo_engine.SetMaxSimulations(InpMcMaxSimulations);
       double mc_series[];
@@ -1761,8 +1882,9 @@ int OnInit()
 
    //--- Report ------------------------------------------------------------------
    BuildAndEmitReport();
+   EmitPhase155Report();
 
-   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 diagnostics complete. STOPPING - not proceeding to Phase 16 (Research Freeze) logic.");
+   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 diagnostics complete. STOPPING after Phase 15.5 - not proceeding to Phase 16 (Research Freeze) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.

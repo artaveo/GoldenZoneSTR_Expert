@@ -67,6 +67,7 @@
 #include "..\MonteCarlo\GZ_MonteCarloEngine.mqh"
 #include "..\FinalOOS\GZ_FinalOosTypes.mqh"
 #include "..\FinalOOS\GZ_FinalOosEngine.mqh"
+#include "..\RewardBe\GZ_RewardBeTests.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -5674,6 +5675,15 @@ public:
       T164_EvaluateEqualsDirectRuns();
       T165_BoundaryBarsDropped();
       T166_OosDeterminism();
+
+      //--- Phase 15.5 (T167-T180): Reward / TP x BE research matrix - synthetic fixtures only
+      CGZRewardBeTests rb_suite(m_logger);
+      rb_suite.RunAll();
+      for(int rb=0; rb<rb_suite.ResultCount(); rb++)
+        {
+         GZ_TestResult rbr = rb_suite.GetResult(rb);
+         AddResult(rbr.id, rbr.passed, rbr.detail);
+        }
      }
 
    int               PassCount() const

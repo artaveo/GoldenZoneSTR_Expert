@@ -38,6 +38,7 @@
 #include "..\Time\GZ_TimeEngine.mqh"
 #include "..\Time\GZ_Session.mqh"
 #include "..\Diagnostics\GZ_Logger.mqh"
+#include "..\RewardBe\GZ_RunDetail.mqh"
 
 class CGZExperimentRunner
   {
@@ -61,7 +62,7 @@ private:
    //--- code path (design note 2, GZ_ExperimentTypes.mqh).
    void Execute(const GZ_ExperimentConfig &cfg, const MqlRates &m1[], const MqlRates &m5[],
                 string dataset_id, ENUM_GZ_VALIDATION_STATUS m1_status, ENUM_GZ_VALIDATION_STATUS m5_status,
-                GZ_ExperimentResult &out)
+                GZ_ExperimentResult &out, CGZRunDetail *detail=NULL)
      {
       out.Clear();
       out.id                   = NextId();
@@ -117,6 +118,11 @@ private:
       CGZMetricsEngine metrics_engine(m_logger);
       metrics_engine.Compute(journal_engine, time_engine, session_engine, cfg.session_profile, out.metrics);
 
+      //--- Phase 15.5: OPTIONAL read-only snapshot of per-trade exit/journal
+      //--- detail. NULL (every pre-15.5 caller) = exactly the old behavior.
+      if(detail!=NULL)
+         detail.Capture(exit_engine, journal_engine);
+
       if(out.trade_count==0)
          out.AddWarning("NO_TRADES_PRODUCED");
 
@@ -146,6 +152,15 @@ public:
                                 GZ_ExperimentResult &out)
      {
       Execute(cfg, m1, m5, dataset_id, m1_status, m5_status, out);
+     }
+
+   //--- Phase 15.5: identical to RunSingle() (same Execute() code path) but ALSO
+   //--- fills `detail` with the per-trade exit/journal snapshot (see GZ_RunDetail.mqh).
+   void              RunSingleDetailed(const GZ_ExperimentConfig &cfg, const MqlRates &m1[], const MqlRates &m5[],
+                                       string dataset_id, ENUM_GZ_VALIDATION_STATUS m1_status, ENUM_GZ_VALIDATION_STATUS m5_status,
+                                       GZ_ExperimentResult &out, CGZRunDetail *detail)
+     {
+      Execute(cfg, m1, m5, dataset_id, m1_status, m5_status, out, detail);
      }
 
    //--- SWEEP/GRID/BATCH modes (Roadmap) - architecturally identical

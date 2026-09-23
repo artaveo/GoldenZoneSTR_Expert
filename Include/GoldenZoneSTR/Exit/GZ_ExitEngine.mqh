@@ -160,6 +160,7 @@ public:
       e.tp_price           = tp_price;
       e.initial_risk       = initial_risk;
       e.tp_r_multiple_used = m_cfg.tp_r_multiple;
+      e.entry_time         = trade.entry_time; // Phase 15.5 diagnostic only
 
       int n = ArraySize(m_exits);
       ArrayResize(m_exits, n+1);
@@ -227,6 +228,10 @@ public:
                m_exits[i].be_trigger_time = bar.time;
                m_exits[i].be_new_sl_price = new_sl;
                m_exits[i].sl_price        = new_sl; // active stop moves from this point on
+
+               //--- Phase 15.5 DIAGNOSTICS ONLY (no decision reads these; baseline behavior unchanged)
+               m_exits[i].be_armed_on_entry_bar = (bar.time==m_exits[i].entry_time);
+               m_exits[i].be_arm_bar_retrace    = bullish ? (bar.low<=new_sl) : (bar.high>=new_sl);
 
                if(m_logger!=NULL)
                   m_logger.Info("Exit", StringFormat("Trade #%d BREAK-EVEN armed: new_sl=%.5f at=%s",

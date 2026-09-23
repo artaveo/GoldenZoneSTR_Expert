@@ -162,6 +162,14 @@ struct GZ_TradeExit
    bool                 intrabar_conflict; // design note 3
    double               realized_r;        // design note 5 (0.0 while open)
 
+   //--- Phase 15.5 DIAGNOSTIC-ONLY fields (measurement, never read by any decision):
+   //--- they record how often two known same-candle ambiguities occur, without
+   //--- changing the baseline behavior documented in GZ_ExitEngine.mqh.
+   datetime             entry_time;            // trade's own entry time (copy of GZ_Trade.entry_time)
+   bool                 be_armed_on_entry_bar; // BE armed on the SAME M1 candle the trade entered on
+   bool                 be_arm_bar_retrace;    // on the BE-arming candle, the candle's own range ALSO reached the new
+                                               // BE stop level (true intrabar order unknown; engine applies the new stop from the NEXT candle)
+
    void Clear()
      {
       trade_id            = 0;
@@ -182,6 +190,9 @@ struct GZ_TradeExit
       exit_reason         = GZ_EXIT_NONE;
       intrabar_conflict   = false;
       realized_r          = 0.0;
+      entry_time          = 0;
+      be_armed_on_entry_bar = false;
+      be_arm_bar_retrace  = false;
      }
 
    string DirectionToString() const { return (direction==GZ_LEG_BULLISH) ? "BULLISH" : "BEARISH"; }
