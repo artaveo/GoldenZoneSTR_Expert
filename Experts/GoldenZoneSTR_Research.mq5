@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                    GoldenZoneSTR_Research.mq5    |
 //|                                                                    |
-//| GoldenZone STR - Phase 1+2+3+4+5+6+7+8+9+10+11+12+13 Research EA     |
+//| GoldenZone STR - Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14 Research EA     |
 //| Phase 1: Data Layer + Data Validator + Time Engine                |
 //| Phase 2: M5 Structure Engine (swing/pivot detection)               |
 //| Phase 3: Leg Engine + Break Engine                                 |
@@ -20,6 +20,10 @@
 //|           sweeps via Phase 9's own CGZExperimentRunner, flagging     |
 //|           Narrow Peak / Flat Region / Unstable Zone / Parameter      |
 //|           Sensitive)                                                  |
+//| Phase 14: Monte Carlo Research (seeded trade-order permutation and    |
+//|           return-sequence bootstrap of the closed-trade R series:     |
+//|           drawdown / losing-streak / net-R distributions, equity-path  |
+//|           percentile bands, historical rank; original ledger untouched)|
 //| Phase 13: Walk-Forward Research (rolling Train -> Validate windows;  |
 //|           per-window selection of ONE Phase 12 axis value on the     |
 //|           training slice only, validated out-of-sample, pooled OOS   |
@@ -66,8 +70,8 @@
 //| logic.                                                              |
 //+------------------------------------------------------------------+
 #property copyright "GoldenZone STR"
-#property version   "1.130"
-#property description "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting + Experiment Configuration/Runner + Filter Engine + Filter Combination Research + Robustness/Sensitivity Research + Walk-Forward Research (research/diagnostic only, no trading)"
+#property version   "1.140"
+#property description "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting + Experiment Configuration/Runner + Filter Engine + Filter Combination Research + Robustness/Sensitivity Research + Walk-Forward Research + Monte Carlo Research (research/diagnostic only, no trading)"
 
 #include <GoldenZoneSTR\Core\GZ_Types.mqh>
 #include <GoldenZoneSTR\Core\GZ_Config.mqh>
@@ -107,6 +111,8 @@
 #include <GoldenZoneSTR\Robustness\GZ_RobustnessEngine.mqh>
 #include <GoldenZoneSTR\WalkForward\GZ_WalkForwardTypes.mqh>
 #include <GoldenZoneSTR\WalkForward\GZ_WalkForwardEngine.mqh>
+#include <GoldenZoneSTR\MonteCarlo\GZ_MonteCarloTypes.mqh>
+#include <GoldenZoneSTR\MonteCarlo\GZ_MonteCarloEngine.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
@@ -251,6 +257,18 @@ input int                   InpWfMinTrades                = GZ_DEFAULT_WF_MIN_TR
 input int                   InpWfMinValidationTrades      = GZ_DEFAULT_WF_MIN_VALIDATION_TRADES; // validated windows below this are flagged LOW_VALIDATION_TRADES
 input bool                  InpWfRequireSafeSelection     = true;   // true = an unsafe best (narrow peak / unstable zone, per Phase 12) is NOT taken: falls back to the baseline value
 
+//--- Phase 14: Monte Carlo Research ---------------------------------------------
+//--- Runs BOTH modes (trade-order permutation and return-sequence bootstrap) over
+//--- the realized-R series of the main pipeline's CLOSED trades (the same
+//--- population as the Phase 8 metrics). Own seeded generator (not MathRand), so the
+//--- same seed always reproduces the same numbers; simulation k depends only on
+//--- (seed, k). The historical ledger is never modified. See GZ_MonteCarloTypes.mqh
+//--- design notes 1-7. The Roadmap gives no numeric defaults - conventional ones below.
+input bool                  InpRunPhase14                 = true;   // set false to skip Phase 14 entirely (Phase 1-13 unaffected either way)
+input int                   InpMcSimulations              = GZ_DEFAULT_MC_SIMULATIONS;     // simulations per mode
+input uint                  InpMcSeed                     = GZ_DEFAULT_MC_SEED;            // reproducibility seed (recorded in the report)
+input int                   InpMcMaxSimulations           = GZ_DEFAULT_MC_MAX_SIMULATIONS; // cap: a larger InpMcSimulations is REJECTED, never truncated
+
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
 CGZDataProvider   g_provider(GetPointer(g_logger));
@@ -273,6 +291,7 @@ CGZFilterEngine   g_filter_engine(GetPointer(g_logger));
 CGZFilterComboEngine g_filter_combo_engine(GetPointer(g_logger));
 CGZRobustnessEngine  g_robustness_engine(GetPointer(g_logger));
 CGZWalkForwardEngine g_walkforward_engine(GetPointer(g_logger));
+CGZMonteCarloEngine  g_montecarlo_engine(GetPointer(g_logger));
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;
@@ -327,6 +346,11 @@ GZ_RobustnessSweepResult g_robustness_results[]; // one per swept axis (InpRobus
 //--- Phase 13 diagnostic result (one walk-forward run over the FULL loaded range)
 bool                     g_phase13_ran = false;
 GZ_WalkForwardResult     g_wf_result;
+
+//--- Phase 14 diagnostic results (one Monte Carlo run per mode, over the main pipeline's closed-trade R series)
+bool                     g_phase14_ran = false;
+GZ_McResult              g_mc_order;      // TRADE_ORDER
+GZ_McResult              g_mc_bootstrap;  // RETURN_SEQUENCE
 
 //+------------------------------------------------------------------+
 //| Phase 11 helper: index of the combo with the highest                |
@@ -397,8 +421,8 @@ void BuildAndEmitReport()
   {
    string report = "";
    report += "===================================================\n";
-   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 + PHASE 6 + PHASE 7 + PHASE 8 + PHASE 9 + PHASE 10 + PHASE 11 + PHASE 12 + PHASE 13 COMPLETION REPORT\n";
-   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + " | " + GZ_PROJECT_VERSION_P6 + " | " + GZ_PROJECT_VERSION_P7 + " | " + GZ_PROJECT_VERSION_P8 + " | " + GZ_PROJECT_VERSION_P9 + " | " + GZ_PROJECT_VERSION_P10 + " | " + GZ_PROJECT_VERSION_P11 + " | " + GZ_PROJECT_VERSION_P12 + " | " + GZ_PROJECT_VERSION_P13 + "\n";
+   report += " GoldenZone STR - PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4 + PHASE 5 + PHASE 6 + PHASE 7 + PHASE 8 + PHASE 9 + PHASE 10 + PHASE 11 + PHASE 12 + PHASE 13 + PHASE 14 COMPLETION REPORT\n";
+   report += " Spec version: " + GZ_PROJECT_VERSION + " | " + GZ_PROJECT_VERSION_P2 + " | " + GZ_PROJECT_VERSION_P3 + " | " + GZ_PROJECT_VERSION_P4 + " | " + GZ_PROJECT_VERSION_P5 + " | " + GZ_PROJECT_VERSION_P6 + " | " + GZ_PROJECT_VERSION_P7 + " | " + GZ_PROJECT_VERSION_P8 + " | " + GZ_PROJECT_VERSION_P9 + " | " + GZ_PROJECT_VERSION_P10 + " | " + GZ_PROJECT_VERSION_P11 + " | " + GZ_PROJECT_VERSION_P12 + " | " + GZ_PROJECT_VERSION_P13 + " | " + GZ_PROJECT_VERSION_P14 + "\n";
    report += " Generated (terminal local time, diagnostic only): " + TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS) + "\n";
    report += "===================================================\n\n";
 
@@ -417,6 +441,7 @@ void BuildAndEmitReport()
    report += "Phase 11 files: GZ_FilterComboTypes, GZ_FilterComboEngine\n";
    report += "Phase 12 files: GZ_RobustnessTypes, GZ_RobustnessEngine\n";
    report += "Phase 13 files: GZ_WalkForwardTypes, GZ_WalkForwardEngine\n";
+   report += "Phase 14 files: GZ_MonteCarloTypes, GZ_MonteCarloEngine\n";
    report += "Interfaces: GZ_TimeContext, CGZDatasetInfo (Phase 1), GZ_Swing / CGZSwingEngine (Phase 2),\n";
    report += "            GZ_Leg / CGZLegEngine / CGZBreakEngine (Phase 3), GZ_Setup / CGZFibEngine /\n";
    report += "            CGZSetupStateMachine (Phase 4), GZ_Trade / CGZEntryEngine / CGZTradeSimulator\n";
@@ -798,7 +823,60 @@ void BuildAndEmitReport()
               EnumToString(InpWfAxis), InpWfTrainDays, InpWfValidateDays, InpWfStepDays, InpWfMinTrades,
               InpWfMinValidationTrades, InpWfRequireSafeSelection?"true":"false");
 
-   report += "--- Automated Test Results (T01-T142: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13) ---\n";
+   report += "--- Phase 14: Monte Carlo Research ---\n";
+   if(g_phase14_ran)
+     {
+      for(int mi=0; mi<2; mi++)
+        {
+         GZ_McResult mc;
+         if(mi==0) mc = g_mc_order; else mc = g_mc_bootstrap;
+         report += StringFormat("%s mode=%s status=%s seed=%u simulations=%d/%d closed trades=%d\n",
+                    mc.id, GZMcModeToString(mc.mode), GZMcStatusToString(mc.status), mc.seed,
+                    mc.simulations_run, mc.simulations_requested, mc.trade_count);
+         if(mc.status==GZ_MC_OK)
+           {
+            report += StringFormat("  Historical (original order): net_r=%.3f max_drawdown=%.3fR max_losing_streak=%d\n",
+                       mc.hist_net_r, mc.hist_max_dd, mc.hist_max_losing_streak);
+            report += "  Distribution across simulations:      mean     min     p05     p25  median     p75     p95     max (worst sim #)\n";
+            report += StringFormat("    net R                          %8.3f%8.3f%8.3f%8.3f%8.3f%8.3f%8.3f%8.3f (min sim #%d)\n",
+                       mc.net_r.mean, mc.net_r.minimum, mc.net_r.p05, mc.net_r.p25, mc.net_r.median, mc.net_r.p75, mc.net_r.p95, mc.net_r.maximum, mc.net_r.min_sim_index);
+            report += StringFormat("    max drawdown (R)               %8.3f%8.3f%8.3f%8.3f%8.3f%8.3f%8.3f%8.3f (max sim #%d)\n",
+                       mc.max_dd.mean, mc.max_dd.minimum, mc.max_dd.p05, mc.max_dd.p25, mc.max_dd.median, mc.max_dd.p75, mc.max_dd.p95, mc.max_dd.maximum, mc.max_dd.max_sim_index);
+            report += StringFormat("    max losing streak (trades)     %8.2f%8.0f%8.1f%8.1f%8.1f%8.1f%8.1f%8.0f (max sim #%d)\n",
+                       mc.max_losing_streak.mean, mc.max_losing_streak.minimum, mc.max_losing_streak.p05, mc.max_losing_streak.p25,
+                       mc.max_losing_streak.median, mc.max_losing_streak.p75, mc.max_losing_streak.p95, mc.max_losing_streak.maximum, mc.max_losing_streak.max_sim_index);
+            report += StringFormat("  Worst simulated cases: max drawdown %.3fR (sim #%d), losing streak %.0f trades (sim #%d), net R %.3f (sim #%d)\n",
+                       mc.max_dd.maximum, mc.max_dd.max_sim_index, mc.max_losing_streak.maximum, mc.max_losing_streak.max_sim_index,
+                       mc.net_r.minimum, mc.net_r.min_sim_index);
+            report += StringFormat("  Historical rank: %.1f%% of simulations had a max drawdown <= the historical %.3fR; %.1f%% had a losing streak <= the historical %d. (near 100%% = the actual order was unusually BAD, near 0%% = unusually GOOD)\n",
+                       mc.hist_dd_rank*100.0, mc.hist_max_dd, mc.hist_streak_rank*100.0, mc.hist_max_losing_streak);
+            report += StringFormat("  Share of simulations ending below 0R: %.1f%%\n", mc.frac_net_r_negative*100.0);
+            report += "  Equity-path variation (cumulative R after N trades):  trades  historical     p05     p50     p95\n";
+            for(int ci=0; ci<mc.checkpoint_count; ci++)
+               report += StringFormat("                                                        %6d %10.3f %8.3f %8.3f %8.3f\n",
+                          mc.checkpoint_trades[ci], mc.hist_equity[ci], mc.eq_p05[ci], mc.eq_p50[ci], mc.eq_p95[ci]);
+           }
+         for(int ni=0; ni<mc.note_count; ni++)
+            report += StringFormat("  note: %s\n", mc.notes[ni]);
+        }
+      //--- cross-check: the MC's own drawdown/streak formulas vs Phase 8's, on the SAME series
+      if(g_mc_order.status==GZ_MC_OK)
+        {
+         bool dd_ok = (MathAbs(g_mc_order.hist_max_dd - g_metrics.risk.max_drawdown_r)<0.0001);
+         bool st_ok = (g_mc_order.hist_max_losing_streak == g_metrics.risk.max_losing_streak);
+         report += StringFormat("Consistency with Phase 8 on the same series: max drawdown MC=%.3fR Phase8=%.3fR (%s), max losing streak MC=%d Phase8=%d (%s)\n",
+                    g_mc_order.hist_max_dd, g_metrics.risk.max_drawdown_r, dd_ok?"match":"MISMATCH",
+                    g_mc_order.hist_max_losing_streak, g_metrics.risk.max_losing_streak, st_ok?"match":"MISMATCH");
+        }
+      report += "Both modes assume trades are exchangeable (no serial dependence, no regime effects) - a shuffle cannot\n";
+      report += "reveal clustering that the real sequence may contain. The historical ledger was not modified; results are\n";
+      report += "research diagnostics on the whole loaded range, not a forecast and not a trading signal.\n";
+     }
+   else
+      report += "Skipped (InpRunPhase14=false).\n";
+   report += StringFormat("InpMcSimulations=%d InpMcSeed=%u InpMcMaxSimulations=%d.\n\n", InpMcSimulations, InpMcSeed, InpMcMaxSimulations);
+
+   report += "--- Automated Test Results (T01-T158: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13, T143-T158 Phase 14) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -809,14 +887,16 @@ void BuildAndEmitReport()
    report += StringFormat("\nTOTAL: %d PASS / %d FAIL (of %d)\n\n", pass, fail, g_harness.ResultCount());
 
    report += "--- Known Limitations / Deferred Work ---\n";
-   report += "DEFERRED: Monte Carlo (Phase 14), Final OOS (Phase 15), Research Freeze (Phase 16), Future\n";
-   report += "Execution Adapter (Phase 17) - not implemented, by design. Phase 11 (Filter Combination Research),\n";
-   report += "Phase 12 (Robustness/Sensitivity Research) and Phase 13 (Walk-Forward Research) ARE now\n";
-   report += "implemented (see their sections above). Phase 13 selects ONE axis value per window (single-axis\n";
-   report += "walk-forward); multi-axis selection and anchored/expanding training windows are DEFERRED, not\n";
-   report += "silently expanded (GZ_WalkForwardTypes.mqh design notes 1 and 3). No date range has been reserved as the\n";
-   report += "Final OOS the Roadmap requires (Phase 15) - walk-forward validation windows are NOT that Final OOS; they\n";
-   report += "are ordinary Development/Validation data, and this run used the whole loaded range.\n";
+   report += "DEFERRED: Final OOS (Phase 15), Research Freeze (Phase 16), Future Execution Adapter (Phase 17) -\n";
+   report += "not implemented, by design. Phase 11 (Filter Combination Research), Phase 12 (Robustness/Sensitivity\n";
+   report += "Research), Phase 13 (Walk-Forward Research) and Phase 14 (Monte Carlo Research) ARE now implemented (see\n";
+   report += "their sections above). Phase 13 selects ONE axis value per window (single-axis walk-forward);\n";
+   report += "multi-axis selection and anchored/expanding training windows are DEFERRED, not silently expanded\n";
+   report += "(GZ_WalkForwardTypes.mqh design notes 1 and 3). Phase 14 randomizes the main pipeline's whole closed-trade\n";
+   report += "R series; Monte Carlo over the walk-forward pooled out-of-sample trades is DEFERRED (Phase 13 keeps only\n";
+   report += "compact per-window statistics, not a trade list). No date range has been reserved as the Final OOS the\n";
+   report += "Roadmap requires (Phase 15) - walk-forward validation windows and this Monte Carlo run are NOT that Final\n";
+   report += "OOS; they are ordinary Development/Validation data over the whole loaded range.\n";
    report += "Phase 12's axis sweeps demonstrate 2 axes by default\n";
    report += "(InpRobustnessAxis1/2); the other 9 defined in ENUM_GZ_ROBUSTNESS_PARAM (GZ_RobustnessTypes.mqh)\n";
    report += "are equally usable by changing those inputs - no code change needed to sweep a different axis.\n";
@@ -855,28 +935,28 @@ void BuildAndEmitReport()
    string final_status;
    bool data_ok = (g_info_m1.total_bars>0 && g_info_m5.total_bars>0);
    if(fail>0)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13 BLOCKED (automated test failure - see detail above)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14 BLOCKED (automated test failure - see detail above)";
    else if(!data_ok)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13 BLOCKED (historical data unavailable for requested symbol/range)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14 BLOCKED (historical data unavailable for requested symbol/range)";
    else if(!InpBrokerOffsetKnown)
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13 BLOCKED (broker UTC offset not yet verified by user)";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14 BLOCKED (broker UTC offset not yet verified by user)";
    else
       // This report is only ever printed by the EA's own OnInit() running
       // inside MT5, so reaching this branch already proves compile+attach
       // succeeded - there is nothing further to "wait" on.
-      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13 COMPLETE";
+      final_status = "PHASE 1+2+3+4+5+6+7+8+9+10+11+12+13+14 COMPLETE";
 
    report += "--- Final Status ---\n" + final_status + "\n";
    report += "===================================================\n";
 
    PrintReportChunked(report);
 
-   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   int handle = FileOpen("GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_14_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle!=INVALID_HANDLE)
      {
       FileWriteString(handle, report);
       FileClose(handle);
-      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_Report.txt");
+      Print("[GZ] Report written to Common\\Files\\GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_14_Report.txt");
      }
    else
      {
@@ -907,7 +987,7 @@ int OnInit()
       InpBrokerOffsetKnown ? "true" : "false"));
 
    g_logger.EnableVerbose(InpVerboseLogging);
-   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12+13 starting up (research/diagnostic mode - no trading).");
+   g_logger.Info("Init", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14 starting up (research/diagnostic mode - no trading).");
 
    //--- Time engine configuration -----------------------------------------
    GZ_TimeConfig time_cfg;
@@ -1524,13 +1604,30 @@ int OnInit()
    else
       g_logger.Warning("Leg", "No M5 data loaded - leg/break/setup/entry/exit detection skipped.");
 
+   //--- Phase 14: Monte Carlo Research - reads the main pipeline's journal
+   //--- (closed trades only, journal order) into a plain R series; the journal
+   //--- itself is never modified. Both randomization modes, same seed.
+   if(InpRunPhase14)
+     {
+      g_montecarlo_engine.SetMaxSimulations(InpMcMaxSimulations);
+      double mc_series[];
+      int mc_n = g_montecarlo_engine.BuildRSeries(g_journal_engine, mc_series);
+      g_montecarlo_engine.Run(GZ_MC_TRADE_ORDER,     mc_series, InpMcSimulations, InpMcSeed, g_mc_order);
+      g_montecarlo_engine.Run(GZ_MC_RETURN_SEQUENCE, mc_series, InpMcSimulations, InpMcSeed, g_mc_bootstrap);
+      g_phase14_ran = true;
+      g_logger.Info("MonteCarlo", StringFormat("Phase 14: closed-trade R series n=%d | %s=%s | %s=%s",
+                    mc_n, g_mc_order.id, GZMcStatusToString(g_mc_order.status), g_mc_bootstrap.id, GZMcStatusToString(g_mc_bootstrap.status)));
+     }
+   else
+      g_logger.Info("MonteCarlo", "Phase 14: skipped (InpRunPhase14=false).");
+
    //--- Run deterministic automated test harness (synthetic data) -------------
    g_harness.RunAll();
 
    //--- Report ------------------------------------------------------------------
    BuildAndEmitReport();
 
-   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13 diagnostics complete. STOPPING - not proceeding to Phase 14 (Monte Carlo Research) logic.");
+   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14 diagnostics complete. STOPPING - not proceeding to Phase 15 (Final OOS) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.
@@ -1542,7 +1639,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12+13 EA removed.");
+   g_logger.Info("Deinit", "GoldenZone STR Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14 EA removed.");
   }
 
 //+------------------------------------------------------------------+

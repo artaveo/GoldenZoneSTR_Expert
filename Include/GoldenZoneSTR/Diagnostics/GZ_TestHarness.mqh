@@ -14,6 +14,7 @@
 //| Phase 11 (T107-T116): Filter Combination Research                  |
 //| Phase 12 (T117-T127): Robustness + Sensitivity Research            |
 //| Phase 13 (T128-T142): Walk-Forward Research                        |
+//| Phase 14 (T143-T158): Monte Carlo Research                         |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -61,6 +62,8 @@
 #include "..\Robustness\GZ_RobustnessEngine.mqh"
 #include "..\WalkForward\GZ_WalkForwardTypes.mqh"
 #include "..\WalkForward\GZ_WalkForwardEngine.mqh"
+#include "..\MonteCarlo\GZ_MonteCarloTypes.mqh"
+#include "..\MonteCarlo\GZ_MonteCarloEngine.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -4851,6 +4854,409 @@ public:
       AddResult("T142", ok, StringFormat("no_m5=%s no_candidates=%s too_short=%s", g1?"ok":"FAIL", g2?"ok":"FAIL", g3?"ok":"FAIL"));
      }
 
+
+   //+------------------------------------------------------------------+
+   //| Phase 14 (T143-T158): Monte Carlo Research                         |
+   //| Pure numeric tests - hand-built R series, no market data, no       |
+   //| simulation pipeline. Exact-value tests use hand-computed numbers   |
+   //| (T143's PRNG values were computed independently); the statistical  |
+   //| tests (T157/T158) use bounds >= 5 standard deviations wide, so     |
+   //| they cannot fail by chance - only by a biased shuffle/generator.   |
+   //+------------------------------------------------------------------+
+
+   //--- helper: ascending-sorted copy of a series
+   void McSortedCopy(const double &src[], int n, double &dst[])
+     {
+      ArrayResize(dst, n);
+      for(int i=0;i<n;i++) dst[i] = src[i];
+      ArraySort(dst);
+     }
+
+   //--- T143: PRNG pinned to exact, independently computed values (seed
+   //--- 12345). SeedForSim(sim 0)=2114570921, SeedForSim(sim 7)=1368268434;
+   //--- after the 4 discarded draws, sim 0's next five MINSTD states are
+   //--- 431512701,1105697718,1723466687,2091447044,886531807 which map (m=10)
+   //--- to indices 2,5,8,9,4; sim 7's first two states 1106464690, 91266453
+   //--- -> indices 5,0. A change in the generator, seeding or index mapping
+   //--- (or a platform arithmetic difference) shows up here first. ----------
+   void T143_PrngKnownSequence()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+      bool ok = (eng.SeedForSim(12345, 0)==2114570921) && (eng.SeedForSim(12345, 7)==1368268434);
+
+      ulong s = eng.SeedForSim(12345, 0);
+      for(int d=0; d<4; d++) s = eng.AdvanceState(s);
+      ulong exp_state[5] = {431512701, 1105697718, 1723466687, 2091447044, 886531807};
+      int   exp_idx[5]   = {2, 5, 8, 9, 4};
+      for(int i=0; i<5 && ok; i++)
+        {
+         s = eng.AdvanceState(s);
+         ok = (s==exp_state[i]) && (eng.IndexFromState(s, 10)==exp_idx[i]);
+        }
+
+      ulong s7 = eng.SeedForSim(12345, 7);
+      for(int d=0; d<4; d++) s7 = eng.AdvanceState(s7);
+      s7 = eng.AdvanceState(s7);
+      bool a7 = (s7==1106464690) && (eng.IndexFromState(s7,10)==5);
+      s7 = eng.AdvanceState(s7);
+      a7 = a7 && (s7==91266453) && (eng.IndexFromState(s7,10)==0);
+
+      ok = ok && a7;
+      AddResult("T143", ok, StringFormat("seed_sim0=%s seed_sim7=%s last_state=%s",
+                IntegerToString((long)eng.SeedForSim(12345,0)), IntegerToString((long)eng.SeedForSim(12345,7)), IntegerToString((long)s)));
+     }
+
+   //--- T144: Percentile() - linear interpolation at position p*(n-1).
+   //--- {1,2,3,4,5}: p0=1 p25=2 p50=3 p95=4.8 p100=5; {10,20} p50=15; {7} -> 7.
+   void T144_PercentileKnownValues()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+      double a[5] = {1,2,3,4,5};
+      double b[2] = {10,20};
+      double c[1] = {7};
+      bool ok = (MathAbs(eng.Percentile(a,5,0.0)-1.0)<0.00001) && (MathAbs(eng.Percentile(a,5,0.25)-2.0)<0.00001) &&
+                (MathAbs(eng.Percentile(a,5,0.5)-3.0)<0.00001) && (MathAbs(eng.Percentile(a,5,0.95)-4.8)<0.00001) &&
+                (MathAbs(eng.Percentile(a,5,1.0)-5.0)<0.00001) && (MathAbs(eng.Percentile(b,2,0.5)-15.0)<0.00001) &&
+                (MathAbs(eng.Percentile(c,1,0.5)-7.0)<0.00001);
+      AddResult("T144", ok, StringFormat("p95={1..5}=%.4f p50={10,20}=%.2f", eng.Percentile(a,5,0.95), eng.Percentile(b,2,0.5)));
+     }
+
+   //--- T145: ComputeStats() known answers, Phase 8 conventions.
+   //--- [2,-1,-1,1,-1,-1,-1,2]: equity 2,1,0,1,0,-1,-2,0 -> net 0, peak 2,
+   //--- max DD 4, longest losing run 3. [-1,-1,0,-1]: the breakeven ENDS the
+   //--- streak -> max streak 2, net -3, max DD 3. Empty -> all zero. --------
+   void T145_ComputeStatsKnownAnswers()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+      double a[8] = {2,-1,-1,1,-1,-1,-1,2};
+      double na, da; int sa;
+      eng.ComputeStats(a, 8, na, da, sa);
+
+      double b[4] = {-1,-1,0,-1};
+      double nb, db; int sb;
+      eng.ComputeStats(b, 4, nb, db, sb);
+
+      double e[1] = {0};
+      double ne, de; int se;
+      eng.ComputeStats(e, 0, ne, de, se);
+
+      bool ok = (MathAbs(na)<0.00001) && (MathAbs(da-4.0)<0.00001) && (sa==3) &&
+                (MathAbs(nb+3.0)<0.00001) && (MathAbs(db-3.0)<0.00001) && (sb==2) &&
+                (MathAbs(ne)<0.00001) && (MathAbs(de)<0.00001) && (se==0);
+      AddResult("T145", ok, StringFormat("A: net=%.1f dd=%.1f streak=%d | B: net=%.1f dd=%.1f streak=%d", na, da, sa, nb, db, sb));
+     }
+
+   //--- T146: Summarize() known numbers on {5,1,3,2,4} (simulation order):
+   //--- count 5, mean 3, min 1 (sim idx 1), max 5 (sim idx 0), p05 1.2,
+   //--- p25 2, median 3, p75 4, p95 4.8. Single value {7} -> everything 7. --
+   void T146_SummarizeKnownNumbers()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+      double v[5] = {5,1,3,2,4};
+      GZ_McDistribution d; d.Clear();
+      eng.Summarize(v, d);
+
+      double w[1] = {7};
+      GZ_McDistribution d1; d1.Clear();
+      eng.Summarize(w, d1);
+
+      bool ok = (d.count==5) && (MathAbs(d.mean-3.0)<0.00001) && (MathAbs(d.minimum-1.0)<0.00001) && (d.min_sim_index==1) &&
+                (MathAbs(d.maximum-5.0)<0.00001) && (d.max_sim_index==0) && (MathAbs(d.p05-1.2)<0.00001) &&
+                (MathAbs(d.p25-2.0)<0.00001) && (MathAbs(d.median-3.0)<0.00001) && (MathAbs(d.p75-4.0)<0.00001) &&
+                (MathAbs(d.p95-4.8)<0.00001) &&
+                (d1.count==1) && (MathAbs(d1.median-7.0)<0.00001) && (MathAbs(d1.p05-7.0)<0.00001) && (MathAbs(d1.maximum-7.0)<0.00001);
+      AddResult("T146", ok, StringFormat("mean=%.2f min=%.1f@%d max=%.1f@%d p05=%.2f p95=%.2f", d.mean, d.minimum, d.min_sim_index, d.maximum, d.max_sim_index, d.p05, d.p95));
+     }
+
+   //--- T147: TRADE_ORDER simulations are PERMUTATIONS - for 50 simulations
+   //--- the sorted output equals the sorted original (same multiset, so the
+   //--- same net R), and at least one simulation actually differs in ORDER
+   //--- from the original. ---------------------------------------------------
+   void T147_TradeOrderIsPermutation()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+      double orig[8] = {3,-1,-1,2,0.5,-2,1,1};
+      double so[]; McSortedCopy(orig, 8, so);
+
+      bool all_perm = true, some_reordered = false;
+      double seq[], ss[];
+      for(int k=0; k<50; k++)
+        {
+         eng.GenerateSequence(GZ_MC_TRADE_ORDER, orig, 8, 777, k, seq);
+         McSortedCopy(seq, 8, ss);
+         for(int i=0;i<8;i++)
+            if(MathAbs(ss[i]-so[i])>0.0000001) all_perm = false;
+         for(int i=0;i<8;i++)
+            if(MathAbs(seq[i]-orig[i])>0.0000001) some_reordered = true;
+        }
+      AddResult("T147", all_perm && some_reordered, StringFormat("all_permutations=%s some_reordered=%s (50 sims)", all_perm?"true":"false", some_reordered?"true":"false"));
+     }
+
+   //--- T148: RETURN_SEQUENCE simulations are BOOTSTRAPS - every drawn value
+   //--- is one of the original values, and over 100 simulations (a) net R
+   //--- differs from the original's in at least one and (b) at least one
+   //--- simulation is NOT a permutation of the original (a repeated draw). --
+   void T148_ReturnSequenceIsBootstrap()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+      double orig[8] = {3,-1,-1,2,0.5,-2,1,1};
+      double so[]; McSortedCopy(orig, 8, so);
+      double orig_net = 3-1-1+2+0.5-2+1+1;
+
+      bool all_members = true, net_varies = false, not_perm = false;
+      double seq[], ss[];
+      for(int k=0; k<100; k++)
+        {
+         eng.GenerateSequence(GZ_MC_RETURN_SEQUENCE, orig, 8, 777, k, seq);
+         double net = 0.0;
+         for(int i=0;i<8;i++)
+           {
+            net += seq[i];
+            bool member = false;
+            for(int j=0;j<8;j++) if(MathAbs(seq[i]-orig[j])<0.0000001) member = true;
+            if(!member) all_members = false;
+           }
+         if(MathAbs(net-orig_net)>0.0000001) net_varies = true;
+         McSortedCopy(seq, 8, ss);
+         for(int i=0;i<8;i++) if(MathAbs(ss[i]-so[i])>0.0000001) not_perm = true;
+        }
+      AddResult("T148", all_members && net_varies && not_perm, StringFormat("members_only=%s net_varies=%s some_not_permutation=%s",
+                all_members?"true":"false", net_varies?"true":"false", not_perm?"true":"false"));
+     }
+
+   //--- T149: determinism and seed sensitivity. Two INDEPENDENT engines, same
+   //--- series/seed/sims -> field-for-field identical results (id included -
+   //--- both start at MC_000001); a different seed changes the result. -------
+   void T149_DeterminismAndSeedSensitivity()
+     {
+      double r[12] = {2,-1,-1,2,-1,1,-1,-1,2,-1,3,-1};
+
+      CGZMonteCarloEngine engA(m_logger); GZ_McResult a;
+      engA.Run(GZ_MC_RETURN_SEQUENCE, r, 300, 4242, a);
+      CGZMonteCarloEngine engB(m_logger); GZ_McResult b;
+      engB.Run(GZ_MC_RETURN_SEQUENCE, r, 300, 4242, b);
+
+      bool same = (a.id==b.id) && (a.status==GZ_MC_OK) && (b.status==GZ_MC_OK) &&
+                  (MathAbs(a.net_r.mean-b.net_r.mean)<0.0000001) && (MathAbs(a.net_r.median-b.net_r.median)<0.0000001) &&
+                  (MathAbs(a.max_dd.p95-b.max_dd.p95)<0.0000001) && (MathAbs(a.max_dd.maximum-b.max_dd.maximum)<0.0000001) &&
+                  (a.max_dd.max_sim_index==b.max_dd.max_sim_index) &&
+                  (MathAbs(a.max_losing_streak.maximum-b.max_losing_streak.maximum)<0.0000001) &&
+                  (MathAbs(a.hist_dd_rank-b.hist_dd_rank)<0.0000001) && (a.checkpoint_count==b.checkpoint_count);
+      for(int c=0; c<a.checkpoint_count && same; c++)
+         same = (MathAbs(a.eq_p05[c]-b.eq_p05[c])<0.0000001) && (MathAbs(a.eq_p50[c]-b.eq_p50[c])<0.0000001) && (MathAbs(a.eq_p95[c]-b.eq_p95[c])<0.0000001);
+
+      CGZMonteCarloEngine engC(m_logger); GZ_McResult rc;
+      engC.Run(GZ_MC_RETURN_SEQUENCE, r, 300, 999, rc);
+      bool differs = (MathAbs(a.net_r.mean-rc.net_r.mean)>0.0000001) || (MathAbs(a.max_dd.p95-rc.max_dd.p95)>0.0000001) ||
+                     (a.max_dd.max_sim_index!=rc.max_dd.max_sim_index);
+
+      AddResult("T149", same && differs, StringFormat("identical_same_seed=%s differs_other_seed=%s idA=%s idB=%s", same?"true":"false", differs?"true":"false", a.id, b.id));
+     }
+
+   //--- T150: simulation k depends ONLY on (seed, k) - never on how many
+   //--- simulations are requested: the path for sim 3 is identical from two
+   //--- independent engines, differs from sim 4's, and differs under another
+   //--- seed. (GenerateSequence() has no simulation-count input at all.) ----
+   void T150_SimulationIndependentOfCount()
+     {
+      double r[10] = {1,2,3,4,5,6,7,8,9,10};
+      CGZMonteCarloEngine e1(m_logger), e2(m_logger);
+      double s3a[], s3b[], s4[], s3o[];
+      e1.GenerateSequence(GZ_MC_TRADE_ORDER, r, 10, 5, 3, s3a);
+      e2.GenerateSequence(GZ_MC_TRADE_ORDER, r, 10, 5, 3, s3b);
+      e1.GenerateSequence(GZ_MC_TRADE_ORDER, r, 10, 5, 4, s4);
+      e1.GenerateSequence(GZ_MC_TRADE_ORDER, r, 10, 6, 3, s3o);
+      bool same = true, diff4 = false, diffseed = false;
+      for(int i=0;i<10;i++)
+        {
+         if(MathAbs(s3a[i]-s3b[i])>0.0000001) same = false;
+         if(MathAbs(s3a[i]-s4[i])>0.0000001) diff4 = true;
+         if(MathAbs(s3a[i]-s3o[i])>0.0000001) diffseed = true;
+        }
+      AddResult("T150", same && diff4 && diffseed, StringFormat("same=%s differs_from_sim4=%s differs_under_other_seed=%s", same?"true":"false", diff4?"true":"false", diffseed?"true":"false"));
+     }
+
+   //--- T151: the ORIGINAL series is never modified (Roadmap: original ledger
+   //--- must not change) - snapshot, run BOTH modes, compare element for
+   //--- element; and the historical reference values in the result equal
+   //--- ComputeStats() of that untouched series. ----------------------------
+   void T151_OriginalSeriesUntouched()
+     {
+      double r[10] = {1.5,-1,-1,2,-0.5,0,3,-1,-1,2};
+      double snap[10];
+      for(int i=0;i<10;i++) snap[i] = r[i];
+
+      CGZMonteCarloEngine eng(m_logger);
+      GZ_McResult a, b;
+      eng.Run(GZ_MC_TRADE_ORDER, r, 200, 11, a);
+      eng.Run(GZ_MC_RETURN_SEQUENCE, r, 200, 11, b);
+
+      bool unchanged = true;
+      for(int i=0;i<10;i++) if(MathAbs(r[i]-snap[i])>0.0000000001) unchanged = false;
+
+      double net, dd; int st;
+      eng.ComputeStats(snap, 10, net, dd, st);
+      bool hist_ok = (MathAbs(a.hist_net_r-net)<0.00001) && (MathAbs(a.hist_max_dd-dd)<0.00001) && (a.hist_max_losing_streak==st) &&
+                     (MathAbs(b.hist_net_r-net)<0.00001) && (MathAbs(b.hist_max_dd-dd)<0.00001) && (b.hist_max_losing_streak==st);
+      AddResult("T151", unchanged && hist_ok, StringFormat("series_unchanged=%s hist_matches=%s (hist net=%.2f dd=%.2f streak=%d)", unchanged?"true":"false", hist_ok?"true":"false", net, dd, st));
+     }
+
+   //--- T152: guards - each leaves a well-formed result with NOTHING
+   //--- simulated. sims=0 -> REJECTED_INVALID_SIMS; sims above the cap (set to
+   //--- 50; 51 requested) -> REJECTED_TOO_MANY_SIMS (never truncated); one
+   //--- trade -> INSUFFICIENT_TRADES. Exactly the cap (50) still runs. IDs
+   //--- increment on every call. ----------------------------------------------
+   void T152_Guards()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+      eng.SetMaxSimulations(50);
+      double r[5] = {1,-1,2,-1,1};
+      double one[1] = {1};
+
+      GZ_McResult a, b, c, d;
+      ENUM_GZ_MC_STATUS sa = eng.Run(GZ_MC_TRADE_ORDER, r, 0,  1, a);
+      ENUM_GZ_MC_STATUS sb = eng.Run(GZ_MC_TRADE_ORDER, r, 51, 1, b);
+      ENUM_GZ_MC_STATUS sc = eng.Run(GZ_MC_TRADE_ORDER, one, 10, 1, c);
+      ENUM_GZ_MC_STATUS sd = eng.Run(GZ_MC_TRADE_ORDER, r, 50, 1, d);
+
+      bool ok = (sa==GZ_MC_REJECTED_INVALID_SIMS) && (sb==GZ_MC_REJECTED_TOO_MANY_SIMS) && (sc==GZ_MC_INSUFFICIENT_TRADES) && (sd==GZ_MC_OK) &&
+                (a.simulations_run==0) && (b.simulations_run==0) && (c.simulations_run==0) && (d.simulations_run==50) &&
+                (b.net_r.count==0) && (b.note_count>0) && (a.id=="MC_000001") && (d.id=="MC_000004");
+      AddResult("T152", ok, StringFormat("%s / %s / %s / %s ids=%s..%s", GZMcStatusToString(sa), GZMcStatusToString(sb), GZMcStatusToString(sc), GZMcStatusToString(sd), a.id, d.id));
+     }
+
+   //--- T153: shuffle of a KNOWN worst-case order. Five +1 then five -1: the
+   //--- historical order has max DD 5 and losing streak 5 - the WORST any
+   //--- order of these trades can be, so every TRADE_ORDER simulation is <=
+   //--- that: hist_dd_rank == hist_streak_rank == 1.0, no simulation exceeds
+   //--- 5, net R is 0 in EVERY simulation (min==max==0, P(net<0)=0), and the
+   //--- equity bands are consistent (p05<=p50<=p95; last checkpoint's p05==
+   //--- p95==0 = the final equity; historical equity after 5 trades = 5). ----
+   void T153_TradeOrderWorstCaseHistory()
+     {
+      double r[10] = {1,1,1,1,1,-1,-1,-1,-1,-1};
+      CGZMonteCarloEngine eng(m_logger);
+      GZ_McResult a;
+      eng.Run(GZ_MC_TRADE_ORDER, r, 300, 2026, a);
+
+      bool ok = (a.status==GZ_MC_OK) && (MathAbs(a.hist_max_dd-5.0)<0.00001) && (a.hist_max_losing_streak==5) &&
+                (MathAbs(a.hist_dd_rank-1.0)<0.00001) && (MathAbs(a.hist_streak_rank-1.0)<0.00001) &&
+                (a.max_dd.maximum<=5.0000001) && (a.max_losing_streak.maximum<=5.0000001) &&
+                (MathAbs(a.net_r.minimum)<0.00001) && (MathAbs(a.net_r.maximum)<0.00001) && (MathAbs(a.frac_net_r_negative)<0.00001) &&
+                (a.checkpoint_count==10) && (a.checkpoint_trades[0]==1) && (a.checkpoint_trades[9]==10) &&
+                (MathAbs(a.hist_equity[4]-5.0)<0.00001) && (MathAbs(a.hist_equity[9])<0.00001) &&
+                (MathAbs(a.eq_p05[9])<0.00001) && (MathAbs(a.eq_p95[9])<0.00001);
+      for(int c=0; c<a.checkpoint_count && ok; c++)
+         ok = (a.eq_p05[c]<=a.eq_p50[c]+0.0000001) && (a.eq_p50[c]<=a.eq_p95[c]+0.0000001);
+      AddResult("T153", ok, StringFormat("hist_dd=%.1f dd_rank=%.3f streak_rank=%.3f sim_max_dd=%.1f net_r=[%.2f..%.2f]",
+                a.hist_max_dd, a.hist_dd_rank, a.hist_streak_rank, a.max_dd.maximum, a.net_r.minimum, a.net_r.maximum));
+     }
+
+   //--- T154: checkpoint layout. n=100 -> 20 checkpoints at trades 5,10,...,
+   //--- 100; n=7 -> 7 checkpoints (one per trade); n=25 -> 20 strictly
+   //--- increasing checkpoints ending exactly at trade 25. -------------------
+   void T154_CheckpointLayout()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+
+      double r100[]; ArrayResize(r100,100); for(int i=0;i<100;i++) r100[i] = (i%3==0) ? -1.0 : 1.0;
+      GZ_McResult a; eng.Run(GZ_MC_TRADE_ORDER, r100, 5, 1, a);
+      bool a_ok = (a.checkpoint_count==20);
+      for(int c=0; c<20 && a_ok; c++) a_ok = (a.checkpoint_trades[c]==(c+1)*5);
+
+      double r7[]; ArrayResize(r7,7); for(int i=0;i<7;i++) r7[i] = 1.0;
+      GZ_McResult b; eng.Run(GZ_MC_TRADE_ORDER, r7, 5, 1, b);
+      bool b_ok = (b.checkpoint_count==7);
+      for(int c=0; c<7 && b_ok; c++) b_ok = (b.checkpoint_trades[c]==c+1);
+
+      double r25[]; ArrayResize(r25,25); for(int i=0;i<25;i++) r25[i] = 1.0;
+      GZ_McResult d; eng.Run(GZ_MC_TRADE_ORDER, r25, 5, 1, d);
+      bool d_ok = (d.checkpoint_count==20) && (d.checkpoint_trades[19]==25);
+      for(int c=1; c<20 && d_ok; c++) d_ok = (d.checkpoint_trades[c]>d.checkpoint_trades[c-1]);
+
+      AddResult("T154", a_ok && b_ok && d_ok, StringFormat("n=100:%s n=7:%s n=25:%s", a_ok?"ok":"FAIL", b_ok?"ok":"FAIL", d_ok?"ok":"FAIL"));
+     }
+
+   //--- T155: degenerate series - every order/bootstrap is identical. All +1
+   //--- (4 trades): net 4, DD 0, streak 0, P(net<0)=0. All -1 (3 trades): net
+   //--- -3, DD 3, streak 3, P(net<0)=1.0. Both modes. ------------------------
+   void T155_DegenerateSeries()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+      double win[4]  = {1,1,1,1};
+      double loss[3] = {-1,-1,-1};
+      bool ok = true;
+      for(int m=0; m<2; m++)
+        {
+         ENUM_GZ_MC_MODE mode = (m==0) ? GZ_MC_TRADE_ORDER : GZ_MC_RETURN_SEQUENCE;
+         GZ_McResult w, l;
+         eng.Run(mode, win, 50, 3, w);
+         eng.Run(mode, loss, 50, 3, l);
+         ok = ok && (MathAbs(w.net_r.minimum-4.0)<0.00001) && (MathAbs(w.net_r.maximum-4.0)<0.00001) &&
+              (MathAbs(w.max_dd.maximum)<0.00001) && (MathAbs(w.max_losing_streak.maximum)<0.00001) && (MathAbs(w.frac_net_r_negative)<0.00001) &&
+              (MathAbs(l.net_r.minimum+3.0)<0.00001) && (MathAbs(l.net_r.maximum+3.0)<0.00001) &&
+              (MathAbs(l.max_dd.median-3.0)<0.00001) && (MathAbs(l.max_losing_streak.median-3.0)<0.00001) &&
+              (MathAbs(l.frac_net_r_negative-1.0)<0.00001);
+        }
+      AddResult("T155", ok, "all-win and all-loss series give identical, exact results in both modes");
+     }
+
+   //--- T156: BuildRSeries() = closed trades' realized R, in journal order,
+   //--- open trades excluded (Phase 8's population convention), and the
+   //--- journal itself is unchanged (still 4 entries, still 1 open). ---------
+   void T156_BuildRSeriesFromJournal()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      datetime t0 = MakeTime(2026,2,12,9,0);
+      AddClosedJournalTrade(j, 1, GZ_LEG_BULLISH, t0,      t0+60,   1.0);
+      AddClosedJournalTrade(j, 2, GZ_LEG_BEARISH, t0+300,  t0+360, -1.0);
+      GZ_Trade trOpen = MakeTrade(3, 3, GZ_LEG_BULLISH, 100.0, t0+600);
+      j.OnTradeEntered(trOpen, 10.0);   // never closed
+      AddClosedJournalTrade(j, 4, GZ_LEG_BULLISH, t0+900,  t0+960,  2.0);
+
+      CGZMonteCarloEngine eng(m_logger);
+      double series[];
+      int n = eng.BuildRSeries(j, series);
+      bool ok = (n==3) && (ArraySize(series)==3) && (MathAbs(series[0]-1.0)<0.00001) && (MathAbs(series[1]+1.0)<0.00001) &&
+                (MathAbs(series[2]-2.0)<0.00001) && (j.JournalCount()==4) && (j.OpenCount()==1);
+      AddResult("T156", ok, StringFormat("series_n=%d journal_count=%d open=%d", n, j.JournalCount(), j.OpenCount()));
+     }
+
+   //--- T157: bootstrap sanity. Five +1 and five -1, 2000 simulations: net R
+   //--- is symmetric about 0, so the mean must be within 0.5 of 0 (that is
+   //--- ~7 standard errors wide - it can only fail if the generator is
+   //--- biased) and the simulated net R must reach both signs. --------------
+   void T157_BootstrapSymmetry()
+     {
+      double r[10] = {1,1,1,1,1,-1,-1,-1,-1,-1};
+      CGZMonteCarloEngine eng(m_logger);
+      GZ_McResult a; eng.Run(GZ_MC_RETURN_SEQUENCE, r, 2000, 31337, a);
+      bool ok = (a.status==GZ_MC_OK) && (MathAbs(a.net_r.mean)<0.5) && (a.net_r.minimum<0.0) && (a.net_r.maximum>0.0) &&
+                (a.frac_net_r_negative>0.3) && (a.frac_net_r_negative<0.6);
+      AddResult("T157", ok, StringFormat("mean_net=%.3f min=%.1f max=%.1f P(net<0)=%.3f", a.net_r.mean, a.net_r.minimum, a.net_r.maximum, a.frac_net_r_negative));
+     }
+
+   //--- T158: shuffle uniformity. Six DISTINCT values, 3000 permutations: the
+   //--- value landing in position 0 must be roughly uniform (expected 500
+   //--- each, standard deviation ~20 - accepted band [380,620] is ~6 sigma).
+   //--- Catches a biased Fisher-Yates or a biased index mapping. ------------
+   void T158_ShuffleUniformity()
+     {
+      CGZMonteCarloEngine eng(m_logger);
+      double r[6] = {10,20,30,40,50,60};
+      int cnt[6] = {0,0,0,0,0,0};
+      double seq[];
+      for(int k=0; k<3000; k++)
+        {
+         eng.GenerateSequence(GZ_MC_TRADE_ORDER, r, 6, 2468, k, seq);
+         int idx = (int)MathRound(seq[0]/10.0) - 1;
+         if(idx>=0 && idx<6) cnt[idx]++;
+        }
+      bool ok = true;
+      for(int i=0;i<6;i++) if(cnt[i]<380 || cnt[i]>620) ok = false;
+      AddResult("T158", ok, StringFormat("first-position counts: %d %d %d %d %d %d (expect ~500 each)", cnt[0],cnt[1],cnt[2],cnt[3],cnt[4],cnt[5]));
+     }
+
    //--- Run everything ----------------------------------------------------------------
    void RunAll()
      {
@@ -4997,6 +5403,22 @@ public:
       T140_WalkForwardDeterminism();
       T141_SelectionIgnoresFutureData();
       T142_RunWalkForwardGuards();
+      T143_PrngKnownSequence();
+      T144_PercentileKnownValues();
+      T145_ComputeStatsKnownAnswers();
+      T146_SummarizeKnownNumbers();
+      T147_TradeOrderIsPermutation();
+      T148_ReturnSequenceIsBootstrap();
+      T149_DeterminismAndSeedSensitivity();
+      T150_SimulationIndependentOfCount();
+      T151_OriginalSeriesUntouched();
+      T152_Guards();
+      T153_TradeOrderWorstCaseHistory();
+      T154_CheckpointLayout();
+      T155_DegenerateSeries();
+      T156_BuildRSeriesFromJournal();
+      T157_BootstrapSymmetry();
+      T158_ShuffleUniformity();
      }
 
    int               PassCount() const

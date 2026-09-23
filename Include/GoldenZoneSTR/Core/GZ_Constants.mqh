@@ -161,4 +161,18 @@
 #define GZ_WF_NOISE_FLOOR_R                    0.05  // mean training expectancy at/below this (in R) makes the efficiency ratio UNDEFINED rather than a meaningless huge/negative number
 #define GZ_PROJECT_VERSION_P13                 "GZ-P13-ROADMAP v1.0"
 
+// Phase 14 - Monte Carlo Research.
+// Roadmap: trade-order randomization, return-sequence randomization, drawdown
+// distribution, losing-streak distribution, equity-path variation; record number of
+// simulations, seed, median, percentiles, worst simulated cases; the original
+// historical ledger is never changed. No numeric defaults are stated - conventional,
+// documented defaults (same pattern as GZ_DEFAULT_ATR_PERIOD in Phase 3), all
+// overridable via EA inputs. The cap mirrors the Roadmap's "stage research, don't run
+// one huge Grid at once" rule (Phase 9) - a request above it is REJECTED, not truncated.
+#define GZ_DEFAULT_MC_SIMULATIONS        1000
+#define GZ_DEFAULT_MC_SEED               12345
+#define GZ_DEFAULT_MC_MAX_SIMULATIONS    10000
+#define GZ_MC_MIN_TRADES                 2      // a shuffle/bootstrap of fewer trades carries no information
+#define GZ_PROJECT_VERSION_P14           "GZ-P14-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__

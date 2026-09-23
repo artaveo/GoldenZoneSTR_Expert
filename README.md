@@ -1,11 +1,11 @@
-# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13
+# GoldenZone STR — Phase 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14
 
 Data Layer + Data Validator + Time Engine (Phase 1), M5 Structure/Swing Engine (Phase 2),
 Leg Engine + Break Engine (Phase 3), Fibonacci Engine + Setup State Machine (Phase 4),
 Entry Engine + Historical Trade Simulator (Phase 5), Exit Engine SL/TP/BE (Phase 6),
 MAE/MFE + R-Path + Event Ledger (Phase 7), Metrics + Reporting (Phase 8), Experiment
 Configuration + Runner (Phase 9), Filter Engine (Phase 10), Filter Combination Research
-(Phase 11), Robustness + Sensitivity Research (Phase 12), Walk-Forward Research (Phase 13).
+(Phase 11), Robustness + Sensitivity Research (Phase 12), Walk-Forward Research (Phase 13), Monte Carlo Research (Phase 14).
 No live trading.
 
 ## Install
@@ -19,7 +19,7 @@ No live trading.
 5. Attach the compiled EA to an XAUUSD chart (any chart timeframe — the EA loads its own M1/M5
    internally, independent of the chart's timeframe).
 6. Check the **Experts** log tab for the report, and
-   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_Report.txt` (common Files folder) for the saved copy.
+   `MQL5/Files/GZ_Phase1_2_3_4_5_6_7_8_9_10_11_12_13_14_Report.txt` (common Files folder) for the saved copy.
 
 ## What this does
 
@@ -110,15 +110,26 @@ No live trading.
   `OVERFIT_SUSPECT` / `NEGATIVE_OOS` / `VALIDATION_OVERLAP` flags. Each window is simulated on its
   own data slice from a cold start (documented limitation). Single-axis only; anchored/expanding
   windows are deferred. Set `InpRunPhase13=false` to skip it.
-- Runs 142 deterministic, synthetic-data self-tests (T01–T142: T01–T18 Phase 1, T19–T23 Phase 2,
+- **Phase 14:** `CGZMonteCarloEngine` takes the closed-trade realized-R series (Phase 8's population)
+  and runs `InpMcSimulations` seeded simulations in two modes: **TRADE_ORDER** (random permutation —
+  same trades, different order) and **RETURN_SEQUENCE** (bootstrap with replacement). Per simulation:
+  net R, max drawdown, max losing streak, equity at up to 20 checkpoints. Output: mean / min / 5-25-50-
+  75-95th percentiles / max (with the worst simulation's index) for each metric, equity-path
+  percentile bands next to the historical path, the historical value's rank inside the simulated
+  distribution, and a consistency check against Phase 8's own drawdown/streak numbers. Own PRNG
+  (Park-Miller, not `MathRand`) so `InpMcSeed` reproduces results exactly; simulation k depends only on
+  (seed, k). More than `InpMcMaxSimulations` is rejected, never truncated. The original ledger is
+  never modified. Shuffles assume exchangeable trades (no serial dependence). Set
+  `InpRunPhase14=false` to skip it.
+- Runs 158 deterministic, synthetic-data self-tests (T01–T158: T01–T18 Phase 1, T19–T23 Phase 2,
   T24–T34 Phase 3, T35–T45 Phase 4, T46–T54 Phase 5, T55–T64 Phase 6, T65–T74 Phase 7,
   T75–T86 Phase 8, T87–T96 Phase 9, T97–T106 Phase 10, T107–T116 Phase 11, T117–T127 Phase 12,
-  T128–T142 Phase 13) and reports PASS/FAIL
+  T128–T142 Phase 13, T143–T158 Phase 14) and reports PASS/FAIL
   for each.
 - Prints (in chunks, so the Experts log is no longer truncated) and saves a full Phase 1+2+…+13
   completion report.
-- Does **not** place any live trades, and does **not** implement any Phase 14+ logic
-  (Monte Carlo onward). It stops after the report.
+- Does **not** place any live trades, and does **not** implement any Phase 15+ logic
+  (Final OOS onward). It stops after the report.
 
 ## Before trusting the output
 
