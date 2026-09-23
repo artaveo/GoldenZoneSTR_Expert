@@ -7,6 +7,7 @@
 //| Phase 4 (T35-T45): Fibonacci Engine + Setup State Machine         |
 //| Phase 5 (T46-T54): Entry Engine + Historical Trade Simulator      |
 //| Phase 6 (T55-T64): Exit Engine (SL/TP/BE)                         |
+//| Phase 7 (T65-T74): MAE/MFE + R-Path + Event Ledger                |
 //|                                                                    |
 //| All tests use synthetic, hand-built data so results are fully    |
 //| deterministic and do NOT depend on broker history being present. |
@@ -38,6 +39,10 @@
 #include "..\Entry\GZ_TradeSimulator.mqh"
 #include "..\Exit\GZ_ExitTypes.mqh"
 #include "..\Exit\GZ_ExitEngine.mqh"
+#include "..\Journal\GZ_JournalTypes.mqh"
+#include "..\Journal\GZ_JournalEngine.mqh"
+#include "..\Journal\GZ_LedgerTypes.mqh"
+#include "..\Journal\GZ_EventLedger.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -1555,8 +1560,10 @@ public:
       CGZSessionEngine sessionEngine;
       GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
 
+      CGZJournalEngine journalEngine(m_logger); journalEngine.Init();
+      CGZEventLedger   ledger(m_logger);        ledger.Init();
       CGZTradeSimulator sim(m_logger);
-      sim.Run(m1, m5, swings, 2, legEngine, breakEngine, sm, entryEngine, exitEngine, timeEngine, sessionEngine, profile, false, false);
+      sim.Run(m1, m5, swings, 2, legEngine, breakEngine, sm, entryEngine, exitEngine, journalEngine, ledger, timeEngine, sessionEngine, profile, false, false);
 
       bool ok = (entryEngine.TradeCount()==1) && (entryEngine.GetTrade(0).entry_time==m1[1].time) &&
                 (MathAbs(entryEngine.GetTrade(0).entry_price-98.0)<0.0001);
@@ -1596,8 +1603,10 @@ public:
       CGZExitEngine extA(m_logger); extA.Init(xcfg);
       CGZTimeEngine timeA(m_logger); timeA.Configure(tcfg);
       CGZSessionEngine sessA;
+      CGZJournalEngine journalA(m_logger); journalA.Init();
+      CGZEventLedger   ledgerA(m_logger);  ledgerA.Init();
       CGZTradeSimulator simA(m_logger);
-      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, extA, timeA, sessA, profile, false, false);
+      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, extA, journalA, ledgerA, timeA, sessA, profile, false, false);
 
       CGZLegEngine legB(m_logger); legB.Init(GZ_LEG_VARIANT_LAST_SWING);
       CGZBreakEngine brkB(m_logger); brkB.Configure(bcfg);
@@ -1606,8 +1615,10 @@ public:
       CGZExitEngine extB(m_logger); extB.Init(xcfg);
       CGZTimeEngine timeB(m_logger); timeB.Configure(tcfg);
       CGZSessionEngine sessB;
+      CGZJournalEngine journalB(m_logger); journalB.Init();
+      CGZEventLedger   ledgerB(m_logger);  ledgerB.Init();
       CGZTradeSimulator simB(m_logger);
-      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, extB, timeB, sessB, profile, false, false);
+      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, extB, journalB, ledgerB, timeB, sessB, profile, false, false);
 
       bool ok = (entA.TradeCount()==entB.TradeCount()) && (entA.TradeCount()==1);
       if(ok)
@@ -1897,8 +1908,10 @@ public:
       CGZExitEngine extA(m_logger); extA.Init(xcfg);
       CGZTimeEngine timeA(m_logger); timeA.Configure(tcfg);
       CGZSessionEngine sessA;
+      CGZJournalEngine journalA(m_logger); journalA.Init();
+      CGZEventLedger   ledgerA(m_logger);  ledgerA.Init();
       CGZTradeSimulator simA(m_logger);
-      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, extA, timeA, sessA, profile, false, false);
+      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, extA, journalA, ledgerA, timeA, sessA, profile, false, false);
 
       CGZLegEngine legB(m_logger); legB.Init(GZ_LEG_VARIANT_LAST_SWING);
       CGZBreakEngine brkB(m_logger); brkB.Configure(bcfg);
@@ -1907,8 +1920,10 @@ public:
       CGZExitEngine extB(m_logger); extB.Init(xcfg);
       CGZTimeEngine timeB(m_logger); timeB.Configure(tcfg);
       CGZSessionEngine sessB;
+      CGZJournalEngine journalB(m_logger); journalB.Init();
+      CGZEventLedger   ledgerB(m_logger);  ledgerB.Init();
       CGZTradeSimulator simB(m_logger);
-      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, extB, timeB, sessB, profile, false, false);
+      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, extB, journalB, ledgerB, timeB, sessB, profile, false, false);
 
       bool ok = (extA.ExitCount()==extB.ExitCount()) && (extA.ExitCount()==1) && (entA.TradeCount()==entB.TradeCount());
       if(ok)
@@ -1931,6 +1946,435 @@ public:
          ok = foundExited;
         }
       AddResult("T64", ok, StringFormat("exitsA=%d exitsB=%d", extA.ExitCount(), extB.ExitCount()));
+     }
+
+   //=====================================================================
+   //  PHASE 7: MAE/MFE + R-Path + Event Ledger  (T65-T74)
+   //=====================================================================
+
+   //--- T65: MAE/MFE tracking for BOTH directions - running best/worst
+   //--- excursion in R, updated only when a bar actually improves it. ------
+   void T65_JournalMaeMfeTracking()
+     {
+      CGZJournalEngine jBull(m_logger); jBull.Init();
+      GZ_Trade trBull = MakeTrade(1, 1, GZ_LEG_BULLISH, 100.0, MakeTime(2026,1,9,9,0));
+      jBull.OnTradeEntered(trBull, 5.0); // initial_risk=5 (sl=95)
+
+      jBull.OnBar(MakeBar(MakeTime(2026,1,9,9,1), 100,103,99,102));  // fav=3(0.6R) adv=1(0.2R) - both new extremes
+      jBull.OnBar(MakeBar(MakeTime(2026,1,9,9,2), 102,104,94,95));   // fav=4(0.8R) adv=6(1.2R) - both new extremes
+      jBull.OnBar(MakeBar(MakeTime(2026,1,9,9,3), 96,108,96,107));   // fav=8(1.6R) new MFE; adv=4(0.8R) NOT a new MAE (1.2R stands)
+
+      GZ_TradeJournal jb = jBull.GetJournal(0);
+      bool okBull = (MathAbs(jb.mae_r-1.2)<0.0001) && (jb.time_to_mae==MakeTime(2026,1,9,9,2)) &&
+                    (MathAbs(jb.mfe_r-1.6)<0.0001) && (jb.time_to_mfe==MakeTime(2026,1,9,9,3));
+
+      CGZJournalEngine jBear(m_logger); jBear.Init();
+      GZ_Trade trBear = MakeTrade(2, 2, GZ_LEG_BEARISH, 100.0, MakeTime(2026,1,9,10,0));
+      jBear.OnTradeEntered(trBear, 5.0); // initial_risk=5 (sl=105)
+
+      jBear.OnBar(MakeBar(MakeTime(2026,1,9,10,1), 100,101,97,98));  // fav=3(0.6R) adv=1(0.2R) - both new extremes
+      jBear.OnBar(MakeBar(MakeTime(2026,1,9,10,2), 98,106,96,97));   // fav=4(0.8R) adv=6(1.2R) - both new extremes
+      jBear.OnBar(MakeBar(MakeTime(2026,1,9,10,3), 97,97,92,93));    // fav=8(1.6R) new MFE; adv=-3 NOT a new MAE (1.2R stands)
+
+      GZ_TradeJournal je = jBear.GetJournal(0);
+      bool okBear = (MathAbs(je.mae_r-1.2)<0.0001) && (je.time_to_mae==MakeTime(2026,1,9,10,2)) &&
+                    (MathAbs(je.mfe_r-1.6)<0.0001) && (je.time_to_mfe==MakeTime(2026,1,9,10,3));
+
+      bool ok = okBull && okBear;
+      AddResult("T65", ok, StringFormat("bull mae=%.2fR mfe=%.2fR | bear mae=%.2fR mfe=%.2fR",
+                jb.mae_r, jb.mfe_r, je.mae_r, je.mfe_r));
+     }
+
+   //--- T66: Reach Matrix - multiple levels crossed on one bar are all
+   //--- marked with THAT bar's time; a level already reached keeps its
+   //--- original reach_time on later bars (first-time-only). --------------
+   void T66_JournalReachMatrixTiming()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      GZ_Trade tr = MakeTrade(1, 1, GZ_LEG_BULLISH, 100.0, MakeTime(2026,1,9,11,0));
+      j.OnTradeEntered(tr, 10.0); // sl=90, 1R=10
+
+      datetime t1 = MakeTime(2026,1,9,11,1);
+      j.OnBar(MakeBar(t1, 100,115,99,110)); // fav=15 -> 1.5R: 0.5,1.0,1.5 all reached at t1
+
+      GZ_TradeJournal after1 = j.GetJournal(0);
+      bool step1 = after1.reach_hit[0] && after1.reach_hit[1] && after1.reach_hit[2] && !after1.reach_hit[3] &&
+                   (after1.reach_time[0]==t1) && (after1.reach_time[1]==t1) && (after1.reach_time[2]==t1);
+
+      datetime t2 = MakeTime(2026,1,9,11,2);
+      j.OnBar(MakeBar(t2, 110,125,109,120)); // fav=25 -> 2.5R: 2.0,2.5 newly reached at t2
+
+      GZ_TradeJournal after2 = j.GetJournal(0);
+      bool step2 = after2.reach_hit[3] && after2.reach_hit[4] && (after2.reach_time[3]==t2) && (after2.reach_time[4]==t2) &&
+                   (after2.reach_time[0]==t1) && (after2.reach_time[1]==t1) && (after2.reach_time[2]==t1); // unchanged
+
+      bool ok = step1 && step2;
+      AddResult("T66", ok, StringFormat("highest_reach=%.2fR (expect 2.50)", after2.HighestReachHit()));
+     }
+
+   //--- T67: Once OnTradeClosed() has been called, further OnBar() calls
+   //--- must not change MAE/MFE/Reach Matrix (no leakage past the exit). --
+   void T67_JournalStopsAfterClose()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      GZ_Trade tr = MakeTrade(1, 1, GZ_LEG_BULLISH, 100.0, MakeTime(2026,1,9,12,0));
+      j.OnTradeEntered(tr, 5.0);
+      j.OnBar(MakeBar(MakeTime(2026,1,9,12,1), 100,103,99,102)); // mfe=0.6R
+
+      j.OnTradeClosed(1, MakeTime(2026,1,9,12,2), 102.0, 0.4);
+      GZ_TradeJournal beforeExtra = j.GetJournal(0);
+
+      // A huge move AFTER close must not move mae/mfe, and a second
+      // OnTradeClosed() with different values must not overwrite either.
+      j.OnBar(MakeBar(MakeTime(2026,1,9,12,3), 102,150,50,140));
+      j.OnTradeClosed(1, MakeTime(2026,1,9,12,4), 999.0, 99.0);
+      GZ_TradeJournal afterExtra = j.GetJournal(0);
+
+      bool ok = (!afterExtra.is_open) &&
+                (MathAbs(afterExtra.mfe_r-beforeExtra.mfe_r)<0.0001) &&
+                (MathAbs(afterExtra.mae_r-beforeExtra.mae_r)<0.0001) &&
+                (afterExtra.exit_time==beforeExtra.exit_time) &&
+                (MathAbs(afterExtra.exit_price-beforeExtra.exit_price)<0.0001) &&
+                (MathAbs(afterExtra.final_r-beforeExtra.final_r)<0.0001);
+      AddResult("T67", ok, StringFormat("mfe_before=%.3f mfe_after=%.3f exit_price_after=%.2f (must equal 102.00, not 999)",
+                beforeExtra.mfe_r, afterExtra.mfe_r, afterExtra.exit_price));
+     }
+
+   //--- T68: initial_risk<=0 guard keeps mae_r/mfe_r at 0.0 (mirrors
+   //--- CGZExitEngine::ComputeRealizedR's own defensive check); duration
+   //--- and final_r are still set correctly on close, and a second
+   //--- OnTradeClosed() call for the same id is a safe no-op. -------------
+   void T68_JournalZeroRiskGuardAndFinalize()
+     {
+      CGZJournalEngine j(m_logger); j.Init();
+      GZ_Trade tr = MakeTrade(1, 1, GZ_LEG_BULLISH, 100.0, MakeTime(2026,1,9,13,0));
+      j.OnTradeEntered(tr, 0.0); // no risk known - defensive path
+
+      j.OnBar(MakeBar(MakeTime(2026,1,9,13,1), 100,110,90,105));
+      GZ_TradeJournal mid = j.GetJournal(0);
+      bool guardOk = (MathAbs(mid.mae_r)<0.0001) && (MathAbs(mid.mfe_r)<0.0001);
+
+      j.OnTradeClosed(1, MakeTime(2026,1,9,13,10), 105.0, 0.0);
+      j.OnTradeClosed(1, MakeTime(2026,1,9,13,20), 999.0, 99.0); // idempotent - must not overwrite
+      GZ_TradeJournal fin = j.GetJournal(0);
+
+      bool finalizeOk = (!fin.is_open) && (fin.duration_seconds==600) &&
+                        (MathAbs(fin.exit_price-105.0)<0.0001) && (MathAbs(fin.final_r)<0.0001);
+
+      bool ok = guardOk && finalizeOk;
+      AddResult("T68", ok, StringFormat("mae_r=%.3f mfe_r=%.3f duration=%ds exit_price=%.2f (must be 105.00)",
+                mid.mae_r, mid.mfe_r, fin.duration_seconds, fin.exit_price));
+     }
+
+   //--- T69: a setup reaching FIB_ACTIVE produces exactly one
+   //--- GZ_LEDGER_SETUP_VALID event, timestamped at fib_active_time. ------
+   void T69_LedgerValidSetupRecordedOnce()
+     {
+      datetime t0 = MakeTime(2026,1,9,14,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+
+      CGZLegEngine legEngine(m_logger); legEngine.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int i1=-1; legEngine.Update(low1,0.0,false,i1);
+      int i2=-1; legEngine.Update(high1,0.0,false,i2);
+      GZ_Leg leg = legEngine.GetLeg(i2);
+
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      sm.OnLegCreated(leg);
+
+      MqlRates breakBar = MakeBar(t0+8*300, 109,112,108,111);
+      legEngine.UpdateBar(breakBar);
+      GZ_Leg legAfterExtreme = legEngine.GetLeg(i2);
+      legEngine.SetLeg(i2, legAfterExtreme);
+      sm.OnLegBroken(legAfterExtreme); // -> FIB_ACTIVE
+
+      GZ_EntryConfig ecfg; ecfg.Default();
+      CGZEntryEngine emptyEntry(m_logger); emptyEntry.Init(ecfg);
+      GZ_ExitConfig xcfg; xcfg.Default();
+      CGZExitEngine emptyExit(m_logger); emptyExit.Init(xcfg);
+
+      CGZEventLedger ledger(m_logger); ledger.Init();
+      ledger.BuildFromFinalState(sm, emptyEntry, emptyExit);
+
+      GZ_Setup s = sm.GetSetup(0);
+      bool ok = (ledger.CountByType(GZ_LEDGER_SETUP_VALID)==1) && (ledger.EventCount()==1);
+      if(ok)
+        {
+         GZ_LedgerEvent ev = ledger.GetEvent(0);
+         ok = (ev.setup_id==s.id) && (ev.time==s.fib_active_time);
+        }
+      AddResult("T69", ok, StringFormat("valid_events=%d total_events=%d", ledger.CountByType(GZ_LEDGER_SETUP_VALID), ledger.EventCount()));
+     }
+
+   //--- T70: an ordinary cancellation (DATA_END) is classified
+   //--- SETUP_CANCELLED; an INVALID_PENETRATION cancellation is
+   //--- classified SETUP_INVALIDATED (and, having reached FIB_ACTIVE
+   //--- first, ALSO produces its own separate SETUP_VALID row). -----------
+   void T70_LedgerCancelledVsInvalidatedClassification()
+     {
+      datetime t0 = MakeTime(2026,1,9,15,0);
+
+      // Setup A: LEG_DETECTED only, never locked. A same-direction Setup B
+      // created afterwards cancels it with the ordinary NEW_VALID_SETUP
+      // reason (not one of the two INVALID_* reasons) - this is the
+      // "ordinary cancellation" case the classification must bucket as
+      // SETUP_CANCELLED, whichever ordinary reason actually fires.
+      GZ_Swing lowA = MakeSwing(GZ_SWING_LOW, 50.0, t0, t0+2*300, 101);
+      CGZLegEngine legEngineA(m_logger); legEngineA.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int ia=-1; legEngineA.Update(lowA,0.0,false,ia);
+      GZ_Swing highA = MakeSwing(GZ_SWING_HIGH, 60.0, t0+5*300, t0+7*300, 102);
+      int ia2=-1; legEngineA.Update(highA,0.0,false,ia2);
+      GZ_Leg legA = legEngineA.GetLeg(ia2);
+
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      sm.OnLegCreated(legA); // Setup #1, LEG_DETECTED (bullish)
+
+      // Setup B: LEG_DETECTED -> broken -> FIB_ACTIVE -> invalidated. Also
+      // bullish, so creating it below cancels Setup A (NEW_VALID_SETUP).
+      GZ_Swing lowB  = MakeSwing(GZ_SWING_LOW,  90.0,  t0+10*300, t0+12*300, 201);
+      GZ_Swing highB = MakeSwing(GZ_SWING_HIGH, 110.0, t0+15*300, t0+17*300, 202);
+      CGZLegEngine legEngineB(m_logger); legEngineB.Init(GZ_LEG_VARIANT_LAST_SWING);
+      int ib=-1; legEngineB.Update(lowB,0.0,false,ib);
+      int ib2=-1; legEngineB.Update(highB,0.0,false,ib2);
+      GZ_Leg legB = legEngineB.GetLeg(ib2);
+      int siB = sm.OnLegCreated(legB); // Setup #2
+
+      MqlRates breakBarB = MakeBar(t0+18*300, 109,112,108,111);
+      legEngineB.UpdateBar(breakBarB);
+      GZ_Leg legBAfterExtreme = legEngineB.GetLeg(ib2);
+      legEngineB.SetLeg(ib2, legBAfterExtreme);
+      sm.OnLegBroken(legBAfterExtreme); // -> FIB_ACTIVE
+      GZ_Setup setupB = sm.GetSetup(siB);
+      sm.CancelForInvalidPenetration(setupB.id, t0+19*300);
+
+      sm.OnDataEnd(t0+20*300); // no-op here - both setups are already terminal by this point
+
+      GZ_EntryConfig ecfg; ecfg.Default();
+      CGZEntryEngine emptyEntry(m_logger); emptyEntry.Init(ecfg);
+      GZ_ExitConfig xcfg; xcfg.Default();
+      CGZExitEngine emptyExit(m_logger); emptyExit.Init(xcfg);
+
+      CGZEventLedger ledger(m_logger); ledger.Init();
+      ledger.BuildFromFinalState(sm, emptyEntry, emptyExit);
+
+      bool ok = (ledger.CountByType(GZ_LEDGER_SETUP_CANCELLED)==1) &&
+                (ledger.CountByType(GZ_LEDGER_SETUP_INVALIDATED)==1) &&
+                (ledger.CountByType(GZ_LEDGER_SETUP_VALID)==1); // only Setup B ever reached FIB_ACTIVE
+      AddResult("T70", ok, StringFormat("cancelled=%d invalidated=%d valid=%d",
+                ledger.CountByType(GZ_LEDGER_SETUP_CANCELLED), ledger.CountByType(GZ_LEDGER_SETUP_INVALIDATED),
+                ledger.CountByType(GZ_LEDGER_SETUP_VALID)));
+     }
+
+   //--- helper: build the minimal full-pipeline scenario shared by
+   //--- T71/T72/T73/T74 (bullish leg -> break -> zone touch -> TOUCH
+   //--- entry -> TP_HIT exit), mirroring T64's own fixture. ---------------
+   void BuildPhase7Scenario(GZ_Swing &swings[], MqlRates &m5[], MqlRates &m1[])
+     {
+      datetime t0 = MakeTime(2026,1,9,18,0);
+      GZ_Swing low1  = MakeSwing(GZ_SWING_LOW,  90.0,  t0,       t0+2*300, 1);
+      GZ_Swing high1 = MakeSwing(GZ_SWING_HIGH, 110.0, t0+5*300, t0+7*300, 2);
+      ArrayResize(swings,2); swings[0]=low1; swings[1]=high1;
+
+      ArrayResize(m5,6);
+      m5[0]=MakeBar(t0+2*300,  90,90.5,89.5,90);
+      m5[1]=MakeBar(t0+7*300, 109,110.5,108.5,110);
+      m5[2]=MakeBar(t0+8*300, 109,112,108,111);     // break: close=111>110
+      m5[3]=MakeBar(t0+9*300, 98,100,95,99);        // touches zone [92.2,105.4] -> WAITING_ENTRY
+      m5[4]=MakeBar(t0+10*300, 99,100,98,99);
+      m5[5]=MakeBar(t0+11*300, 99,100,98,99);
+
+      datetime T = t0+9*300;
+      ArrayResize(m1,2);
+      m1[0]=MakeBar(T+300+60,  98.5,98.6,98.0,98.2);    // triggers TOUCH entry
+      m1[1]=MakeBar(T+600+60, 115.0,116.0,114.5,115.5); // well past TP (sl=90 (origin), tp=2R)
+     }
+
+   //--- T71: exactly one ENTRY event and one EXIT event are produced by a
+   //--- full CGZTradeSimulator.Run(), matching the real trade/exit's own
+   //--- id/time/price fields exactly. --------------------------------------
+   void T71_LedgerEntryExitFromFullRun()
+     {
+      GZ_Swing swings[]; MqlRates m5[]; MqlRates m1[];
+      BuildPhase7Scenario(swings, m5, m1);
+
+      GZ_TimeConfig tcfg; tcfg.Default();
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_EntryConfig ecfg; ecfg.Default();
+      GZ_BreakConfig bcfg; bcfg.Default();
+      GZ_ExitConfig xcfg; xcfg.Default();
+
+      CGZLegEngine leg(m_logger); leg.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brk(m_logger); brk.Configure(bcfg);
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      CGZEntryEngine ent(m_logger); ent.Init(ecfg);
+      CGZExitEngine ext(m_logger); ext.Init(xcfg);
+      CGZTimeEngine time_engine(m_logger); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      CGZJournalEngine journal(m_logger); journal.Init();
+      CGZEventLedger ledger(m_logger); ledger.Init();
+      CGZTradeSimulator sim(m_logger);
+      sim.Run(m1, m5, swings, 2, leg, brk, sm, ent, ext, journal, ledger, time_engine, sess, profile, false, false);
+
+      bool ok = (ent.TradeCount()==1) && (ext.ExitCount()==1) &&
+                (ledger.CountByType(GZ_LEDGER_ENTRY)==1) && (ledger.CountByType(GZ_LEDGER_EXIT)==1);
+      if(ok)
+        {
+         GZ_Trade tr = ent.GetTrade(0);
+         GZ_TradeExit ex = ext.GetExit(0);
+         GZ_LedgerEvent entryEv; entryEv.Clear();
+         GZ_LedgerEvent exitEv;  exitEv.Clear();
+         for(int i=0;i<ledger.EventCount();i++)
+           {
+            GZ_LedgerEvent e = ledger.GetEvent(i);
+            if(e.event_type==GZ_LEDGER_ENTRY) entryEv = e;
+            if(e.event_type==GZ_LEDGER_EXIT)  exitEv  = e;
+           }
+         ok = (entryEv.trade_id==tr.id) && (entryEv.setup_id==tr.setup_id) && (entryEv.time==tr.entry_time) &&
+              (MathAbs(entryEv.price-tr.entry_price)<0.0001) &&
+              (exitEv.trade_id==ex.trade_id) && (exitEv.time==ex.exit_time) &&
+              (MathAbs(exitEv.price-ex.exit_price)<0.0001) && (exitEv.reason==ex.ExitReasonToString());
+        }
+      AddResult("T71", ok, StringFormat("trades=%d exits=%d entry_events=%d exit_events=%d",
+                ent.TradeCount(), ext.ExitCount(), ledger.CountByType(GZ_LEDGER_ENTRY), ledger.CountByType(GZ_LEDGER_EXIT)));
+     }
+
+   //--- T72: the RESERVED ledger event types (Rejection/FilterResult -
+   //--- DEFERRED TO PHASE 10) are never emitted anywhere in this build,
+   //--- even after a full pipeline run that produces real setups/trades/
+   //--- exits. --------------------------------------------------------------
+   void T72_LedgerReservedTypesNeverEmitted()
+     {
+      GZ_Swing swings[]; MqlRates m5[]; MqlRates m1[];
+      BuildPhase7Scenario(swings, m5, m1);
+
+      GZ_TimeConfig tcfg; tcfg.Default();
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_EntryConfig ecfg; ecfg.Default();
+      GZ_BreakConfig bcfg; bcfg.Default();
+      GZ_ExitConfig xcfg; xcfg.Default();
+
+      CGZLegEngine leg(m_logger); leg.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brk(m_logger); brk.Configure(bcfg);
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      CGZEntryEngine ent(m_logger); ent.Init(ecfg);
+      CGZExitEngine ext(m_logger); ext.Init(xcfg);
+      CGZTimeEngine time_engine(m_logger); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      CGZJournalEngine journal(m_logger); journal.Init();
+      CGZEventLedger ledger(m_logger); ledger.Init();
+      CGZTradeSimulator sim(m_logger);
+      sim.Run(m1, m5, swings, 2, leg, brk, sm, ent, ext, journal, ledger, time_engine, sess, profile, false, false);
+
+      bool ok = (ledger.EventCount()>0) &&
+                (ledger.CountByType(GZ_LEDGER_REJECTION)==0) &&
+                (ledger.CountByType(GZ_LEDGER_FILTER_RESULT)==0);
+      AddResult("T72", ok, StringFormat("total_events=%d rejection=%d filter_result=%d",
+                ledger.EventCount(), ledger.CountByType(GZ_LEDGER_REJECTION), ledger.CountByType(GZ_LEDGER_FILTER_RESULT)));
+     }
+
+   //--- T73: no-lookahead sanity - the resulting trade's journal never
+   //--- records an MAE/MFE/reach time before entry_time or after
+   //--- exit_time (every excursion timestamp is causally within the
+   //--- trade's own open lifetime). -----------------------------------------
+   void T73_JournalNoLookaheadTiming()
+     {
+      GZ_Swing swings[]; MqlRates m5[]; MqlRates m1[];
+      BuildPhase7Scenario(swings, m5, m1);
+
+      GZ_TimeConfig tcfg; tcfg.Default();
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_EntryConfig ecfg; ecfg.Default();
+      GZ_BreakConfig bcfg; bcfg.Default();
+      GZ_ExitConfig xcfg; xcfg.Default();
+
+      CGZLegEngine leg(m_logger); leg.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brk(m_logger); brk.Configure(bcfg);
+      CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
+      CGZEntryEngine ent(m_logger); ent.Init(ecfg);
+      CGZExitEngine ext(m_logger); ext.Init(xcfg);
+      CGZTimeEngine time_engine(m_logger); time_engine.Configure(tcfg);
+      CGZSessionEngine sess;
+      CGZJournalEngine journal(m_logger); journal.Init();
+      CGZEventLedger ledger(m_logger); ledger.Init();
+      CGZTradeSimulator sim(m_logger);
+      sim.Run(m1, m5, swings, 2, leg, brk, sm, ent, ext, journal, ledger, time_engine, sess, profile, false, false);
+
+      bool ok = (journal.JournalCount()==1);
+      if(ok)
+        {
+         GZ_TradeJournal j = journal.GetJournal(0);
+         ok = (!j.is_open) &&
+              (j.time_to_mae>=j.entry_time) && (j.time_to_mae<=j.exit_time) &&
+              (j.time_to_mfe>=j.entry_time) && (j.time_to_mfe<=j.exit_time);
+         for(int i=0;i<GZ_REACH_LEVEL_COUNT && ok;i++)
+            if(j.reach_hit[i])
+               ok = (j.reach_time[i]>=j.entry_time) && (j.reach_time[i]<=j.exit_time);
+        }
+      AddResult("T73", ok, "mae/mfe/reach timestamps all within [entry_time, exit_time]");
+     }
+
+   //--- T74: full-pipeline determinism through the Phase 7-updated
+   //--- CGZTradeSimulator - two independent runs over identical data and
+   //--- configuration produce identical journals AND identical ledgers. ---
+   void T74_JournalAndLedgerDeterminism()
+     {
+      GZ_Swing swings[]; MqlRates m5[]; MqlRates m1[];
+      BuildPhase7Scenario(swings, m5, m1);
+
+      GZ_TimeConfig tcfg; tcfg.Default();
+      GZ_SessionProfile profile; profile.Set("PROFILE_TEST","Test",GZ_TIME_BROKER,0,0,23,59,true,true);
+      GZ_EntryConfig ecfg; ecfg.Default();
+      GZ_BreakConfig bcfg; bcfg.Default();
+      GZ_ExitConfig xcfg; xcfg.Default();
+
+      CGZLegEngine legA(m_logger); legA.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkA(m_logger); brkA.Configure(bcfg);
+      CGZSetupStateMachine smA(m_logger); smA.Init(0.30,0.90);
+      CGZEntryEngine entA(m_logger); entA.Init(ecfg);
+      CGZExitEngine extA(m_logger); extA.Init(xcfg);
+      CGZTimeEngine timeA(m_logger); timeA.Configure(tcfg);
+      CGZSessionEngine sessA;
+      CGZJournalEngine journalA(m_logger); journalA.Init();
+      CGZEventLedger ledgerA(m_logger); ledgerA.Init();
+      CGZTradeSimulator simA(m_logger);
+      simA.Run(m1, m5, swings, 2, legA, brkA, smA, entA, extA, journalA, ledgerA, timeA, sessA, profile, false, false);
+
+      CGZLegEngine legB(m_logger); legB.Init(GZ_LEG_VARIANT_LAST_SWING);
+      CGZBreakEngine brkB(m_logger); brkB.Configure(bcfg);
+      CGZSetupStateMachine smB(m_logger); smB.Init(0.30,0.90);
+      CGZEntryEngine entB(m_logger); entB.Init(ecfg);
+      CGZExitEngine extB(m_logger); extB.Init(xcfg);
+      CGZTimeEngine timeB(m_logger); timeB.Configure(tcfg);
+      CGZSessionEngine sessB;
+      CGZJournalEngine journalB(m_logger); journalB.Init();
+      CGZEventLedger ledgerB(m_logger); ledgerB.Init();
+      CGZTradeSimulator simB(m_logger);
+      simB.Run(m1, m5, swings, 2, legB, brkB, smB, entB, extB, journalB, ledgerB, timeB, sessB, profile, false, false);
+
+      bool ok = (journalA.JournalCount()==journalB.JournalCount()) && (journalA.JournalCount()==1) &&
+                (ledgerA.EventCount()==ledgerB.EventCount()) && (ledgerA.EventCount()>0);
+      if(ok)
+        {
+         GZ_TradeJournal ja = journalA.GetJournal(0);
+         GZ_TradeJournal jb = journalB.GetJournal(0);
+         ok = (ja.time_to_mae==jb.time_to_mae) && (MathAbs(ja.mae_r-jb.mae_r)<0.00001) &&
+              (ja.time_to_mfe==jb.time_to_mfe) && (MathAbs(ja.mfe_r-jb.mfe_r)<0.00001) &&
+              (ja.duration_seconds==jb.duration_seconds) && (MathAbs(ja.final_r-jb.final_r)<0.00001);
+         for(int i=0;i<GZ_REACH_LEVEL_COUNT && ok;i++)
+            ok = (ja.reach_hit[i]==jb.reach_hit[i]) && (ja.reach_time[i]==jb.reach_time[i]);
+        }
+      if(ok)
+        {
+         for(int i=0;i<ledgerA.EventCount() && ok;i++)
+           {
+            GZ_LedgerEvent ea = ledgerA.GetEvent(i);
+            GZ_LedgerEvent eb = ledgerB.GetEvent(i);
+            ok = (ea.event_type==eb.event_type) && (ea.time==eb.time) && (ea.setup_id==eb.setup_id) &&
+                 (ea.trade_id==eb.trade_id) && (ea.reason==eb.reason) && (MathAbs(ea.price-eb.price)<0.00001);
+           }
+        }
+      AddResult("T74", ok, StringFormat("journalsA=%d journalsB=%d eventsA=%d eventsB=%d",
+                journalA.JournalCount(), journalB.JournalCount(), ledgerA.EventCount(), ledgerB.EventCount()));
      }
 
    //--- Run everything ----------------------------------------------------------------
@@ -2001,6 +2445,16 @@ public:
       T62_DataEndForceClose();
       T63_InitialRiskAndRealizedRSign();
       T64_ExitDeterminism();
+      T65_JournalMaeMfeTracking();
+      T66_JournalReachMatrixTiming();
+      T67_JournalStopsAfterClose();
+      T68_JournalZeroRiskGuardAndFinalize();
+      T69_LedgerValidSetupRecordedOnce();
+      T70_LedgerCancelledVsInvalidatedClassification();
+      T71_LedgerEntryExitFromFullRun();
+      T72_LedgerReservedTypesNeverEmitted();
+      T73_JournalNoLookaheadTiming();
+      T74_JournalAndLedgerDeterminism();
      }
 
    int               PassCount() const

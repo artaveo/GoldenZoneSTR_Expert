@@ -37,12 +37,33 @@
 //| bar to be attributed to in this dataset and are intentionally NOT |
 //| processed (documented, not silently guessed - spec "do not        |
 //| fabricate data").                                                  |
+//|                                                                    |
+//| PHASE 7 INTEGRATION (MAE/MFE + Event Ledger - see                 |
+//| GZ_JournalEngine.mqh / GZ_EventLedger.mqh): CGZJournalEngine is a  |
+//| live, bar-by-bar hook (MAE/MFE cannot be reconstructed after the   |
+//| fact) wired into the exact same points as CGZExitEngine above -   |
+//| OnTradeEntered() right after Phase 6's own OnTradeEntered() (so    |
+//| the real initial_risk it just computed is available), then         |
+//| OnBar() alongside CGZExitEngine.OnBar() for every M1 bar. Trade    |
+//| closure is detected by scanning CGZExitEngine's own exits after    |
+//| each OnBar() call (SyncJournalClosures()) rather than adding any   |
+//| new hook into GZ_ExitEngine.mqh itself - this keeps Phase 6's      |
+//| already-frozen engine file completely untouched (documented       |
+//| choice, not an oversight - the scan is bounded by open-trade count |
+//| via CGZJournalEngine::OpenCount() so it is a cheap no-op whenever  |
+//| nothing is open, which is most of any dataset). CGZEventLedger, in |
+//| contrast, needs NO bar-by-bar hook at all - every ledger row is    |
+//| fully determined by already-final Setup/Entry/Exit state, so it is |
+//| built once via BuildFromFinalState() at the very end, alongside    |
+//| the existing MarkExited() final pass below.                        |
 //+------------------------------------------------------------------+
 #ifndef __GZ_TRADE_SIMULATOR_MQH__
 #define __GZ_TRADE_SIMULATOR_MQH__
 
 #include "GZ_EntryEngine.mqh"
 #include "..\Exit\GZ_ExitEngine.mqh"
+#include "..\Journal\GZ_JournalEngine.mqh"
+#include "..\Journal\GZ_EventLedger.mqh"
 #include "..\Core\GZ_Constants.mqh"
 #include "..\Structure\GZ_StructureTypes.mqh"
 #include "..\Leg\GZ_LegEngine.mqh"
@@ -77,10 +98,12 @@ private:
      }
 
    //--- Hand every trade CGZEntryEngine produced since `handled_count`
-   //--- to CGZExitEngine.OnTradeEntered(), then return the new total so
-   //--- the caller's running count stays in sync.
+   //--- to CGZExitEngine.OnTradeEntered(), then CGZJournalEngine.
+   //--- OnTradeEntered() (Phase 7 - needs the initial_risk Phase 6 just
+   //--- computed, see header), then return the new total so the
+   //--- caller's running count stays in sync.
    int HandOffNewTrades(CGZEntryEngine &entry_engine, CGZSetupStateMachine &setup_sm, CGZExitEngine &exit_engine,
-                         int handled_count, double current_atr, bool atr_ready)
+                         CGZJournalEngine &journal_engine, int handled_count, double current_atr, bool atr_ready)
      {
       int total = entry_engine.TradeCount();
       for(int i=handled_count; i<total; i++)
@@ -88,12 +111,36 @@ private:
          GZ_Trade tr = entry_engine.GetTrade(i);
          GZ_Leg leg;
          if(FindLegForSetup(setup_sm, tr.setup_id, leg))
+           {
             exit_engine.OnTradeEntered(tr, leg, current_atr, atr_ready);
+            GZ_TradeExit justOpened = exit_engine.GetExit(exit_engine.ExitCount()-1); // just appended above
+            journal_engine.OnTradeEntered(tr, justOpened.initial_risk);
+           }
          else if(m_logger!=NULL)
             m_logger.Error("Simulator", StringFormat("Trade #%d: no matching setup #%d found - exit management skipped.",
                            (int)tr.id, (int)tr.setup_id));
         }
       return total;
+     }
+
+   //--- Phase 7: detect trades CGZExitEngine has closed (since the last
+   //--- call) and finalize their journal record. Scans CGZExitEngine's
+   //--- own exits rather than adding a new hook into that (Phase 6,
+   //--- already-frozen) file - see header. OnTradeClosed() is itself
+   //--- idempotent, so calling this every bar is safe even though it
+   //--- re-checks every exit each time; the OpenCount() guard makes the
+   //--- common case (nothing open yet) a cheap no-op.
+   void SyncJournalClosures(CGZExitEngine &exit_engine, CGZJournalEngine &journal_engine)
+     {
+      if(journal_engine.OpenCount()==0)
+         return;
+      int n = exit_engine.ExitCount();
+      for(int i=0;i<n;i++)
+        {
+         GZ_TradeExit ex = exit_engine.GetExit(i);
+         if(!ex.is_open)
+            journal_engine.OnTradeClosed(ex.trade_id, ex.exit_time, ex.exit_price, ex.realized_r);
+        }
      }
 
 public:
@@ -110,9 +157,15 @@ public:
    //--- own SESSION_EXIT reason (independent of `apply_session_filter`,
    //--- which only ever governs Phase 4 setup cancellation - see
    //--- GZ_ExitEngine.mqh design note).
+   //--- Phase 7 additions: `journal_engine` must already be Init()'d by
+   //--- the caller (MAE/MFE/Reach Matrix - streamed live, see header);
+   //--- `event_ledger` must already be Init()'d too and is populated
+   //--- once, deterministically, at the end of this call (see
+   //--- CGZEventLedger::BuildFromFinalState()).
    void Run(const MqlRates &m1[], const MqlRates &m5[], const GZ_Swing &swings[], int swing_count,
             CGZLegEngine &leg_engine, CGZBreakEngine &break_engine, CGZSetupStateMachine &setup_sm,
             CGZEntryEngine &entry_engine, CGZExitEngine &exit_engine,
+            CGZJournalEngine &journal_engine, CGZEventLedger &event_ledger,
             CGZTimeEngine &time_engine, CGZSessionEngine &session_engine,
             const GZ_SessionProfile &session_profile, bool apply_session_filter, bool force_session_exit)
      {
@@ -140,13 +193,15 @@ public:
          while(m1_ptr<n1 && m1[m1_ptr].time<bar5_close_time)
            {
             entry_engine.OnBar(setup_sm, m1[m1_ptr], true, break_engine.CurrentAtr(), break_engine.AtrReady());
-            trades_handled = HandOffNewTrades(entry_engine, setup_sm, exit_engine, trades_handled,
+            trades_handled = HandOffNewTrades(entry_engine, setup_sm, exit_engine, journal_engine, trades_handled,
                                                break_engine.CurrentAtr(), break_engine.AtrReady());
 
             GZ_TimeContext m1_ctx;
             time_engine.BuildContext(m1[m1_ptr].time, m1_ctx);
             bool m1_inside_session = (session_engine.Evaluate(m1_ctx, session_profile)==GZ_SESSION_INSIDE);
             exit_engine.OnBar(m1[m1_ptr], m1_inside_session, force_session_exit);
+            journal_engine.OnBar(m1[m1_ptr]);
+            SyncJournalClosures(exit_engine, journal_engine);
 
             last_m1_close = m1[m1_ptr].close;
             m1_ptr++;
@@ -185,7 +240,7 @@ public:
          //--- 3. Entry Engine's M5-granularity path (CLOSE_CONFIRMATION
          //---    model only - no-op for every other model, see OnBar()).
          entry_engine.OnBar(setup_sm, bar5, false, break_engine.CurrentAtr(), break_engine.AtrReady());
-         trades_handled = HandOffNewTrades(entry_engine, setup_sm, exit_engine, trades_handled,
+         trades_handled = HandOffNewTrades(entry_engine, setup_sm, exit_engine, journal_engine, trades_handled,
                                             break_engine.CurrentAtr(), break_engine.AtrReady());
         }
 
@@ -198,6 +253,7 @@ public:
       double last_price = (last_m1_close>0.0) ? last_m1_close : m5[n5-1].close;
       datetime last_time = (m1_ptr>0) ? m1[m1_ptr-1].time : m5[n5-1].time;
       exit_engine.OnDataEnd(last_time, last_price);
+      SyncJournalClosures(exit_engine, journal_engine); // Phase 7: finalize any trades DATA_END just closed
 
       //--- Final pass: propagate every closed trade's outcome back onto its
       //--- setup (GZ_SETUP_ENTERED -> GZ_SETUP_EXITED), wiring up the stub
@@ -212,6 +268,11 @@ public:
          if(!ex.is_open)
             setup_sm.MarkExited(ex.setup_id, ex.exit_time);
         }
+
+      //--- Phase 7: build the Event Ledger, once, from the now-final
+      //--- Setup/Entry/Exit state (see GZ_EventLedger.mqh header - no
+      //--- bar-by-bar hook needed for this part).
+      event_ledger.BuildFromFinalState(setup_sm, entry_engine, exit_engine);
      }
   };
 

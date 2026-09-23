@@ -74,4 +74,12 @@
 #define GZ_DEFAULT_BE_TRIGGER_R       0.0
 #define GZ_PROJECT_VERSION_P6         "GZ-P6-ROADMAP v1.0"
 
+// Phase 7 - MAE/MFE + R-Path + Event Ledger.
+// Reach Matrix grid itself is defined in GZ_JournalTypes.mqh
+// (GZ_REACH_LEVELS/GZ_REACH_LEVEL_COUNT) since it is a data-shape constant
+// tightly coupled to GZ_TradeJournal's fixed-size arrays, not a tunable
+// research parameter like the constants above - kept here only as a
+// version marker for the phase completion report.
+#define GZ_PROJECT_VERSION_P7         "GZ-P7-ROADMAP v1.0"
+
 #endif // __GZ_CONSTANTS_MQH__
