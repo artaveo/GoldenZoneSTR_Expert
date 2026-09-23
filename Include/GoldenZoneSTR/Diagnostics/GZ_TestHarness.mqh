@@ -2082,9 +2082,14 @@ public:
       CGZSetupStateMachine sm(m_logger); sm.Init(0.30,0.90);
       sm.OnLegCreated(leg);
 
+      GZ_BreakConfig bcfg; bcfg.Default();
+      CGZBreakEngine breakEngine(m_logger); breakEngine.Configure(bcfg);
+
       MqlRates breakBar = MakeBar(t0+8*300, 109,112,108,111);
       legEngine.UpdateBar(breakBar);
       GZ_Leg legAfterExtreme = legEngine.GetLeg(i2);
+      breakEngine.OnBar(breakBar);
+      bool broke = breakEngine.CheckBreak(legAfterExtreme, breakBar); // sets .broken/.break_time in place
       legEngine.SetLeg(i2, legAfterExtreme);
       sm.OnLegBroken(legAfterExtreme); // -> FIB_ACTIVE
 
@@ -2097,7 +2102,7 @@ public:
       ledger.BuildFromFinalState(sm, emptyEntry, emptyExit);
 
       GZ_Setup s = sm.GetSetup(0);
-      bool ok = (ledger.CountByType(GZ_LEDGER_SETUP_VALID)==1) && (ledger.EventCount()==1);
+      bool ok = broke && (ledger.CountByType(GZ_LEDGER_SETUP_VALID)==1) && (ledger.EventCount()==1);
       if(ok)
         {
          GZ_LedgerEvent ev = ledger.GetEvent(0);
@@ -2139,9 +2144,14 @@ public:
       GZ_Leg legB = legEngineB.GetLeg(ib2);
       int siB = sm.OnLegCreated(legB); // Setup #2
 
+      GZ_BreakConfig bcfgB; bcfgB.Default();
+      CGZBreakEngine breakEngineB(m_logger); breakEngineB.Configure(bcfgB);
+
       MqlRates breakBarB = MakeBar(t0+18*300, 109,112,108,111);
       legEngineB.UpdateBar(breakBarB);
       GZ_Leg legBAfterExtreme = legEngineB.GetLeg(ib2);
+      breakEngineB.OnBar(breakBarB);
+      bool brokeB = breakEngineB.CheckBreak(legBAfterExtreme, breakBarB); // sets .broken/.break_time in place
       legEngineB.SetLeg(ib2, legBAfterExtreme);
       sm.OnLegBroken(legBAfterExtreme); // -> FIB_ACTIVE
       GZ_Setup setupB = sm.GetSetup(siB);
@@ -2157,7 +2167,7 @@ public:
       CGZEventLedger ledger(m_logger); ledger.Init();
       ledger.BuildFromFinalState(sm, emptyEntry, emptyExit);
 
-      bool ok = (ledger.CountByType(GZ_LEDGER_SETUP_CANCELLED)==1) &&
+      bool ok = brokeB && (ledger.CountByType(GZ_LEDGER_SETUP_CANCELLED)==1) &&
                 (ledger.CountByType(GZ_LEDGER_SETUP_INVALIDATED)==1) &&
                 (ledger.CountByType(GZ_LEDGER_SETUP_VALID)==1); // only Setup B ever reached FIB_ACTIVE
       AddResult("T70", ok, StringFormat("cancelled=%d invalidated=%d valid=%d",
