@@ -294,14 +294,15 @@ input int                   InpOosMinTrades               = GZ_DEFAULT_OOS_MIN_T
 //--- Phase 15.5: Reward / TP x Risk-Free (BE) Research Matrix ------------------------------
 //--- RESEARCH + MEASUREMENT ONLY, on the DEVELOPMENT range (InpRangeStart..InpRangeEnd) ONLY.
 //--- While InpRunPhase155=true, Phase 15 (which loads the Final OOS) is ALWAYS skipped, so the
-//--- Final OOS is never loaded or inspected. Nothing is selected, ranked or frozen.
+//--- Final OOS is never loaded or inspected. Nothing is chosen, ranked or frozen.
 input bool                  InpRunPhase155                = true;   // run the Phase 15.5 matrix (also forces Phase 15 / Final OOS OFF)
 input bool                  InpPhase155Only               = true;   // true = also skip the heavy Phase 11-14 studies during this run (unrelated to 15.5)
-input bool                  InpP155IncludeInactiveEquivalent = true; // run trigger>=TP combinations too (validation only; 45 extra runs)
 input double                InpP155RefWinRate             = 0.507;  // Phase 15 Development baseline AS REPORTED (TP 2R, BE off): win rate (fraction)
 input double                InpP155RefExpectancy          = 0.5218; //   ... expectancy (R)
 input double                InpP155RefPF                  = 2.059;  //   ... profit factor
 input double                InpP155RefNetR                = 215.0;  //   ... net R
+input int                   InpP155RefTrades              = 412;    //   ... trades
+input double                InpP155RefMaxDD               = 6.0;    //   ... max drawdown (R)
 
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
@@ -982,7 +983,7 @@ void BuildAndEmitReport()
    report += StringFormat("InpOosStart=%s InpOosEnd=%s InpOosMinTrades=%d (Development range InpRangeStart=%s InpRangeEnd=%s).\n\n",
               TimeToString(InpOosStart), TimeToString(InpOosEnd), InpOosMinTrades, TimeToString(InpRangeStart), TimeToString(InpRangeEnd));
 
-   report += "--- Automated Test Results (T01-T180: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13, T143-T158 Phase 14, T159-T166 Phase 15, T167-T180 Phase 15.5) ---\n";
+   report += "--- Automated Test Results (T01-T187: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13, T143-T158 Phase 14, T159-T166 Phase 15, T167-T187 Phase 15.5) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -1069,7 +1070,7 @@ void BuildAndEmitReport()
 //+------------------------------------------------------------------+
 //| Phase 15.5: write the human-readable report + machine-readable   |
 //| CSVs (Common\Files). Called after the harness ran, so the        |
-//| T167-T180 unit-test results can be embedded.                      |
+//| T167-T187 unit-test results can be embedded.                      |
 //+------------------------------------------------------------------+
 void EmitPhase155Report()
   {
@@ -1099,7 +1100,7 @@ void EmitPhase155Report()
       ut += StringFormat("%s: %s - %s\n", r.id, r.passed?"PASS":"FAIL", r.detail);
       if(r.passed) up++; else uf++;
      }
-   ut += StringFormat("(Full suite T01-T180: %d PASS / %d FAIL - see the main report.)\n", g_harness.PassCount(), g_harness.FailCount());
+   ut += StringFormat("(Full suite T01-T187: %d PASS / %d FAIL - see the main report.)\n", g_harness.PassCount(), g_harness.FailCount());
    // a failure ANYWHERE in the suite must also block the 15.5 status
    if(g_harness.FailCount()>0 && uf==0) uf = g_harness.FailCount();
 
@@ -1842,13 +1843,15 @@ int OnInit()
          p155_ref.ext_expectancy  = InpP155RefExpectancy;
          p155_ref.ext_pf          = InpP155RefPF;
          p155_ref.ext_net_r       = InpP155RefNetR;
+         p155_ref.ext_trades      = InpP155RefTrades;
+         p155_ref.ext_max_dd_r    = InpP155RefMaxDD;
 
          g_p155_dataset_id = StringFormat("%s_M1M5_DEV_%s_%s", InpSymbol,
                               TimeToString(m5[0].time, TIME_DATE), TimeToString(m5[n5-1].time, TIME_DATE));
-         g_logger.Info("RewardBe", StringFormat("Phase 15.5: starting TP x BE matrix on Development data %s (%d M1 / %d M5 bars). This runs ~130 full simulations - expect several minutes.",
+         g_logger.Info("RewardBe", StringFormat("Phase 15.5: starting TP x BE matrix on Development data %s (%d M1 / %d M5 bars). This runs 29 full simulations (26 main TP x BE configurations + 1 high-TP reference + 2 determinism repeats).",
                        g_p155_dataset_id, n1, n5));
          g_rewardbe_engine.Run(p155_cfg, m1, m5, g_p155_dataset_id, g_info_m1.validation_status, g_info_m5.validation_status,
-                               InpP155IncludeInactiveEquivalent, InpRangeStart, InpRangeEnd, InpOosStart, !g_phase15_ran, p155_ref);
+                               InpRangeStart, InpRangeEnd, InpOosStart, !g_phase15_ran, p155_ref);
          g_phase155_ran = true;
          g_logger.Info("RewardBe", StringFormat("Phase 15.5: %d experiments executed, %d matrix rows, runtime validations failed=%d blocked=%d.",
                        g_rewardbe_engine.ExperimentCount(), g_rewardbe_engine.RowCount(),

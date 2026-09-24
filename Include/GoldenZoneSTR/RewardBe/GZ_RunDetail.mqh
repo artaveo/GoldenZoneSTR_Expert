@@ -44,6 +44,8 @@ public:
    bool      be_arm_retrace[];
    double    mae_r[];
    double    mfe_r[];
+   datetime  time_to_mae[];      // journal: time the FINAL mae_r was last set (initial value = entry_time)
+   datetime  time_to_mfe[];      // journal: time the FINAL mfe_r was last set (initial value = entry_time)
    bool      reach[];              // count*GZ_REACH_LEVEL_COUNT, row-major
 
                      CGZRunDetail() { Clear(); }
@@ -56,13 +58,15 @@ public:
       ArrayResize(realized_r, 0);     ArrayResize(initial_risk, 0); ArrayResize(be_triggered, 0);
       ArrayResize(intrabar_conflict, 0); ArrayResize(be_on_entry_bar, 0); ArrayResize(be_arm_retrace, 0);
       ArrayResize(mae_r, 0);          ArrayResize(mfe_r, 0);        ArrayResize(reach, 0);
+      ArrayResize(time_to_mae, 0);    ArrayResize(time_to_mfe, 0);
      }
 
    //--- Reach flags are derived from mfe_r with the SAME rule the Journal
    //--- Engine uses (mfe_r >= GZ_REACH_LEVELS[l]); also used by unit tests
    //--- to hand-build populations.
    void              AddTrade(long id, datetime et, double ep, int dir, datetime xt, int reason, double r, double risk,
-                              bool be_trig, bool conflict, bool be_entry_bar, bool retrace, double mae, double mfe)
+                              bool be_trig, bool conflict, bool be_entry_bar, bool retrace, double mae, double mfe,
+                              datetime t_mae=0, datetime t_mfe=0)
      {
       int n = count;
       ArrayResize(trade_id, n+1);          ArrayResize(entry_time, n+1);   ArrayResize(entry_price, n+1);
@@ -71,10 +75,12 @@ public:
       ArrayResize(intrabar_conflict, n+1); ArrayResize(be_on_entry_bar, n+1); ArrayResize(be_arm_retrace, n+1);
       ArrayResize(mae_r, n+1);             ArrayResize(mfe_r, n+1);
       ArrayResize(reach, (n+1)*GZ_REACH_LEVEL_COUNT);
+      ArrayResize(time_to_mae, n+1);       ArrayResize(time_to_mfe, n+1);
 
       trade_id[n]=id; entry_time[n]=et; entry_price[n]=ep; direction[n]=dir; exit_time[n]=xt; exit_reason[n]=reason;
       realized_r[n]=r; initial_risk[n]=risk; be_triggered[n]=be_trig; intrabar_conflict[n]=conflict;
       be_on_entry_bar[n]=be_entry_bar; be_arm_retrace[n]=retrace; mae_r[n]=mae; mfe_r[n]=mfe;
+      time_to_mae[n]=t_mae; time_to_mfe[n]=t_mfe;
       for(int l=0;l<GZ_REACH_LEVEL_COUNT;l++)
          reach[n*GZ_REACH_LEVEL_COUNT+l] = (risk>0.0 && mfe>=GZ_REACH_LEVELS[l]);
       count = n+1;
@@ -93,6 +99,7 @@ public:
          if(e.is_open)
             continue;
          double mae = 0.0, mfe = 0.0;
+         datetime t_mae = 0, t_mfe = 0;
          int jidx = -1;
          if(i<jn && jr.GetJournal(i).trade_id==e.trade_id)
             jidx = i;
@@ -106,10 +113,12 @@ public:
             GZ_TradeJournal j = jr.GetJournal(jidx);
             mae = j.mae_r;
             mfe = j.mfe_r;
+            t_mae = j.time_to_mae;
+            t_mfe = j.time_to_mfe;
            }
          AddTrade(e.trade_id, e.entry_time, e.entry_price, (int)e.direction, e.exit_time, (int)e.exit_reason,
                   e.realized_r, e.initial_risk, e.be_triggered, e.intrabar_conflict,
-                  e.be_armed_on_entry_bar, e.be_arm_bar_retrace, mae, mfe);
+                  e.be_armed_on_entry_bar, e.be_arm_bar_retrace, mae, mfe, t_mae, t_mfe);
         }
      }
 
@@ -163,6 +172,19 @@ public:
    int               CountRetrace() const     { int c=0; for(int i=0;i<count;i++) if(be_triggered[i] && be_arm_retrace[i]) c++; return c; }
    int               CountRetraceNonEntryBar() const
      { int c=0; for(int i=0;i<count;i++) if(be_triggered[i] && be_arm_retrace[i] && !be_on_entry_bar[i]) c++; return c; }
+
+   //--- Journal accounting diagnostics. The Journal Engine updates MFE/MAE/Reach with the
+   //--- FULL high/low of every candle it is fed while the trade is still journal-open, and
+   //--- it is fed the exit candle BEFORE the closure is synchronized (see GZ_TradeSimulator).
+   //--- These counters make that rule observable (they never change any number).
+   int               CountMfeSetOnExitBar() const
+     { int c=0; for(int i=0;i<count;i++) if(mfe_r[i]>0.0 && time_to_mfe[i]==exit_time[i]) c++; return c; }
+   int               CountMaeSetOnExitBar() const
+     { int c=0; for(int i=0;i<count;i++) if(mae_r[i]>0.0 && time_to_mae[i]==exit_time[i]) c++; return c; }
+   int               CountTpExitMfeOvershoot(double tp_r) const
+     { int c=0; for(int i=0;i<count;i++) if(exit_reason[i]==(int)GZ_EXIT_TP_HIT && mfe_r[i]>tp_r+1.0e-9) c++; return c; }
+   int               CountSlExitMaeBeyondStop() const
+     { int c=0; for(int i=0;i<count;i++) if(exit_reason[i]==(int)GZ_EXIT_SL_HIT && mae_r[i]>1.0+1.0e-9) c++; return c; }
 
    //--- Trades that CLOSED on the very M1 candle they entered on
    //--- (exit_time==entry_time); reason<0 counts every reason.

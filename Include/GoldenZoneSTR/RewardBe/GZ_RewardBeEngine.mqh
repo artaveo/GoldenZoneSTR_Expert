@@ -41,11 +41,13 @@ struct GZ_RewardBeBaselineRef
    double   ext_expectancy;
    double   ext_pf;
    double   ext_net_r;
+   int      ext_trades;       // 412 (Phase 15 Development baseline)
+   double   ext_max_dd_r;     // 6.0
 
    void Clear()
      {
       main_available=false; main_trades=0; main_winners=0; main_net_r=0.0; main_expectancy=0.0;
-      ext_available=false; ext_win_rate=0.0; ext_expectancy=0.0; ext_pf=0.0; ext_net_r=0.0;
+      ext_available=false; ext_win_rate=0.0; ext_expectancy=0.0; ext_pf=0.0; ext_net_r=0.0; ext_trades=0; ext_max_dd_r=0.0;
      }
   };
 
@@ -66,7 +68,6 @@ private:
    datetime              m_dev_first, m_dev_last;
    int                   m_m1_bars, m_m5_bars;
    string                m_dataset_id;
-   bool                  m_include_equivalent;
 
    //--- text helpers -------------------------------------------------------
    string PadR(string s, int w) const { while(StringLen(s)<w) s += " "; return s; }
@@ -151,6 +152,10 @@ private:
       row.be_armed_on_entry_bar     = d.CountBeOnEntryBar();
       row.be_arm_retrace            = d.CountRetrace();
       row.be_arm_retrace_non_entry  = d.CountRetraceNonEntryBar();
+      row.mfe_set_on_exit_bar       = d.CountMfeSetOnExitBar();
+      row.mae_set_on_exit_bar       = d.CountMaeSetOnExitBar();
+      row.tp_exit_mfe_overshoot     = d.CountTpExitMfeOvershoot(tp);
+      row.sl_exit_mae_beyond_stop   = d.CountSlExitMaeBeyondStop();
 
       //--- snapshot vs Phase 8 metrics consistency (V11 input)
       bool consistent = (d.count==row.trades) && (MathAbs(d.NetR()-row.net_r)<0.000001);
@@ -245,7 +250,7 @@ public:
       m_logger = logger; m_runner = NULL; m_status = GZ_RB_STATUS_NO_DATA;
       m_quiet.SetMinLevel(GZ_SEV_ERROR);
       m_runs = 0; m_matrix_runs = 0; m_detail_mismatch = 0; m_entry_mismatch_total = 0; m_unmatched_total = 0;
-      m_dev_first = 0; m_dev_last = 0; m_m1_bars = 0; m_m5_bars = 0; m_dataset_id = ""; m_include_equivalent = true;
+      m_dev_first = 0; m_dev_last = 0; m_m1_bars = 0; m_m5_bars = 0; m_dataset_id = "";
      }
 
    ENUM_GZ_RB_STATUS Status() const       { return m_status; }
@@ -277,19 +282,15 @@ public:
       return c;
      }
 
-   //--- Number of grid combinations by kind (pure; used by tests and the report header).
-   static void       CountGrid(int &off_runs, int &active_runs, int &equivalent_runs)
+   //--- Number of MAIN-MATRIX configurations (pure; used by tests and the report header).
+   //--- off_runs = one BE-off run per TP; active_runs = the reduced BE trigger list of each TP (GZRewardBeTriggersForTp).
+   static void       CountGrid(int &off_runs, int &active_runs)
      {
       double tps[], trigs[];
       GZRewardBeTpGrid(tps);
-      GZRewardBeTriggerGrid(trigs);
-      off_runs = ArraySize(tps); active_runs = 0; equivalent_runs = 0;
+      off_runs = ArraySize(tps); active_runs = 0;
       for(int t=0;t<ArraySize(tps);t++)
-         for(int g=0;g<ArraySize(trigs);g++)
-           {
-            if(trigs[g] >= tps[t]-GZ_RB_EPS) equivalent_runs++;
-            else                              active_runs++;
-           }
+         active_runs += GZRewardBeTriggersForTp(tps[t], trigs);
      }
 
    //--- Run the whole Phase 15.5 matrix over the supplied DEVELOPMENT data.
@@ -298,14 +299,13 @@ public:
    //--- avoided loading the Final OOS in this run (V08).
    ENUM_GZ_RB_STATUS Run(const GZ_ExperimentConfig &base_cfg, const MqlRates &m1[], const MqlRates &m5[],
                          string dataset_id, ENUM_GZ_VALIDATION_STATUS m1_status, ENUM_GZ_VALIDATION_STATUS m5_status,
-                         bool include_equivalent, datetime dev_range_start, datetime dev_range_end,
+                         datetime dev_range_start, datetime dev_range_end,
                          datetime oos_start, bool phase15_skipped, const GZ_RewardBeBaselineRef &bref)
      {
       ArrayResize(m_rows, 0);
       ArrayResize(m_val, 0);
       m_runs = 0; m_matrix_runs = 0; m_detail_mismatch = 0; m_entry_mismatch_total = 0; m_unmatched_total = 0;
       m_dataset_id = dataset_id;
-      m_include_equivalent = include_equivalent;
 
       int n1 = ArraySize(m1);
       int n5 = ArraySize(m5);
@@ -333,7 +333,6 @@ public:
 
       double tps[], trigs[];
       GZRewardBeTpGrid(tps);
-      GZRewardBeTriggerGrid(trigs);
 
       for(int t=0; t<ArraySize(tps); t++)
         {
@@ -349,30 +348,21 @@ public:
          if(m_logger!=NULL)
             m_logger.Info("RewardBe", StringFormat("run %d: TP=%.2fR BE=OFF trades=%d net_r=%.3f", m_runs, tp, row_off.trades, row_off.net_r));
 
-         for(int g=0; g<ArraySize(trigs); g++)
+         // Reduced BE trigger list of this TP (all strictly below TP; no 0.25R/0.75R). BE >= TP is never executed.
+         int n_trig = GZRewardBeTriggersForTp(tp, trigs);
+         for(int g=0; g<n_trig; g++)
            {
             double trig = trigs[g];
-            bool equivalent = (trig >= tp-GZ_RB_EPS);
-            if(equivalent && !include_equivalent)
-               continue;
 
             GZ_ExperimentResult r_on;
             CGZRunDetail *d_on = new CGZRunDetail();
             RunOne(base_cfg, tp, trig, m1, m5, m1_status, m5_status, r_on, d_on);
             GZ_RewardBeRow row_on;
-            FillRow(r_on, d_on, equivalent ? GZ_RB_BE_INACTIVE_EQUIVALENT : GZ_RB_BE_ACTIVE, tp, trig, row_on);
+            FillRow(r_on, d_on, GZ_RB_BE_ACTIVE, tp, trig, row_on);
             ComparePairs(d_off, d_on, row_on.pair);
             m_entry_mismatch_total += row_on.pair.entry_mismatch;
             m_unmatched_total      += (row_on.pair.unmatched_on + row_on.pair.unmatched_off);
             if(row_on.trades!=row_off.trades) m_unmatched_total++;
-            if(equivalent)
-               // identical aggregates AND every single trade unchanged (same exit reason and same R).
-               // NB: DATA_END->DATA_END trades legitimately land in category E (same-other), so E is NOT required to be 0.
-               row_on.equiv_matches_off = RowsIdentical(m_rows[off_idx], row_on) &&
-                                          row_on.pair.cat_a==0 && row_on.pair.cat_b==0 &&
-                                          row_on.pair.e_be_from_other==0 && row_on.pair.e_anomaly==0 &&
-                                          row_on.pair.unmatched_on==0 && row_on.pair.unmatched_off==0 &&
-                                          row_on.pair.no_change==row_on.pair.matched;
             AppendRow(row_on);
             m_matrix_runs++;
             if(m_logger!=NULL)
@@ -384,7 +374,7 @@ public:
          delete d_off;
         }
 
-      //--- REFERENCE_ONLY / UNCENSORED_REACH run (approved decision 3): TP=1000R, BE off.
+      //--- REFERENCE_ONLY / HIGH_TP_REACH_REFERENCE run (executed exactly ONCE): TP=1000R, BE off. Not a strategy TP.
       GZ_ExperimentResult r_ref;
       CGZRunDetail *d_ref = new CGZRunDetail();
       RunOne(base_cfg, GZ_RB_REFERENCE_TP_R, 0.0, m1, m5, m1_status, m5_status, r_ref, d_ref);
@@ -471,23 +461,53 @@ public:
          double de = MathAbs(m_rows[i_base].expectancy-bref.ext_expectancy);
          double dp = MathAbs(m_rows[i_base].profit_factor-bref.ext_pf);
          double dn = MathAbs(m_rows[i_base].net_r-bref.ext_net_r);
-         bool ok = (dw<=0.0006) && (de<=0.0002) && (dp<=0.0015) && (dn<=0.6);
+         double dd_diff = MathAbs(m_rows[i_base].max_dd_r-bref.ext_max_dd_r);
+         bool trades_ok = (bref.ext_trades<=0) || (m_rows[i_base].trades==bref.ext_trades);
+         bool ok = (dw<=0.0006) && (de<=0.0002) && (dp<=0.0015) && (dn<=0.6) && trades_ok && (dd_diff<=0.05);
          AddVal("V03_BASELINE_EQUALS_PHASE15_DEV_REPORT", ok, false,
-                StringFormat("matrix: win=%.4f exp=%.4f pf=%.3f net_r=%.3f | Phase 15 report: win=%.4f exp=%.4f pf=%.3f net_r=%.1f | |diff| win=%.5f exp=%.5f pf=%.4f net_r=%.3f (tolerances: rounding of the printed figures)",
-                             m_rows[i_base].win_rate, m_rows[i_base].expectancy, m_rows[i_base].profit_factor, m_rows[i_base].net_r,
-                             bref.ext_win_rate, bref.ext_expectancy, bref.ext_pf, bref.ext_net_r, dw, de, dp, dn));
+                StringFormat("matrix: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.3f max_dd=%.2f | Phase 15 report: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.1f max_dd=%.2f | |diff| win=%.5f exp=%.5f pf=%.4f net_r=%.3f max_dd=%.3f (tolerances: rounding of the printed figures; trade count exact)",
+                             m_rows[i_base].trades, m_rows[i_base].win_rate, m_rows[i_base].expectancy, m_rows[i_base].profit_factor, m_rows[i_base].net_r, m_rows[i_base].max_dd_r,
+                             bref.ext_trades, bref.ext_win_rate, bref.ext_expectancy, bref.ext_pf, bref.ext_net_r, bref.ext_max_dd_r, dw, de, dp, dn, dd_diff));
         }
 
-      // V04 - BE trigger >= TP is mechanically inactive: identical to BE off
+      // V04 - main-matrix grid rule (reduced grid): TP <= 4.5R (no 5.0R); BE OFF once per TP; the BE-active rows of every TP are EXACTLY
+      //       GZRewardBeTriggersForTp(TP) (no 0.25R/0.75R; TP>=2R whole-R only; all < TP); no trigger >= TP; exactly one reference row.
       {
-       int eq = 0, eq_ok = 0;
+       double tps[], trigs[];
+       GZRewardBeTpGrid(tps);
+       bool ok = true;
+       string why = "";
+       int off_rows = 0, act_rows = 0, ref_rows = 0, eq_rows = 0;
        for(int i=0;i<n;i++)
-          if(m_rows[i].kind==GZ_RB_BE_INACTIVE_EQUIVALENT) { eq++; if(m_rows[i].equiv_matches_off) eq_ok++; }
-       if(eq==0)
-          AddVal("V04_BE_INACTIVE_EQUIVALENT_EQUALS_OFF", false, true, "equivalent (trigger>=TP) validation runs were disabled (InpP155IncludeInactiveEquivalent=false)");
-       else
-          AddVal("V04_BE_INACTIVE_EQUIVALENT_EQUALS_OFF", (eq==eq_ok), false,
-                 StringFormat("%d/%d trigger>=TP runs are identical to their BE-off run (trades, net_r, drawdown, streaks, exit counts, reach counts, every trade unchanged)", eq_ok, eq));
+         {
+          if(m_rows[i].kind==GZ_RB_OFF) off_rows++;
+          else if(m_rows[i].kind==GZ_RB_BE_ACTIVE) act_rows++;
+          else if(m_rows[i].kind==GZ_RB_REFERENCE_ONLY) ref_rows++;
+          else eq_rows++;
+          if(m_rows[i].kind==GZ_RB_REFERENCE_ONLY) continue;
+          if(m_rows[i].tp_r>GZ_RB_MAX_TP_R+GZ_RB_EPS) { ok = false; why += "TP>4.5 "; }
+          if(m_rows[i].kind==GZ_RB_BE_ACTIVE)
+            {
+             double g = m_rows[i].be_trigger_r;
+             if(!(g>0.0 && g<m_rows[i].tp_r-GZ_RB_EPS)) { ok = false; why += "trigger_not_below_TP "; }
+             if(MathAbs(g-0.25)<GZ_RB_EPS || MathAbs(g-0.75)<GZ_RB_EPS) { ok = false; why += "trigger_0.25_or_0.75_present "; }
+             if(m_rows[i].tp_r>=GZ_RB_WHOLE_R_FROM_TP-GZ_RB_EPS && MathAbs(g-MathRound(g))>GZ_RB_EPS) { ok = false; why += "non_whole_R_trigger_at_TP>=2 "; }
+            }
+         }
+       for(int t=0;t<ArraySize(tps);t++)
+         {
+          if(FindOffRow(tps[t])<0) { ok = false; why += StringFormat("missing_OFF@%.1f ", tps[t]); }
+          int nt = GZRewardBeTriggersForTp(tps[t], trigs);
+          for(int k=0;k<nt;k++)
+             if(FindRow(GZ_RB_BE_ACTIVE, tps[t], trigs[k])<0) { ok = false; why += StringFormat("missing_BE%.2f@%.1f ", trigs[k], tps[t]); }
+         }
+       int exp_off, exp_act;
+       CountGrid(exp_off, exp_act);
+       if(off_rows!=exp_off || act_rows!=exp_act || ref_rows!=1 || eq_rows!=0) { ok = false; why += "row_counts "; }
+       if(FindOffRow(5.0)>=0) { ok = false; why += "TP5_present "; }
+       AddVal("V04_MAIN_MATRIX_GRID_RULE", ok, false,
+              StringFormat("TP grid 0.5..4.5R (no 5.0R); BE-off rows=%d (expect %d), BE-active rows=%d (expect %d; triggers exactly per the reduced rule, none >= TP, no 0.25R/0.75R), reference rows=%d (expect 1), BE>=TP rows executed=%d (expect 0) %s",
+                           off_rows, exp_off, act_rows, exp_act, ref_rows, eq_rows, why));
       }
 
       // V05 - BE settings genuinely change exit behavior where expected (active rows)
@@ -577,20 +597,23 @@ public:
      {
       string s = "";
       int n = ArraySize(m_rows);
-      int off_n, act_n, eq_n;
-      CountGrid(off_n, act_n, eq_n);
+      int off_n, act_n;
+      CountGrid(off_n, act_n);
 
       s += "===================================================\n";
       s += "GoldenZone STR - Phase 15.5 - Reward / TP x Risk-Free (BE) Research Matrix\n";
-      s += "RESEARCH / MEASUREMENT ONLY. Historical Development data. No configuration is selected, ranked or frozen.\n";
+      s += "RESEARCH / MEASUREMENT ONLY. Historical Development data. No configuration is chosen, ranked or frozen. No parameter is called best/optimal/final.\n";
       s += "===================================================\n";
       s += context_text;
       s += StringFormat("Dataset ID: %s | M1 bars=%d M5 bars=%d | first M5 bar=%s last M5 bar=%s\n", m_dataset_id, m_m1_bars, m_m5_bars,
                         TimeToString(m_dev_first), TimeToString(m_dev_last));
-      s += StringFormat("Grid: %d TP levels (0.5R..5.0R) x [BE off + 12 triggers 0.25..5.0R]; BE level = Entry, offset = 0R ONLY.\n", off_n);
-      s += StringFormat("Planned matrix runs: %d BE-off + %d BE-active (trigger < TP) + %d BE-inactive-equivalent (trigger >= TP, validation only) + 1 reference = %d.\n",
-                        off_n, act_n, m_include_equivalent ? eq_n : 0, off_n + act_n + (m_include_equivalent ? eq_n : 0) + 1);
-      s += StringFormat("Executed: %d experiments in total (matrix rows=%d, plus 2 determinism repeats). Status=%s\n\n",
+      s += "TP GRID: 0.5R, 1.0R, 1.5R, 2.0R, 2.5R, 3.0R, 3.5R, 4.0R, 4.5R  (5.0R is NOT part of the main matrix).\n";
+      s += "BE GRID RULE: for every TP, BE OFF plus BE triggers strictly below TP; 0.25R and 0.75R are never used. TP<2R: TP1.0 -> 0.5R, TP1.5 -> 1.0R (TP 0.5R has BE OFF only).\n";
+      s += "TP>=2R: whole-R triggers only (1R, 2R, 3R, 4R that are < TP): TP2.0:1 | 2.5:1,2 | 3.0:1,2 | 3.5:1,2,3 | 4.0:1,2,3 | 4.5:1,2,3,4. A BE trigger >= TP is never executed\n";
+      s += "(such a run is BE_INACTIVE_EQUIVALENT / VALIDATION_ONLY: TP is evaluated before BE arming, so it would just repeat BE OFF). BE level = Entry, offset = 0R ONLY.\n";
+      s += StringFormat("MAIN MATRIX EXPERIMENTS: %d = %d BE-off + %d BE-active.  REFERENCE EXPERIMENTS: 1 (TP=%.0fR, BE off; REFERENCE_ONLY / HIGH_TP_REACH_REFERENCE, run once).\n",
+                        off_n + act_n, off_n, act_n, GZ_RB_REFERENCE_TP_R);
+      s += StringFormat("Executed: %d experiments in total (matrix rows incl. reference=%d, plus 2 determinism repeats). Status=%s\n\n",
                         m_runs, m_matrix_runs, (m_status==GZ_RB_STATUS_OK)?"OK":((m_status==GZ_RB_STATUS_NO_DATA)?"NO_DATA":"REJECTED_OOS_OVERLAP"));
 
       s += "Definitions: WinRate = trades with realized R>0; LossRate = R<0; BE_Rate = BREAK_EVEN exits / trades (BE level = Entry -> R exactly 0).\n";
@@ -605,7 +628,7 @@ public:
         }
 
       //--- A ------------------------------------------------------------------
-      s += "--- A. TP x BE exit-results matrix (BE-off + BE-active rows; trigger>=TP validation rows are in the CSV and section G) ---\n";
+      s += "--- A. TP x BE exit-results matrix (BE_OFF and BE-active rows; BE >= TP is never executed) ---\n";
       s += PadL("TP",4)+PadL("BE",6)+PadL("N",5)+PadL("TP_HIT",7)+PadL("SL_HIT",7)+PadL("BE_EX",6)+PadL("SESS",5)+PadL("DATA",5)+PadL("OTH",4)
            +PadL("Win%",7)+PadL("Loss%",7)+PadL("BE%",6)+PadL("Exp",8)+PadL("PF",7)+PadL("NetR",8)+PadL("MaxDD",7)+PadL("MaxLS",6)+PadL("AvgLS",6)
            +PadL("AvgW",6)+PadL("AvgL",6)+"\n";
@@ -642,7 +665,7 @@ public:
          s += PadL(Dbl(r.tp_r,1),4)+PadL(IntegerToString(r.trades),7)+PadL(Pct(r.win_rate),7)+PadL(Pct(r.loss_rate),7)+PadL(Pct(r.be_rate),5)
               +PadL(Dbl(r.expectancy,4),8)+PadL(Pf(r),7)+PadL(Dbl(r.net_r,1),8)+PadL(Dbl(r.max_dd_r,2),7)+PadL(IntegerToString(r.max_lose_streak),6)+"\n";
         }
-      s += "(Descriptive only. Rows are NOT ranked and no TP is selected.)\n\n";
+      s += "(Descriptive only. Rows are NOT ranked and no TP is chosen.)\n\n";
 
       //--- C ------------------------------------------------------------------
       s += "--- C. BE effect: pairwise transitions, BE OFF vs BE ON at the same TP, joined by Trade ID ---\n";
@@ -650,7 +673,7 @@ public:
       s += "B = TP_HIT(off)->BREAK_EVEN(on)  [BE exited a trade that, without BE, went on to hit TP]\n";
       s += "C = TP_HIT->TP_HIT  D = SL_HIT->SL_HIT  [no exit-state change]   E = any other transition (sub-counts: BE-from-other / same-other / anomaly)\n";
       s += PadL("TP",4)+PadL("BE",6)+PadL("Match",6)+PadL("A",5)+PadL("B",5)+PadL("C",5)+PadL("D",5)+PadL("E",4)+PadL("E:be/same/an",13)
-           +PadL("NoChg",6)+PadL("Armed",6)+PadL("dR_A",8)+PadL("dR_B",8)+PadL("dNetR",8)+PadL("dExp",8)+PadL("dMaxDD",8)+PadL("SLprot%",8)+PadL("TPlost%",8)+"\n";
+           +PadL("NoChg",6)+PadL("Armed",6)+PadL("BEexit",7)+PadL("dR_A",8)+PadL("dR_B",8)+PadL("dNetR",8)+PadL("dExp",8)+PadL("dPF",8)+PadL("dWin%",8)+PadL("dMaxDD",8)+PadL("SLprot%",8)+PadL("TPlost%",8)+"\n";
       for(int i=0;i<n;i++)
         {
          if(m_rows[i].kind!=GZ_RB_BE_ACTIVE) continue;
@@ -659,40 +682,42 @@ public:
          double d_net = (o>=0) ? r.net_r-m_rows[o].net_r : 0.0;
          double d_exp = (o>=0) ? r.expectancy-m_rows[o].expectancy : 0.0;
          double d_dd  = (o>=0) ? r.max_dd_r-m_rows[o].max_dd_r : 0.0;
+         double d_pf  = (o>=0) ? r.profit_factor-m_rows[o].profit_factor : 0.0;
+         double d_win = (o>=0) ? (r.win_rate-m_rows[o].win_rate)*100.0 : 0.0;
          double prot  = (r.pair.off_sl_total>0) ? (double)r.pair.cat_a/r.pair.off_sl_total : 0.0;
          double lost  = (r.pair.off_tp_total>0) ? (double)r.pair.cat_b/r.pair.off_tp_total : 0.0;
          s += PadL(Dbl(r.tp_r,1),4)+PadL(Dbl(r.be_trigger_r,2),6)+PadL(IntegerToString(r.pair.matched),6)
               +PadL(IntegerToString(r.pair.cat_a),5)+PadL(IntegerToString(r.pair.cat_b),5)+PadL(IntegerToString(r.pair.cat_c),5)
               +PadL(IntegerToString(r.pair.cat_d),5)+PadL(IntegerToString(r.pair.cat_e),4)
               +PadL(StringFormat("%d/%d/%d", r.pair.e_be_from_other, r.pair.e_same_other, r.pair.e_anomaly),13)
-              +PadL(IntegerToString(r.pair.no_change),6)+PadL(IntegerToString(r.pair.be_armed_total),6)
-              +PadL(Dbl(r.pair.dr_a,1),8)+PadL(Dbl(r.pair.dr_b,1),8)+PadL(Dbl(d_net,1),8)+PadL(Dbl(d_exp,4),8)+PadL(Dbl(d_dd,2),8)
+              +PadL(IntegerToString(r.pair.no_change),6)+PadL(IntegerToString(r.pair.be_armed_total),6)+PadL(IntegerToString(r.exit_count[GZ_EXIT_BREAK_EVEN]),7)
+              +PadL(Dbl(r.pair.dr_a,1),8)+PadL(Dbl(r.pair.dr_b,1),8)+PadL(Dbl(d_net,1),8)+PadL(Dbl(d_exp,4),8)+PadL(Dbl(d_pf,3),8)+PadL(Dbl(d_win,1),8)+PadL(Dbl(d_dd,2),8)
               +PadL(Pct(prot),8)+PadL(Pct(lost),8)+"\n";
         }
       s += "SLprot% = A / (BE-off SL_HIT trades). TPlost% = B / (BE-off TP_HIT trades). NoChg = same exit reason and same R as BE off.\n";
       s += "'Armed' = trades whose BE armed at any time (armed trades that still ended TP_HIT/no change are inside C).\n";
-      s += "Per-TP context (BE-off SL_HIT / TP_HIT counts) is in section B/A. This section is descriptive; no BE setting is preferred.\n\n";
+      s += "Per-TP context (BE-off SL_HIT / TP_HIT counts) is in section B/A. dPF/dWin%(percentage points)/dMaxDD are BE-on minus BE-off. PF differences can be huge when the BE-on run has almost no losing trades (tiny denominator). This section is descriptive; no BE setting is preferred.\n\n";
 
       //--- D ------------------------------------------------------------------
       int ir = FindRow(GZ_RB_REFERENCE_ONLY, GZ_RB_REFERENCE_TP_R, 0.0);
-      s += "--- D. Uncensored Reach reference [REFERENCE_ONLY / UNCENSORED_REACH - NOT a strategy configuration] ---\n";
+      s += "--- D. High-TP reach reference [REFERENCE_ONLY / HIGH_TP_REACH_REFERENCE - NOT a strategy TP, NOT in the TP grid, NOT rankable] ---\n";
       if(ir>=0)
         {
          GZ_RewardBeRow r = m_rows[ir];
-         s += StringFormat("Run: TP=%.0fR (unreachable), BE off. Trades=%d. Exits: SL_HIT=%d TP_HIT=%d DATA_END=%d SESSION_EXIT=%d BREAK_EVEN=%d OTHER=%d.\n",
+         s += StringFormat("Run (executed once): TP=%.0fR (very high, reduced-censoring reach diagnostic; a tiny-risk trade CAN still hit it), BE off. Trades=%d. Exits: SL_HIT=%d TP_HIT=%d DATA_END=%d SESSION_EXIT=%d BREAK_EVEN=%d OTHER=%d.\n",
                            r.tp_r, r.trades, r.exit_count[GZ_EXIT_SL_HIT], r.exit_count[GZ_EXIT_TP_HIT], r.exit_count[GZ_EXIT_DATA_END],
                            r.exit_count[GZ_EXIT_SESSION_EXIT], r.exit_count[GZ_EXIT_BREAK_EVEN], r.exit_count[GZ_EXIT_OTHER]);
-         s += "Reach here = trades whose favorable excursion touched +xR before their stop (or data end). It is NOT a TP win rate and is not converted into one.\n";
+         s += "Reach here = trades whose favorable excursion touched +xR while the trade was journal-open (before its stop/data end; see section H for the exact candle rule). It is NOT a TP win rate and is not converted into one.\n";
          s += "The BE-off TP_HIT count at TP=xR (from the independent TP=xR run, section A) is printed beside it purely for side-by-side reading.\n";
          s += PadL("Level",7)+PadL("Reached",9)+PadL("Reached%",10)+PadL("TP_HIT@TP=x",13)+PadL("TP_HIT%",9)+"\n";
          for(int l=0;l<GZ_REACH_LEVEL_COUNT;l++)
            {
             int io = FindOffRow(GZ_REACH_LEVELS[l]);
-            int th = (io>=0) ? m_rows[io].exit_count[GZ_EXIT_TP_HIT] : 0;
-            double thp = (io>=0 && m_rows[io].trades>0) ? (double)th/m_rows[io].trades : 0.0;
             double rp = (r.trades>0) ? (double)r.reach_count[l]/r.trades : 0.0;
+            string th_txt  = (io>=0) ? IntegerToString(m_rows[io].exit_count[GZ_EXIT_TP_HIT]) : "n/a";   // 5.0R is not a main-matrix TP
+            string thp_txt = (io>=0 && m_rows[io].trades>0) ? Pct((double)m_rows[io].exit_count[GZ_EXIT_TP_HIT]/m_rows[io].trades) : "n/a";
             s += PadL(">="+Dbl(GZ_REACH_LEVELS[l],1)+"R",7)+PadL(IntegerToString(r.reach_count[l]),9)+PadL(Pct(rp),10)
-                 +PadL(IntegerToString(th),13)+PadL(Pct(thp),9)+"\n";
+                 +PadL(th_txt,13)+PadL(thp_txt,9)+"\n";
            }
          s += StringFormat("Reference-run data-end truncation: %d trades were still open at the end of the data (their Reach is cut off there).\n", r.exit_count[GZ_EXIT_DATA_END]);
          s += StringFormat("Reference-run MFE: avg=%.3fR max=%.3fR | avg MAE=%.3fR max MAE=%.3fR (descriptive; no causal reading is made).\n\n",
@@ -715,7 +740,7 @@ public:
       s += "\n";
 
       //--- F ------------------------------------------------------------------
-      s += "--- F. Intrabar diagnostic counts (measurement only; the baseline engine behavior was NOT changed) ---\n";
+      s += "--- F. Intrabar / exit-candle diagnostic counts (measurement only; the baseline engine behavior was NOT changed) ---\n";
       s += "CONFLICT   = one M1 candle touched both SL and TP (policy SL_FIRST resolves it; always recorded).\n";
       s += "EB_EXIT    = trade CLOSED on the very M1 candle it entered on (entry-candle behavior: SL/TP/BE are evaluated on the entry candle itself,\n";
       s += "             and TOUCH fills at that candle's extreme). EB_TP/EB_SL split by reason.\n";
@@ -731,6 +756,29 @@ public:
               +PadL(IntegerToString(r.intrabar_conflicts),6)+PadL(IntegerToString(r.eb_exit_total),8)+PadL(IntegerToString(r.eb_exit_tp),6)
               +PadL(IntegerToString(r.eb_exit_sl),6)+PadL(IntegerToString(r.be_armed),6)+PadL(IntegerToString(r.be_armed_on_entry_bar),9)
               +PadL(IntegerToString(r.be_arm_retrace),8)+PadL(IntegerToString(r.be_arm_retrace_non_entry),9)+"\n";
+        }
+      s += "\n";
+
+      //--- H ------------------------------------------------------------------
+      s += "--- H. MFE / MAE / Reach accounting rule (audit; documented, observable, UNCHANGED baseline behavior) ---\n";
+      s += "Per M1 candle the simulator order is: entry engine -> new trade handed to Exit+Journal -> ExitEngine.OnBar -> JournalEngine.OnBar -> SyncJournalClosures.\n";
+      s += "  ENTRY candle : the journal is opened BEFORE that candle's own OnBar, so the entry candle's FULL high/low count (a TOUCH entry fills at the candle extreme).\n";
+      s += "  EXIT candle  : the journal is still open when it is fed the exit candle (closure is synchronized afterwards), so the exit candle's FULL high/low count toward\n";
+      s += "                 MFE, MAE and Reach - including the part beyond the TP/SL price (MFE can exceed the TP R; MAE can exceed 1R on an SL exit; on a same-candle\n";
+      s += "                 SL+TP conflict resolved SL_FIRST the candle's high still counts as favorable excursion/Reach).\n";
+      s += "  BE ARM candle: counted fully like any candle; the new BE stop applies from the NEXT candle (unchanged).\n";
+      s += "  Reach levels use mfe_r >= level on floating-point R values (no tolerance).\n";
+      s += "Realized R is never affected by this: exits fill exactly at the TP/SL/BE price. The counts below make the rule observable:\n";
+      s += "  MFE@EXIT = trades whose final MFE was last set on their exit candle; MAE@EXIT = same for MAE; TPovr = TP_HIT trades with MFE > TP R;\n";
+      s += "  SLbeyond = SL_HIT trades with MAE > 1R.\n";
+      s += PadL("TP",4)+PadL("BE",6)+PadL("N",5)+PadL("MFE@EXIT",9)+PadL("MAE@EXIT",9)+PadL("TPovr",7)+PadL("SLbeyond",9)+"\n";
+      for(int i=0;i<n;i++)
+        {
+         if(m_rows[i].kind!=GZ_RB_OFF && m_rows[i].kind!=GZ_RB_BE_ACTIVE) continue;
+         GZ_RewardBeRow r = m_rows[i];
+         s += PadL(Dbl(r.tp_r,1),4)+PadL(r.kind==GZ_RB_OFF?"OFF":Dbl(r.be_trigger_r,2),6)+PadL(IntegerToString(r.trades),5)
+              +PadL(IntegerToString(r.mfe_set_on_exit_bar),9)+PadL(IntegerToString(r.mae_set_on_exit_bar),9)
+              +PadL(IntegerToString(r.tp_exit_mfe_overshoot),7)+PadL(IntegerToString(r.sl_exit_mae_beyond_stop),9)+"\n";
         }
       s += "\n";
 
@@ -752,8 +800,13 @@ public:
          status = "PHASE 15.5 BLOCKED (at least one validation could not be evaluated - see above)";
       else
          status = "PHASE 15.5 COMPLETE";
-      s += "--- Final Status ---\n" + status + "\n";
-      s += "This is historical research only; nothing here is evidence of future performance. No TP or BE setting is selected; the strategy is not frozen (Phase 16 not started).\n";
+      s += "--- Phase Status ---\n" + status + "\n";
+      bool oos_ok = false;
+      for(int v=0; v<ArraySize(m_val); v++)
+         if(m_val[v].id=="V08_FINAL_OOS_NOT_ACCESSED") oos_ok = m_val[v].passed && !m_val[v].blocked;
+      s += StringFormat("CONFIRMATION: Final OOS was NOT loaded or inspected in this run (V08 %s). Phase 16 was NOT executed. No configuration was chosen, ranked or frozen.\n", oos_ok?"PASS":"NOT CONFIRMED");
+      s += "Baseline regression (TP=2.0R + BE off vs Phase 15 Development) is validation V02/V03 above.\n";
+      s += "This is historical research only; nothing here is evidence of future performance.\n";
       s += "===================================================\n";
       return s;
      }
@@ -765,7 +818,7 @@ public:
                  "max_dd_r,max_lose_streak,avg_lose_streak,avg_mae_r,max_mae_r,avg_mfe_r,max_mfe_r,"
                  "exit_tp_hit,exit_sl_hit,exit_break_even,exit_session_exit,exit_data_end,exit_other,"
                  "reach_0.5,reach_1.0,reach_1.5,reach_2.0,reach_2.5,reach_3.0,reach_3.5,reach_4.0,reach_4.5,reach_5.0,"
-                 "be_armed,intrabar_conflicts,entry_bar_exit_total,entry_bar_exit_tp,entry_bar_exit_sl,be_armed_on_entry_bar,be_arm_retrace,be_arm_retrace_non_entry,equiv_matches_off\n";
+                 "be_armed,intrabar_conflicts,entry_bar_exit_total,entry_bar_exit_tp,entry_bar_exit_sl,be_armed_on_entry_bar,be_arm_retrace,be_arm_retrace_non_entry,mfe_set_on_exit_bar,mae_set_on_exit_bar,tp_exit_mfe_overshoot,sl_exit_mae_beyond_stop\n";
       int n = ArraySize(m_rows);
       for(int i=0;i<n;i++)
         {
@@ -779,8 +832,9 @@ public:
                            r.exit_count[GZ_EXIT_TP_HIT], r.exit_count[GZ_EXIT_SL_HIT], r.exit_count[GZ_EXIT_BREAK_EVEN],
                            r.exit_count[GZ_EXIT_SESSION_EXIT], r.exit_count[GZ_EXIT_DATA_END], r.exit_count[GZ_EXIT_OTHER]);
          for(int l=0;l<GZ_REACH_LEVEL_COUNT;l++) s += IntegerToString(r.reach_count[l]) + ",";
-         s += StringFormat("%d,%d,%d,%d,%d,%d,%d,%d,%s\n", r.be_armed, r.intrabar_conflicts, r.eb_exit_total, r.eb_exit_tp, r.eb_exit_sl,
-                           r.be_armed_on_entry_bar, r.be_arm_retrace, r.be_arm_retrace_non_entry, YN(r.equiv_matches_off));
+         s += StringFormat("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n", r.be_armed, r.intrabar_conflicts, r.eb_exit_total, r.eb_exit_tp, r.eb_exit_sl,
+                           r.be_armed_on_entry_bar, r.be_arm_retrace, r.be_arm_retrace_non_entry,
+                           r.mfe_set_on_exit_bar, r.mae_set_on_exit_bar, r.tp_exit_mfe_overshoot, r.sl_exit_mae_beyond_stop);
         }
       return s;
      }

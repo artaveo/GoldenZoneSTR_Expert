@@ -19,12 +19,20 @@ No TP/BE setting is selected, ranked or frozen.
 New: `Include/GoldenZoneSTR/RewardBe/{GZ_RunDetail,GZ_RewardBeTypes,GZ_RewardBeEngine,GZ_RewardBeTests}.mqh`
 Modified (additive, no behavior change): `Exit/GZ_ExitTypes.mqh`, `Exit/GZ_ExitEngine.mqh` (3 diagnostic fields only),
 `Experiment/GZ_ExperimentRunner.mqh` (optional detail capture + `RunSingleDetailed`), `Diagnostics/GZ_TestHarness.mqh`
-(calls T167-T180), `Experts/GoldenZoneSTR_Research.mq5` (inputs, guards, run block, report emission).
+(calls T167-T187), `Experts/GoldenZoneSTR_Research.mq5` (inputs, guards, run block, report emission).
 
-## Grid
-TP 0.5..5.0 step 0.5 (10). BE trigger OFF + 0.25 0.50 0.75 1.00 1.25 1.50 1.75 2.00 2.50 3.00 4.00 5.00 R. BE level = Entry, offset 0R only.
-Runs: 10 BE-off + 75 BE-active (trigger < TP) + 45 BE_INACTIVE_EQUIVALENT (trigger >= TP, validation only) + 1 REFERENCE_ONLY
-(TP=1000R, BE off, UNCENSORED_REACH) = 131 matrix runs, +2 determinism repeats = 133 experiments.
+## Grid (final research grid)
+TP 0.5..4.5 step 0.5 (9 values). BE OFF for every TP plus BE triggers strictly below TP; 0.25R and 0.75R never used.
+TP0.5 {} | TP1.0 {0.5} | TP1.5 {1.0} | TP2.0 {1} | TP2.5 {1,2} | TP3.0 {1,2} | TP3.5 {1,2,3} | TP4.0 {1,2,3} | TP4.5 {1,2,3,4}.
+BE >= TP is never executed. BE level = Entry, offset 0R only.
+Main matrix = 9 BE-off + 17 BE-active = 26 configurations + 1 REFERENCE_ONLY / HIGH_TP_REACH_REFERENCE run (TP=1000R, BE off,
+run once) = 27 matrix rows, +2 determinism repeats = 29 experiments.
+
+## MFE / MAE / Reach accounting (audit, unchanged behavior)
+Per M1 candle: entry engine -> hand-off (journal opened) -> ExitEngine.OnBar -> JournalEngine.OnBar -> SyncJournalClosures.
+Entry candle and exit candle are counted with their FULL high/low (MFE may exceed the TP R, MAE may exceed 1R on an SL exit,
+a same-candle SL+TP conflict resolved SL_FIRST still counts the high as Reach). BE-arm candle counted fully; new BE stop from
+the next candle. Realized R is unaffected. Observable via report section H and tests T184-T187.
 
 ## Outputs (Common\Files)
 `GZ_Phase155_Report.txt` (sections A-G), `GZ_Phase155_Matrix.csv` (all rows), `GZ_Phase155_Pairwise.csv` (all BE-on runs).

@@ -64,7 +64,7 @@ private:
    //---  1 A   +0.6R, retrace through entry, then SL    5 RETRACE BE arms on a candle that also reaches the new stop
    //---  2 B   +0.6R, retrace through entry, then TP    6 EB_ARM BE arms on the ENTRY candle
    //---  3 D   SL straight                              7 EB_TP  TP touched on the ENTRY candle
-   //---  8 CENSOR TP2 hit early (+2.2R), price only later reaches +3R
+   //---  8 CENSOR TP2 hit early (+2.2R), price only later reaches +3R      9 CONFLICT one candle touches SL and TP2
    void BuildScenario(int kind, MqlRates &m1[], MqlRates &m5[])
      {
       datetime t0 = MakeTime(2026,3,2,9,0);
@@ -130,6 +130,10 @@ private:
             ArrayResize(m1,2);
             m1[0]=MakeBar(b, 104,150,102,140);
             m1[1]=MakeBar(b+60, 140,141,139,140);
+            break;
+         case 9:   // one candle touches BOTH the SL (79<=80) and the TP2 (160>=146): conflict, SL_FIRST
+            ArrayResize(m1,2);
+            m1[0]=k0; m1[1]=MakeBar(b+60, 100,160,79,150);
             break;
          default: // 8
             ArrayResize(m1,3);
@@ -340,18 +344,19 @@ private:
                 d2.count>0?d2.exit_reason[0]:-1, d2.count>0?d2.realized_r[0]:0.0, d2.count>0?d2.mfe_r[0]:0.0));
      }
 
-   //--- T176: grids -------------------------------------------------------
+   //--- T176: grids (revised: TP 0.5..4.5R, BE triggers 0.25R..TP-0.25R) -------------------
    void T176_GridDefinitions()
      {
       double tps[], trigs[];
       GZRewardBeTpGrid(tps);
-      GZRewardBeTriggerGrid(trigs);
-      int off_n, act_n, eq_n;
-      CGZRewardBeEngine::CountGrid(off_n, act_n, eq_n);
-      bool ok = (ArraySize(tps)==10) && Near(tps[0],0.5) && Near(tps[9],5.0) && Near(tps[3],2.0) &&
-                (ArraySize(trigs)==12) && Near(trigs[0],0.25) && Near(trigs[11],5.0) && Near(trigs[7],2.0) &&
-                (off_n==10) && (act_n==75) && (eq_n==45) && ((act_n+eq_n)==ArraySize(tps)*ArraySize(trigs));
-      AddResult("T176", ok, StringFormat("TP levels=%d BE triggers=%d | BE-off runs=%d BE-active=%d trigger>=TP=%d", ArraySize(tps), ArraySize(trigs), off_n, act_n, eq_n));
+      int off_n, act_n;
+      CGZRewardBeEngine::CountGrid(off_n, act_n);
+      int sum_trig = 0;
+      for(int i=0;i<ArraySize(tps);i++) sum_trig += GZRewardBeTriggersForTp(tps[i], trigs);
+      bool ok = (ArraySize(tps)==9) && Near(tps[0],0.5) && Near(tps[8],4.5) && Near(tps[3],2.0) &&
+                (off_n==9) && (act_n==17) && (sum_trig==17) && ((off_n+act_n)==26);
+      AddResult("T176", ok, StringFormat("TP levels=%d (0.5..4.5R) | BE-off runs=%d BE-active=%d (sum of per-TP triggers=%d) main configurations=%d (expect 26 = 9 + 17)",
+                ArraySize(tps), off_n, act_n, sum_trig, off_n+act_n));
      }
 
    //--- T177: Reach is exit-censored in a normal run; the TP=1000R reference run is not ---
@@ -381,12 +386,12 @@ private:
 
       CGZRewardBeEngine e1(m_logger);
       // development range END after the protected OOS start -> rejected, nothing executed
-      ENUM_GZ_RB_STATUS s1 = e1.Run(cfg, m1, m5, "DS", GZ_VAL_VALID, GZ_VAL_VALID, true, first, (datetime)(last + 86400), last, true, bref);
+      ENUM_GZ_RB_STATUS s1 = e1.Run(cfg, m1, m5, "DS", GZ_VAL_VALID, GZ_VAL_VALID, first, (datetime)(last + 86400), last, true, bref);
       bool ok1 = (s1==GZ_RB_STATUS_REJECTED_OOS_OVERLAP) && (e1.ExperimentCount()==0) && (e1.RowCount()==0);
 
       CGZRewardBeEngine e2(m_logger);
       MqlRates empty1[], empty5[];
-      ENUM_GZ_RB_STATUS s2 = e2.Run(cfg, empty1, empty5, "DS", GZ_VAL_VALID, GZ_VAL_VALID, true, first, last, (datetime)(last + 86400), true, bref);
+      ENUM_GZ_RB_STATUS s2 = e2.Run(cfg, empty1, empty5, "DS", GZ_VAL_VALID, GZ_VAL_VALID, first, last, (datetime)(last + 86400), true, bref);
       bool ok2 = (s2==GZ_RB_STATUS_NO_DATA) && (e2.ExperimentCount()==0);
       AddResult("T178", (ok1 && ok2), StringFormat("dev_end>oos_start -> status=%d runs=%d rows=%d | no data -> status=%d runs=%d", (int)s1, e1.ExperimentCount(), e1.RowCount(), (int)s2, e2.ExperimentCount()));
      }
@@ -401,14 +406,14 @@ private:
       datetime first = m5[0].time, last = m5[ArraySize(m5)-1].time;
 
       CGZRewardBeEngine eng(m_logger);
-      ENUM_GZ_RB_STATUS st = eng.Run(cfg, m1, m5, "DS_SMOKE", GZ_VAL_VALID, GZ_VAL_VALID, true,
+      ENUM_GZ_RB_STATUS st = eng.Run(cfg, m1, m5, "DS_SMOKE", GZ_VAL_VALID, GZ_VAL_VALID,
                                        (datetime)(first - 86400), (datetime)(last + 86400), (datetime)(last + 2*86400), true, bref);
 
-      bool counts_ok = (st==GZ_RB_STATUS_OK) && (eng.RowCount()==131) && (eng.ExperimentCount()==133) &&
-                       (eng.CountKind(GZ_RB_OFF)==10) && (eng.CountKind(GZ_RB_BE_ACTIVE)==75) &&
-                       (eng.CountKind(GZ_RB_BE_INACTIVE_EQUIVALENT)==45) && (eng.CountKind(GZ_RB_REFERENCE_ONLY)==1);
+      bool counts_ok = (st==GZ_RB_STATUS_OK) && (eng.RowCount()==27) && (eng.ExperimentCount()==29) &&
+                       (eng.CountKind(GZ_RB_OFF)==9) && (eng.CountKind(GZ_RB_BE_ACTIVE)==17) &&
+                       (eng.CountKind(GZ_RB_BE_INACTIVE_EQUIVALENT)==0) && (eng.CountKind(GZ_RB_REFERENCE_ONLY)==1);
 
-      string must_pass[] = {"V01_TP_SWEEP_CHANGES_BEHAVIOR","V04_BE_INACTIVE_EQUIVALENT_EQUALS_OFF","V05_BE_SETTINGS_CHANGE_EXITS",
+      string must_pass[] = {"V01_TP_SWEEP_CHANGES_BEHAVIOR","V04_MAIN_MATRIX_GRID_RULE","V05_BE_SETTINGS_CHANGE_EXITS",
                             "V06_ENTRY_LOGIC_UNCHANGED","V07_DATASET_BOUNDARY","V08_FINAL_OOS_NOT_ACCESSED","V09_DETERMINISM_REPEAT",
                             "V10_REACH_IS_NOT_WIN_RATE","V11_DETAIL_MATCHES_METRICS","V12_PAIR_CATEGORIES_PARTITION"};
       int good = 0;
@@ -430,7 +435,7 @@ private:
       bool blocked_ok = (blocked==2) && (eng.ValidationFailCount()==0);
 
       AddResult("T179", (counts_ok && v_ok && blocked_ok),
-                StringFormat("status=%d rows=%d (expect 131) experiments=%d (expect 133 = 131 + 2 determinism repeats) | runtime validations passing=%d/%d %s| blocked=%d (expect 2: V02,V03) failed=%d",
+                StringFormat("status=%d rows=%d (expect 27 = 26 main + 1 reference) experiments=%d (expect 29 = 27 + 2 determinism repeats) | runtime validations passing=%d/%d %s| blocked=%d (expect 2: V02,V03) failed=%d",
                              (int)st, eng.RowCount(), eng.ExperimentCount(), good, ArraySize(must_pass), bad_ids, blocked, eng.ValidationFailCount()));
 
       string report = eng.BuildReport("", "", 0, 0);
@@ -439,13 +444,177 @@ private:
       int csv_lines = 0, pcsv_lines = 0;
       for(int i=0;i<StringLen(csv);i++)  if(StringGetCharacter(csv,i)=='\n')  csv_lines++;
       for(int i=0;i<StringLen(pcsv);i++) if(StringGetCharacter(pcsv,i)=='\n') pcsv_lines++;
-      bool rep_ok = (StringFind(report, "REFERENCE_ONLY / UNCENSORED_REACH")>=0 || StringFind(report, "REFERENCE_ONLY/UNCENSORED_REACH")>=0) &&
+      bool rep_ok = (StringFind(report, "HIGH_TP_REACH_REFERENCE")>=0) &&
                     (StringFind(report, "C. BE effect")>=0) && (StringFind(report, "E. Reach matrix")>=0) &&
-                    (StringFind(report, "F. Intrabar diagnostic")>=0) && (StringFind(report, "PHASE 15.5 BLOCKED")>=0);
-      // matrix CSV: header + 131 rows; pair CSV: header + 120 BE-on runs (75 active + 45 equivalent)
-      bool csv_ok = (csv_lines==132) && (pcsv_lines==121);
-      AddResult("T180", (rep_ok && csv_ok), StringFormat("report sections present=%s | matrix csv lines=%d (expect 132) pair csv lines=%d (expect 121)",
+                    (StringFind(report, "F. Intrabar / exit-candle diagnostic")>=0) && (StringFind(report, "H. MFE / MAE / Reach accounting")>=0) && (StringFind(report, "PHASE 15.5 BLOCKED")>=0);
+      // matrix CSV: header + 27 rows (26 main + 1 reference); pair CSV: header + 17 BE-active runs
+      bool csv_ok = (csv_lines==28) && (pcsv_lines==18);
+      AddResult("T180", (rep_ok && csv_ok), StringFormat("report sections present=%s | matrix csv lines=%d (expect 28) pair csv lines=%d (expect 18)",
                 rep_ok?"yes":"NO", csv_lines, pcsv_lines));
+     }
+
+   //--- T181: TP grid ends at 4.5R; 5.0R absent ---------------------------------------
+   void T181_TpGridEndsAt45()
+     {
+      double tps[];
+      GZRewardBeTpGrid(tps);
+      bool has5 = false, ascending = true;
+      for(int i=0;i<ArraySize(tps);i++)
+        {
+         if(Near(tps[i],5.0)) has5 = true;
+         if(i>0 && !(tps[i]>tps[i-1])) ascending = false;
+         if(!Near(tps[i], 0.5*(i+1))) ascending = false;   // exactly 0.5,1.0,...,4.5
+        }
+      bool ok = (ArraySize(tps)==9) && Near(tps[ArraySize(tps)-1],4.5) && !has5 && ascending;
+      AddResult("T181", ok, StringFormat("TP grid size=%d last=%.1f contains 5.0R=%s exact 0.5R steps=%s", ArraySize(tps), tps[ArraySize(tps)-1], has5?"YES":"no", ascending?"yes":"NO"));
+     }
+
+   //--- T182: reduced BE trigger rule: exact list per TP; never >= TP; never 0.25R/0.75R; TP>=2R whole-R only ---
+   bool ListIs(double tp, const double &expect[], int ne)
+     {
+      double got[];
+      int n = GZRewardBeTriggersForTp(tp, got);
+      if(n!=ne) return false;
+      for(int k=0;k<n;k++)
+         if(!Near(got[k], expect[k])) return false;
+      return true;
+     }
+
+   void T182_BeTriggerRule()
+     {
+      double e10[]  = {0.5};
+      double e15[]  = {1.0};
+      double e20[]  = {1.0};
+      double e25[]  = {1.0, 2.0};
+      double e30[]  = {1.0, 2.0};
+      double e35[]  = {1.0, 2.0, 3.0};
+      double e40[]  = {1.0, 2.0, 3.0};
+      double e45[]  = {1.0, 2.0, 3.0, 4.0};
+      bool ok = ListIs(0.5,e10,0) && ListIs(1.0,e10,1) && ListIs(1.5,e15,1) && ListIs(2.0,e20,1) && ListIs(2.5,e25,2) &&
+                ListIs(3.0,e30,2) && ListIs(3.5,e35,3) && ListIs(4.0,e40,3) && ListIs(4.5,e45,4);
+
+      double tps[], trigs[];
+      GZRewardBeTpGrid(tps);
+      bool rule_ok = true;
+      for(int t=0;t<ArraySize(tps);t++)
+        {
+         int n = GZRewardBeTriggersForTp(tps[t], trigs);
+         for(int k=0;k<n;k++)
+           {
+            if(!(trigs[k]>0.0 && trigs[k]<tps[t]-1.0e-9)) rule_ok = false;            // never >= TP
+            if(Near(trigs[k],0.25) || Near(trigs[k],0.75)) rule_ok = false;           // never 0.25R / 0.75R
+            if(tps[t]>=2.0-1.0e-9 && MathAbs(trigs[k]-MathRound(trigs[k]))>1.0e-9) rule_ok = false; // TP>=2R: whole R only
+            if(tps[t]>=2.0-1.0e-9 && Near(trigs[k],0.5)) rule_ok = false;
+           }
+        }
+      AddResult("T182", (ok && rule_ok), StringFormat("exact per-TP lists (0.5:none 1.0:0.5 1.5:1 2.0:1 2.5:1,2 3.0:1,2 3.5:1,2,3 4.0:1,2,3 4.5:1,2,3,4)=%s | never>=TP, never 0.25/0.75, TP>=2R whole-R only=%s",
+                ok?"ok":"FAIL", rule_ok?"ok":"FAIL"));
+     }
+
+   //--- T183: engine never executes BE>=TP, BE_OFF exists per TP, reference runs once & is labeled ---
+   void T183_EngineGridCompliance()
+     {
+      MqlRates m1[], m5[];
+      BuildScenario(2, m1, m5);
+      GZ_ExperimentConfig cfg; cfg.Default(); cfg.time_config.broker_offset_known = true;
+      GZ_RewardBeBaselineRef bref; bref.Clear();
+      datetime first = m5[0].time, last = m5[ArraySize(m5)-1].time;
+      CGZRewardBeEngine eng(m_logger);
+      eng.Run(cfg, m1, m5, "DS_GRID", GZ_VAL_VALID, GZ_VAL_VALID, (datetime)(first - 86400), (datetime)(last + 86400), (datetime)(last + 2*86400), true, bref);
+
+      int bad_be = 0, tp5 = 0, ref_rows = 0, off_rows = 0, missing_off = 0, eq_kind = 0;
+      bool ref_labeled = false, ref_tp_ok = true;
+      double tps[];
+      GZRewardBeTpGrid(tps);
+      for(int i=0;i<eng.RowCount();i++)
+        {
+         GZ_RewardBeRow r = eng.GetRow(i);
+         if(r.kind==GZ_RB_REFERENCE_ONLY)
+           {
+            ref_rows++;
+            ref_labeled = (StringFind(GZRewardBeKindToString(r.kind),"REFERENCE_ONLY")>=0) && (StringFind(GZRewardBeKindToString(r.kind),"HIGH_TP_REACH_REFERENCE")>=0);
+            if(!Near(r.tp_r, GZ_RB_REFERENCE_TP_R) || r.be_trigger_r>0.0) ref_tp_ok = false;
+            continue;
+           }
+         if(r.kind==GZ_RB_BE_INACTIVE_EQUIVALENT) eq_kind++;
+         if(Near(r.tp_r,5.0)) tp5++;
+         if(r.kind==GZ_RB_OFF) off_rows++;
+         if(r.kind==GZ_RB_BE_ACTIVE && (!(r.be_trigger_r>0.0 && r.be_trigger_r<r.tp_r-1.0e-9) || Near(r.be_trigger_r,0.25) || Near(r.be_trigger_r,0.75))) bad_be++;
+        }
+      for(int t=0;t<ArraySize(tps);t++)
+        {
+         bool found = false;
+         for(int i=0;i<eng.RowCount();i++)
+           {
+            GZ_RewardBeRow r = eng.GetRow(i);
+            if(r.kind==GZ_RB_OFF && Near(r.tp_r,tps[t])) { found = true; break; }
+           }
+         if(!found) missing_off++;
+        }
+      bool ok = (bad_be==0) && (tp5==0) && (ref_rows==1) && ref_labeled && ref_tp_ok && (off_rows==9) && (missing_off==0) && (eq_kind==0) &&
+                (eng.MatrixRunCount()==27) && (eng.ExperimentCount()==29);
+      AddResult("T183", ok, StringFormat("BE>=TP rows=%d TP5 rows=%d reference rows=%d (labeled=%s) BE_OFF rows=%d missing_OFF=%d matrix rows=%d experiments=%d (expect 27/29)",
+                bad_be+eq_kind, tp5, ref_rows, ref_labeled?"yes":"NO", off_rows, missing_off, eng.MatrixRunCount(), eng.ExperimentCount()));
+     }
+
+   //--- T184: EXIT-candle accounting, TP exit: the exit candle's FULL high counts (MFE overshoots TP) ---
+   void T184_ExitCandleAccountingTp()
+     {
+      GZ_ExperimentResult r; CGZRunDetail d;
+      RunScenario(0, 2.0, 0.0, r, GetPointer(d));
+      double expect_mfe = (160.0-102.0)/22.0;   // exit candle high 160, entry 102, risk 22
+      bool ok = (d.count==1) && (d.exit_reason[0]==(int)GZ_EXIT_TP_HIT) && Near(d.realized_r[0],2.0) &&
+                Near(d.mfe_r[0],expect_mfe) && (d.mfe_r[0]>2.0) && d.reach[4] &&   // reach >=2.5R although the exit filled at 2R
+                (d.time_to_mfe[0]==d.exit_time[0]) && (d.CountMfeSetOnExitBar()==1) && (d.CountTpExitMfeOvershoot(2.0)==1);
+      AddResult("T184", ok, StringFormat("TP exit at R=%.3f but MFE=%.4f (exit candle high counted), reach>=2.5R=%s, MFE set on exit candle=%d, TP overshoot count=%d",
+                d.count>0?d.realized_r[0]:0.0, d.count>0?d.mfe_r[0]:0.0, (d.count>0&&d.reach[4])?"y":"n", d.CountMfeSetOnExitBar(), d.CountTpExitMfeOvershoot(2.0)));
+     }
+
+   //--- T185: EXIT-candle accounting, SL exit: MAE counts the full candle low (MAE > 1R while R = -1) ---
+   void T185_ExitCandleAccountingSl()
+     {
+      GZ_ExperimentResult r; CGZRunDetail d;
+      RunScenario(3, 2.0, 0.0, r, GetPointer(d));
+      double expect_mae = (102.0-79.0)/22.0;    // exit candle low 79, entry 102, risk 22
+      bool ok = (d.count==1) && (d.exit_reason[0]==(int)GZ_EXIT_SL_HIT) && Near(d.realized_r[0],-1.0) &&
+                Near(d.mae_r[0],expect_mae) && (d.mae_r[0]>1.0) && (d.time_to_mae[0]==d.exit_time[0]) &&
+                (d.CountMaeSetOnExitBar()==1) && (d.CountSlExitMaeBeyondStop()==1);
+      AddResult("T185", ok, StringFormat("SL exit R=%.3f but MAE=%.4f (exit candle low counted), MAE set on exit candle=%d, SL-beyond-stop count=%d",
+                d.count>0?d.realized_r[0]:0.0, d.count>0?d.mae_r[0]:0.0, d.CountMaeSetOnExitBar(), d.CountSlExitMaeBeyondStop()));
+     }
+
+   //--- T186: same-candle SL+TP conflict (SL_FIRST): realized SL, yet the candle's high still counts as Reach; deterministic ---
+   void T186_ConflictCandleAccounting()
+     {
+      GZ_ExperimentResult r1, r2; CGZRunDetail d1, d2;
+      RunScenario(9, 2.0, 0.0, r1, GetPointer(d1));
+      RunScenario(9, 2.0, 0.0, r2, GetPointer(d2));
+      double expect_mfe = (160.0-102.0)/22.0;
+      bool ok = (d1.count==1) && (d1.exit_reason[0]==(int)GZ_EXIT_SL_HIT) && Near(d1.realized_r[0],-1.0) && d1.intrabar_conflict[0] &&
+                Near(d1.mfe_r[0],expect_mfe) && d1.reach[3] && d1.reach[4] &&        // reach >=2R and >=2.5R on an SL trade
+                (d2.count==1) && (d1.exit_reason[0]==d2.exit_reason[0]) && Near(d1.mfe_r[0],d2.mfe_r[0]) &&
+                Near(d1.mae_r[0],d2.mae_r[0]) && (d1.time_to_mfe[0]==d2.time_to_mfe[0]);
+      AddResult("T186", ok, StringFormat("conflict candle: reason=%d R=%.3f conflict=%s MFE=%.4f reach>=2R=%s (SL exit yet Reach counted); repeat identical=%s",
+                d1.count>0?d1.exit_reason[0]:-1, d1.count>0?d1.realized_r[0]:0.0, (d1.count>0&&d1.intrabar_conflict[0])?"y":"n",
+                d1.count>0?d1.mfe_r[0]:0.0, (d1.count>0&&d1.reach[3])?"y":"n", (d2.count==1 && Near(d1.mfe_r[0],d2.mfe_r[0]))?"y":"n"));
+     }
+
+   //--- T187: ENTRY candle and BE-ARM candle accounting -------------------------------------------
+   void T187_EntryAndBeArmCandleAccounting()
+     {
+      // entry candle (scenario 7: entry at its low 102, high 150): the entry candle's full high counts, MAE stays 0
+      GZ_ExperimentResult ra; CGZRunDetail da;
+      RunScenario(7, 2.0, 0.0, ra, GetPointer(da));
+      bool ok_a = (da.count==1) && Near(da.mfe_r[0],(150.0-102.0)/22.0) && Near(da.mae_r[0],0.0);
+      // BE-arm candle (scenario 5, trigger 0.5R): arming candle (108,115,101,110) counted fully (MAE=1/22, MFE=13/22);
+      // the trade is NOT stopped on that candle (new stop applies from the next candle) -> DATA_END, baseline unchanged
+      GZ_ExperimentResult rb; CGZRunDetail db;
+      RunScenario(5, 2.0, 0.5, rb, GetPointer(db));
+      bool ok_b = (db.count==1) && db.be_triggered[0] && Near(db.mae_r[0],(102.0-101.0)/22.0) && Near(db.mfe_r[0],(115.0-102.0)/22.0) &&
+                  (db.exit_reason[0]==(int)GZ_EXIT_DATA_END);
+      AddResult("T187", (ok_a && ok_b), StringFormat("entry candle counted (MFE=%.4f MAE=%.4f) = %s | BE-arm candle counted (MAE=%.4f MFE=%.4f) and no stop on it = %s",
+                da.count>0?da.mfe_r[0]:0.0, da.count>0?da.mae_r[0]:0.0, ok_a?"ok":"FAIL",
+                db.count>0?db.mae_r[0]:0.0, db.count>0?db.mfe_r[0]:0.0, ok_b?"ok":"FAIL"));
      }
 
 public:
@@ -470,6 +639,13 @@ public:
       T177_UncensoredReachReference();
       T178_EngineGuards();
       T179_T180_EngineFullRunSmoke();
+      T181_TpGridEndsAt45();
+      T182_BeTriggerRule();
+      T183_EngineGridCompliance();
+      T184_ExitCandleAccountingTp();
+      T185_ExitCandleAccountingSl();
+      T186_ConflictCandleAccounting();
+      T187_EntryAndBeArmCandleAccounting();
      }
   };
 

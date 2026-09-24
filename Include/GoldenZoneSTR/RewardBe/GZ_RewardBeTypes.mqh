@@ -7,18 +7,21 @@
 //| other *Types.mqh file in this repo.                                |
 //|                                                                    |
 //| DESIGN NOTES                                                       |
-//| 1) GRIDS come from the Roadmap (Phase 6): TP research 0.5R..5R in  |
-//|    0.5R steps (10 values); BE trigger research OFF + 0.25 0.50     |
-//|    0.75 1.00 1.25 1.50 1.75 2.00 2.50 3.00 4.00 5.00 R (12 values  |
-//|    + OFF). BE LEVEL = Entry, offset = 0R ONLY (approved decision;  |
-//|    positive offsets are NOT part of this phase).                   |
-//| 2) ROW KINDS. OFF = BE disabled. BE_ACTIVE = trigger < TP (the BE  |
-//|    can arm before TP is reachable). BE_INACTIVE_EQUIVALENT =        |
-//|    trigger >= TP: TP is evaluated before BE arming on every bar,   |
-//|    so such a run is mechanically identical to OFF - it is run ONLY |
-//|    as a validation, never presented as an independent BE config.    |
-//|    REFERENCE_ONLY = the TP=1000R / BE-off UNCENSORED_REACH run; it |
-//|    is a measurement instrument, NOT a strategy configuration.       |
+//| 1) GRIDS (revised twice): TP 0.5R..4.5R in 0.5R steps (9 values).   |
+//|    For every TP: BE OFF + BE triggers strictly below TP, with 0.25R |
+//|    and 0.75R never used. TP<2R: TP0.5 none, TP1.0 -> 0.5, TP1.5 ->  |
+//|    1.0. TP>=2R: whole-R triggers only (1,2,3,4 that are < TP). A BE |
+//|    trigger >=TP |
+//|    is NEVER executed (TP is evaluated before BE arming on every     |
+//|    bar, so such a run would just repeat BE OFF).                     |
+//|    BE LEVEL = Entry, offset = 0R ONLY. Main matrix = 26 configs     |
+//|    (9 OFF + 17 BE-active) + ONE high-TP reference run.               |
+//| 2) ROW KINDS. OFF = BE disabled. BE_ACTIVE = 0 < trigger < TP.      |
+//|    BE_INACTIVE_EQUIVALENT is kept as an enum value for labeling only|
+//|    and is never produced by the engine. REFERENCE_ONLY /            |
+//|    HIGH_TP_REACH_REFERENCE = the TP=1000R / BE-off run (reduced-    |
+//|    censoring reach diagnostic; NOT a strategy TP, NOT in the TP     |
+//|    grid, NOT rankable; a tiny-risk trade CAN reach 1000R).           |
 //| 3) REACH vs EXIT stay separate: reach_count[] is "how many trades   |
 //|    touched +xR while OPEN in THIS run" (censored by that run's own  |
 //|    exits); exit_count[] / win_rate come from realized R. Nothing    |
@@ -32,34 +35,55 @@
 #include "..\Exit\GZ_ExitTypes.mqh"
 #include "..\Journal\GZ_JournalTypes.mqh"
 
-#define GZ_RB_TP_COUNT           10
-#define GZ_RB_TRIGGER_COUNT      12
+#define GZ_RB_TP_COUNT           9
+#define GZ_RB_BE_STEP_R          0.25   // BE trigger step (R)
+#define GZ_RB_MAX_TP_R           4.5    // highest TP of the main matrix
+#define GZ_RB_WHOLE_R_FROM_TP    2.0    // from this TP upward only whole-R BE triggers (1R,2R,...) are used
 #define GZ_RB_EXIT_SLOTS         7      // indexed by ENUM_GZ_EXIT_REASON value; slot 0 (NONE) unused
-#define GZ_RB_REFERENCE_TP_R     1000.0 // "unreachable" TP for the uncensored reach reference run
+#define GZ_RB_REFERENCE_TP_R     1000.0 // very high TP used ONLY for the HIGH_TP_REACH_REFERENCE run (not a strategy TP)
 #define GZ_RB_EPS                1.0e-9
 
-//--- TP grid (Roadmap Phase 6 "TP Research")
+//--- TP grid: 0.5R .. 4.5R step 0.5R (9 values). 5.0R is intentionally absent.
 void GZRewardBeTpGrid(double &out[])
   {
    ArrayResize(out, GZ_RB_TP_COUNT);
    out[0]=0.5; out[1]=1.0; out[2]=1.5; out[3]=2.0; out[4]=2.5;
-   out[5]=3.0; out[6]=3.5; out[7]=4.0; out[8]=4.5; out[9]=5.0;
+   out[5]=3.0; out[6]=3.5; out[7]=4.0; out[8]=4.5;
   }
 
-//--- BE trigger grid (Roadmap Phase 6 "BE Research"; OFF is handled separately as trigger 0.0)
-void GZRewardBeTriggerGrid(double &out[])
+//--- BE triggers for one TP (user-defined reduced grid). Always strictly below TP; BE OFF is separate.
+//---  TP < 2R : TP 0.5: none | TP 1.0: 0.5 | TP 1.5: 1.0   (never 0.25R or 0.75R)
+//---  TP >= 2R: whole-R triggers only (1R, 2R, 3R, 4R) that are < TP
+//---             -> TP 2.0: 1 | 2.5: 1,2 | 3.0: 1,2 | 3.5: 1,2,3 | 4.0: 1,2,3 | 4.5: 1,2,3,4
+//--- Integer arithmetic on quarter-R units. A trigger >= TP is never produced. Returns the count (may be 0).
+int GZRewardBeTriggersForTp(double tp, double &out[])
   {
-   ArrayResize(out, GZ_RB_TRIGGER_COUNT);
-   out[0]=0.25; out[1]=0.50; out[2]=0.75; out[3]=1.00; out[4]=1.25; out[5]=1.50;
-   out[6]=1.75; out[7]=2.00; out[8]=2.50; out[9]=3.00; out[10]=4.00; out[11]=5.00;
+   int tp_q = (int)MathRound(tp/GZ_RB_BE_STEP_R);     // TP in 0.25R units
+   ArrayResize(out, 0);
+   int n = 0;
+   if(tp < GZ_RB_WHOLE_R_FROM_TP-1.0e-9)
+     {
+      if(tp_q==4)      { ArrayResize(out, 1); out[n++] = 0.5; }   // TP 1.0R -> BE 0.5R
+      else if(tp_q==6) { ArrayResize(out, 1); out[n++] = 1.0; }   // TP 1.5R -> BE 1.0R
+      // TP 0.5R -> BE OFF only
+     }
+   else
+     {
+      for(int q=4; q<tp_q; q+=4)                        // 1R, 2R, 3R, ... (whole R) strictly below TP
+        {
+         ArrayResize(out, n+1);
+         out[n++] = q*GZ_RB_BE_STEP_R;
+        }
+     }
+   return n;
   }
 
 enum ENUM_GZ_RB_KIND
   {
    GZ_RB_OFF = 0,                    // BE disabled
    GZ_RB_BE_ACTIVE,                  // trigger < TP
-   GZ_RB_BE_INACTIVE_EQUIVALENT,     // trigger >= TP (validation run only)
-   GZ_RB_REFERENCE_ONLY              // TP=1000R, BE off (UNCENSORED_REACH)
+   GZ_RB_BE_INACTIVE_EQUIVALENT,     // label only - trigger >= TP is never executed in the revised matrix
+   GZ_RB_REFERENCE_ONLY              // TP=1000R, BE off (HIGH_TP_REACH_REFERENCE)
   };
 
 string GZRewardBeKindToString(ENUM_GZ_RB_KIND k)
@@ -69,7 +93,7 @@ string GZRewardBeKindToString(ENUM_GZ_RB_KIND k)
       case GZ_RB_OFF:                     return "BE_OFF";
       case GZ_RB_BE_ACTIVE:               return "BE_ACTIVE";
       case GZ_RB_BE_INACTIVE_EQUIVALENT:  return "BE_INACTIVE_EQUIVALENT";
-      case GZ_RB_REFERENCE_ONLY:          return "REFERENCE_ONLY/UNCENSORED_REACH";
+      case GZ_RB_REFERENCE_ONLY:          return "REFERENCE_ONLY/HIGH_TP_REACH_REFERENCE";
      }
    return "UNKNOWN";
   }
@@ -149,8 +173,13 @@ struct GZ_RewardBeRow
    int              be_arm_retrace;                    // arming candle's own range also reached the new BE stop
    int              be_arm_retrace_non_entry;          // ... excluding entry-candle arms
 
+   //--- Journal accounting diagnostics (MFE/MAE/Reach are updated with the FULL candle range, exit candle included)
+   int              mfe_set_on_exit_bar;               // trades whose final MFE was last set on their exit candle
+   int              mae_set_on_exit_bar;               // trades whose final MAE was last set on their exit candle
+   int              tp_exit_mfe_overshoot;             // TP_HIT trades whose MFE exceeds the TP R (exit candle high beyond TP)
+   int              sl_exit_mae_beyond_stop;           // SL_HIT trades whose MAE exceeds 1R (exit candle low beyond the stop)
+
    GZ_PairStats     pair;                              // vs BE-off run of the same TP (valid only for BE runs)
-   bool             equiv_matches_off;                 // INACTIVE_EQUIVALENT rows: identical to OFF (expected true)
 
    void Clear()
      {
@@ -162,8 +191,8 @@ struct GZ_RewardBeRow
       for(int i=0;i<GZ_REACH_LEVEL_COUNT;i++) reach_count[i]=0;
       be_armed=0; intrabar_conflicts=0; eb_exit_total=0; eb_exit_tp=0; eb_exit_sl=0;
       be_armed_on_entry_bar=0; be_arm_retrace=0; be_arm_retrace_non_entry=0;
+      mfe_set_on_exit_bar=0; mae_set_on_exit_bar=0; tp_exit_mfe_overshoot=0; sl_exit_mae_beyond_stop=0;
       pair.Clear();
-      equiv_matches_off=false;
      }
   };
 
