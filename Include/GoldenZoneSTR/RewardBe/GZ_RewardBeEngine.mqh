@@ -428,10 +428,10 @@ public:
                m_rows[k].exit_count[GZ_EXIT_TP_HIT]==m_rows[i].exit_count[GZ_EXIT_TP_HIT]) { seen = true; break; }
          if(!seen) distinct++;
         }
-       int i_lo = FindOffRow(0.5), i_hi = FindOffRow(5.0);
+       int i_lo = FindOffRow(0.5), i_hi = FindOffRow(4.5);
        bool tp_differs = (i_lo>=0 && i_hi>=0 && m_rows[i_lo].exit_count[GZ_EXIT_TP_HIT]!=m_rows[i_hi].exit_count[GZ_EXIT_TP_HIT]);
        AddVal("V01_TP_SWEEP_CHANGES_BEHAVIOR", (distinct>=2 && tp_differs), false,
-              StringFormat("distinct BE-off (net_r,TP_HIT) signatures across %d TP levels = %d; TP_HIT(0.5R) %s TP_HIT(5.0R)",
+              StringFormat("distinct BE-off (net_r,TP_HIT) signatures across %d TP levels = %d; TP_HIT(0.5R) %s TP_HIT(4.5R)",
                            CountKind(GZ_RB_OFF), distinct, tp_differs?"!=":"=="));
       }
 
