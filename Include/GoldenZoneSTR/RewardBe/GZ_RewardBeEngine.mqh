@@ -366,8 +366,12 @@ public:
             m_unmatched_total      += (row_on.pair.unmatched_on + row_on.pair.unmatched_off);
             if(row_on.trades!=row_off.trades) m_unmatched_total++;
             if(equivalent)
+               // identical aggregates AND every single trade unchanged (same exit reason and same R).
+               // NB: DATA_END->DATA_END trades legitimately land in category E (same-other), so E is NOT required to be 0.
                row_on.equiv_matches_off = RowsIdentical(m_rows[off_idx], row_on) &&
-                                          row_on.pair.cat_a==0 && row_on.pair.cat_b==0 && row_on.pair.cat_e==0 &&
+                                          row_on.pair.cat_a==0 && row_on.pair.cat_b==0 &&
+                                          row_on.pair.e_be_from_other==0 && row_on.pair.e_anomaly==0 &&
+                                          row_on.pair.unmatched_on==0 && row_on.pair.unmatched_off==0 &&
                                           row_on.pair.no_change==row_on.pair.matched;
             AppendRow(row_on);
             m_matrix_runs++;
