@@ -68,6 +68,7 @@
 #include "..\FinalOOS\GZ_FinalOosTypes.mqh"
 #include "..\FinalOOS\GZ_FinalOosEngine.mqh"
 #include "..\RewardBe\GZ_RewardBeTests.mqh"
+#include "..\Dataset\GZ_DatasetTests.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -5683,6 +5684,15 @@ public:
         {
          GZ_TestResult rbr = rb_suite.GetResult(rb);
          AddResult(rbr.id, rbr.passed, rbr.detail);
+        }
+
+      //--- Phase 15.7 (T188-T208): Historical Data Expansion / arbitrary date-range slicing - synthetic data only
+      CGZDatasetTests ds_suite(m_logger);
+      ds_suite.RunAll();
+      for(int dsi=0; dsi<ds_suite.ResultCount(); dsi++)
+        {
+         GZ_TestResult dsr = ds_suite.GetResult(dsi);
+         AddResult(dsr.id, dsr.passed, dsr.detail);
         }
      }
 

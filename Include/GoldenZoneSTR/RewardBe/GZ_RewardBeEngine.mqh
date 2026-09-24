@@ -37,6 +37,7 @@ struct GZ_RewardBeBaselineRef
    double   main_expectancy;
 
    bool     ext_available;    // Phase 15 Development baseline as REPORTED (rounded) - external reference check
+   bool     ext_not_applicable; // Phase 15.7: the range is NOT the Phase 15 Development range, so V03 does not apply and is not recorded
    double   ext_win_rate;     // fraction (0.507 = 50.7%)
    double   ext_expectancy;
    double   ext_pf;
@@ -47,7 +48,7 @@ struct GZ_RewardBeBaselineRef
    void Clear()
      {
       main_available=false; main_trades=0; main_winners=0; main_net_r=0.0; main_expectancy=0.0;
-      ext_available=false; ext_win_rate=0.0; ext_expectancy=0.0; ext_pf=0.0; ext_net_r=0.0; ext_trades=0; ext_max_dd_r=0.0;
+      ext_available=false; ext_not_applicable=false; ext_win_rate=0.0; ext_expectancy=0.0; ext_pf=0.0; ext_net_r=0.0; ext_trades=0; ext_max_dd_r=0.0;
      }
   };
 
@@ -453,7 +454,11 @@ public:
         }
 
       // V03 - TP=2R + BE off vs the REPORTED Phase 15 Development baseline (rounded figures -> tolerances)
-      if(!bref.ext_available || i_base<0)
+      if(bref.ext_not_applicable)
+        {
+         // range is not the Phase 15 Development range: the reference figures describe a different population, so no V03 row is recorded
+        }
+      else if(!bref.ext_available || i_base<0)
          AddVal("V03_BASELINE_EQUALS_PHASE15_DEV_REPORT", false, true, "no external Phase 15 Development reference supplied");
       else
         {

@@ -130,7 +130,16 @@ No live trading.
   REJECTED (never shifted); boundary bars are dropped so no bar is in both ranges. Nothing is selected or
   tuned from the OOS result - changing parameters afterward contaminates it (Phase 16: freeze + new data).
   Set `InpRunPhase15=false` to skip it.
-- Runs 166 deterministic, synthetic-data self-tests (T01–T166: T01–T18 Phase 1, T19–T23 Phase 2,
+- **Phase 15.7 (Historical Data Expansion):** `CGZHistoricalDataset` loads the whole requested history
+  (`InpHistStart..InpHistEnd`, default 2019-12-23 -> 2026-09-24) ONCE, validates it ONCE with the unchanged
+  Phase 1 validator, builds a year-by-year and month-by-month coverage report (Requested / Available /
+  Validated / Missing, `GZ_Phase157_Report.txt` + `GZ_Phase157_Coverage.csv`) and then hands ONE time slice
+  (`InpResRangeKind`: LEGACY_DEV / FULL_DEV / FULL_DATASET / YEAR / MONTH / DAY / WEEK / CUSTOM) to the
+  UNCHANGED Phase 2-15.5 engines (cold start at the slice start; identical output schema for every range).
+  The Development/Final-OOS boundary (`InpOosStart`) is preserved: research refuses a range that ends after
+  it, the data itself stays in the dataset. No new OOS, no TP/BE selection, no Phase 16.
+  Design and boundary rules: `Docs/Phase15_7_HistoricalData_Design.md`.
+- Runs 209 deterministic, synthetic-data self-tests (T01-T209; T188-T209 = Phase 15.7) - the list below covers T01-T166; T167-T187 are Phase 15.5 (T01–T166: T01–T18 Phase 1, T19–T23 Phase 2,
   T24–T34 Phase 3, T35–T45 Phase 4, T46–T54 Phase 5, T55–T64 Phase 6, T65–T74 Phase 7,
   T75–T86 Phase 8, T87–T96 Phase 9, T97–T106 Phase 10, T107–T116 Phase 11, T117–T127 Phase 12,
   T128–T142 Phase 13, T143–T158 Phase 14, T159–T166 Phase 15) and reports PASS/FAIL
