@@ -542,9 +542,11 @@ public:
          {
           int tp_hits = m_rows[ir].exit_count[GZ_EXIT_TP_HIT];
           int reach_any = m_rows[ir].reach_count[0];
-          bool ok = (tp_hits==0) && (reach_any>0);
+          // NB: a TP of 1000R is not strictly unreachable (a trade with a tiny initial risk can exceed it), so TP_HIT may be > 0.
+          // The property being proven is only that Reach (favorable excursion) is a different quantity from TP exits.
+          bool ok = (reach_any>tp_hits);
           AddVal("V10_REACH_IS_NOT_WIN_RATE", ok, false,
-                 StringFormat("reference run (TP=%.0fR, BE off): TP_HIT exits=%d while trades that reached >=0.5R=%d of %d - reach counts are kept separate from exit/win-rate figures and never converted into one another",
+                 StringFormat("reference run (TP=%.0fR, BE off): TP_HIT exits=%d while trades that reached >=0.5R=%d of %d (reach exceeds exits) - reach counts are kept separate from exit/win-rate figures and never converted into one another",
                               GZ_RB_REFERENCE_TP_R, tp_hits, reach_any, m_rows[ir].trades));
          }
       }
