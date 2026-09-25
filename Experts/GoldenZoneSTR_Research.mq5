@@ -73,7 +73,7 @@
 //| logic.                                                              |
 //+------------------------------------------------------------------+
 #property copyright "GoldenZone STR"
-#property version   "1.157"
+#property version   "1.158"
 #property description "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15: Data/Validator/Time Engine + M5 Structure Engine + Leg/Break Engine + Fibonacci/Setup State Machine + Entry Engine/Trade Simulator + Exit Engine SL/TP/BE + MAE/MFE/R-Path/Event Ledger + Metrics/Reporting + Experiment Configuration/Runner + Filter Engine + Filter Combination Research + Robustness/Sensitivity Research + Walk-Forward Research + Monte Carlo Research + Final OOS (research/diagnostic only, no trading)"
 
 #include <GoldenZoneSTR\Core\GZ_Types.mqh>
@@ -123,6 +123,10 @@
 #include <GoldenZoneSTR\RewardBe\GZ_RewardBeEngine.mqh>
 #include <GoldenZoneSTR\Dataset\GZ_ResearchRange.mqh>
 #include <GoldenZoneSTR\Dataset\GZ_HistoricalDataset.mqh>
+#include <GoldenZoneSTR\Dataset\GZ_Partition.mqh>
+#include <GoldenZoneSTR\Cost\GZ_CostTypes.mqh>
+#include <GoldenZoneSTR\Cost\GZ_CostEngine.mqh>
+#include <GoldenZoneSTR\Core\GZ_Progress.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
 
@@ -314,7 +318,7 @@ input double                InpP155RefMaxDD               = 6.0;    //   ... max
 //--- it is REFUSED (never shifted or clipped). The data itself stays in the dataset and in the coverage
 //--- report. No new OOS is defined, no TP/BE is selected, Phase 16 is not executed.
 input bool                  InpRunPhase157       = true;                      // false = exactly the old Phase 15.5 behaviour (direct load of InpRangeStart..InpRangeEnd)
-input datetime              InpHistStart         = D'2019.12.23 00:00';       // historical dataset start (earliest verified XAUUSD chart data)
+input datetime              InpHistStart         = D'2020.07.01 00:00';       // historical dataset start (earliest verified XAUUSD chart data)
 input datetime              InpHistEnd           = D'2026.09.24 23:59';       // historical dataset end (explicit -> reproducible)
 input ENUM_GZ_RANGE_KIND    InpResRangeKind      = GZ_RANGE_LEGACY_DEV;       // which slice the research engines receive
 input int                   InpResYear           = 2023;                      // YEAR / MONTH / DAY
@@ -323,6 +327,27 @@ input int                   InpResDay            = 1;                         //
 input datetime              InpResCustomStart    = D'2024.06.12 00:00';       // CUSTOM start (WEEK: 7 days from this date)
 input datetime              InpResCustomEnd      = D'2024.06.19 23:59';       // CUSTOM end (inclusive)
 input bool                  InpP157CoverageOnly  = false;                     // true = load + validate + coverage report + tests, but run NO research
+
+//--- Phase 15.8: dataset partition (half-open [start,end)), warm-up, net-of-cost layer, run speed/progress ------
+//--- Research runs ONLY on ranges fully inside DEVELOPMENT (plus the labelled REGRESSION_ONLY_LEGACY check).
+//--- The new FINAL OOS and the legacy/touched part are refused. All dates are configuration, never code.
+input datetime              InpDevStart          = D'2020.07.01 00:00';       // DEVELOPMENT partition start (inclusive)
+input datetime              InpDevEnd            = D'2025.01.01 00:00';       // DEVELOPMENT partition end (exclusive)
+input datetime              InpNewOosStart       = D'2025.01.01 00:00';       // NEW FINAL OOS partition start (inclusive) - never used for selection
+input datetime              InpNewOosEnd         = D'2026.01.01 00:00';       // NEW FINAL OOS partition end (exclusive)
+input datetime              InpLegacyStart       = D'2026.01.01 00:00';       // LEGACY / TOUCHED partition start (inclusive)
+input datetime              InpLegacyEnd         = D'2026.09.25 00:00';       // LEGACY / TOUCHED partition end (exclusive)
+input int                   InpWarmupM5Bars      = 0;                         // warm-up bars before the measured start (M5 bars; 0 = cold start)
+input bool                  InpQuietMainPipeline = true;                      // true = only warnings/errors from the main pipeline (faster; results unchanged)
+input bool                  InpSkipDuplicateMainRun = false;                  // true = skip the main pipeline run; the TP 2R / BE off matrix row provides the figures (results unchanged)
+input ENUM_GZ_COST_SPREAD_MODE InpCostSpreadMode = GZ_COST_SPREAD_RECORDED;   // spread source: RECORDED = spread of the entry M1 bar, FIXED = the fixed points below
+input double                InpCostFixedSpreadPts = 0.0;                      // fixed spread in points (FIXED mode only; XAUUSD: 10 points = $0.10)
+input ENUM_GZ_COST_COMMISSION_MODE InpCostCommissionMode = GZ_COST_COMM_PERCENT; // commission model: PERCENT = percent of open price charged once at open, FIXED = USD per lot round turn
+input double                InpCostCommissionPercent = 0.0;                   // commission percent of open price (PERCENT mode; FundedNext XAUUSD = 0.0016)
+input double                InpCostCommissionPerLot = 0.0;                    // commission USD per lot round turn (FIXED mode only)
+input double                InpCostContractSize  = 100.0;                     // contract size in ounces per lot (XAUUSD = 100)
+input double                InpCostSlippagePts   = 0.0;                       // slippage in points per side (XAUUSD: 10 points = $0.10)
+input bool                  InpCostsConfigured   = false;                     // true = the cost inputs above are deliberately set (false = NET equals GROSS)
 
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
@@ -415,10 +440,7 @@ bool                     g_p155_only    = false;   // InpRunPhase155 && InpPhase
 string                   g_p155_dataset_id = "";
 
 //--- Phase 15.7 (historical dataset + research range slicing)
-//--- ONE user-accepted, documented data hole (no bars on 2022-09-01 and 2022-09-02; the broker history has none).
-//--- Only this exact window is excused in R02; any other hole still fails it. Never repaired or fabricated.
-#define GZ_P157_ACCEPTED_HOLE_FROM D'2022.08.31 23:59'
-#define GZ_P157_ACCEPTED_HOLE_TO   D'2022.09.05 01:00'
+//--- The ONE user-accepted documented data hole constants (GZ_P157_ACCEPTED_HOLE_FROM/TO) live in GZ_Partition.mqh.
 CGZHistoricalDataset     g_dataset(GetPointer(g_logger));
 GZ_ResearchRange         g_res_range;
 ENUM_GZ_PARTITION        g_res_partition = GZ_PART_DEVELOPMENT_ELIGIBLE;
@@ -434,6 +456,22 @@ datetime                 g_p157_slice_first = 0;
 datetime                 g_p157_slice_last  = 0;
 bool                     g_p157_regression_evaluated = false;
 GZ_TestResult            g_p157_val[];
+
+//--- Phase 15.8 (partition, warm-up, net-of-cost, progress)
+GZ_Partition             g_partition;
+GZ_ResearchGate          g_gate;
+CGZCostEngine            g_cost_engine;
+CGZRunDetail             g_main_detail;
+GZ_NetSummary            g_main_net;
+bool                     g_main_net_ready = false;
+bool                     g_main_skipped = false;
+datetime                 g_load_start = 0;      // first bar handed to the engines (== measured start when warm-up is 0)
+datetime                 g_measure_from = 0;    // >0 only when warm-up bars were really loaded
+int                      g_warm_requested = 0;
+int                      g_warm_actual = 0;
+int                      g_p158_measured_m5 = 0;
+string                   g_p158_dataset_id = "";
+GZ_CostConfig            g_cost_cfg;
 
 //--- Phase 15 result (frozen config: Development range vs separately loaded Final OOS range)
 bool                     g_phase15_ran = false;
@@ -515,6 +553,8 @@ void BuildAndEmitReport()
    report += " Generated (terminal local time, diagnostic only): " + TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS) + "\n";
    report += "===================================================\n\n";
 
+   if(g_main_skipped)
+      report += "*** MAIN PIPELINE RUN SKIPPED (InpSkipDuplicateMainRun=true): the Phase 2-8/10/14 figures below are EMPTY by design; the TP 2R / BE off matrix row (GZ_Phase155_Report) supplies them. ***\n\n";
    report += "--- Implementation ---\n";
    report += "Phase 1 files: GZ_Types, GZ_Config, GZ_Constants, GZ_DataProvider, GZ_DataValidator,\n";
    report += "       GZ_DatasetInfo, GZ_TimeEngine, GZ_DST, GZ_Session, GZ_Logger, GZ_TestHarness\n";
@@ -1024,7 +1064,7 @@ void BuildAndEmitReport()
    report += StringFormat("InpOosStart=%s InpOosEnd=%s InpOosMinTrades=%d (Development range InpRangeStart=%s InpRangeEnd=%s).\n\n",
               TimeToString(InpOosStart), TimeToString(InpOosEnd), InpOosMinTrades, TimeToString(InpRangeStart), TimeToString(InpRangeEnd));
 
-   report += "--- Automated Test Results (T01-T187: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13, T143-T158 Phase 14, T159-T166 Phase 15, T167-T187 Phase 15.5) ---\n";
+   report += "--- Automated Test Results (T01-T235: T01-T18 Phase 1, T19-T23 Phase 2, T24-T34 Phase 3, T35-T45 Phase 4, T46-T54 Phase 5, T55-T64 Phase 6, T65-T74 Phase 7, T75-T86 Phase 8, T87-T96 Phase 9, T97-T106 Phase 10, T107-T116 Phase 11, T117-T127 Phase 12, T128-T142 Phase 13, T143-T158 Phase 14, T159-T166 Phase 15, T167-T187 Phase 15.5, T188-T209 Phase 15.7, T210-T235 Phase 15.8) ---\n";
    int pass = g_harness.PassCount();
    int fail = g_harness.FailCount();
    for(int i=0;i<g_harness.ResultCount();i++)
@@ -1149,7 +1189,7 @@ void EmitPhase155Report()
       ut += StringFormat("%s: %s - %s\n", r.id, r.passed?"PASS":"FAIL", r.detail);
       if(r.passed) up++; else uf++;
      }
-   ut += StringFormat("(Full suite T01-T209: %d PASS / %d FAIL - see the main report.)\n", g_harness.PassCount(), g_harness.FailCount());
+   ut += StringFormat("(Full suite T01-T%d: %d PASS / %d FAIL - see the main report.)\n", g_harness.ResultCount(), g_harness.PassCount(), g_harness.FailCount());
    // a failure ANYWHERE in the suite must also block the 15.5 status
    if(g_harness.FailCount()>0 && uf==0) uf = g_harness.FailCount();
 
@@ -1201,6 +1241,9 @@ void ResolveResearchRange(GZ_ResearchRange &r)
       case GZ_RANGE_DAY:          GZRangeDay(InpResYear, InpResMonth, InpResDay, r); break;
       case GZ_RANGE_WEEK:         GZRangeWeek(InpResCustomStart, r); break;
       case GZ_RANGE_CUSTOM:       GZRangeCustom(InpResCustomStart, InpResCustomEnd, r); break;
+      case GZ_RANGE_DEVELOPMENT:  GZRangeFromPartitionPart(GZ_RANGE_DEVELOPMENT,  "DEVELOPMENT",  InpDevStart,    InpDevEnd,    r); break;
+      case GZ_RANGE_NEW_FINAL_OOS:GZRangeFromPartitionPart(GZ_RANGE_NEW_FINAL_OOS,"NEWFINALOOS",  InpNewOosStart, InpNewOosEnd, r); break;
+      case GZ_RANGE_LEGACY_TOUCHED:GZRangeFromPartitionPart(GZ_RANGE_LEGACY_TOUCHED,"LEGACYTOUCHED",InpLegacyStart, InpLegacyEnd,  r); break;
       default:                    GZRangeLegacyDev(InpRangeStart, InpRangeEnd, r); break;
      }
   }
@@ -1259,6 +1302,18 @@ void Phase157Prepare(MqlRates &m1[], MqlRates &m5[], int &n1, int &n5)
    if(g_res_range.status==GZ_RSTATUS_OK)
       g_res_partition = GZClassifyPartition(g_res_range.eff_start, g_res_range.eff_end, InpOosStart);
 
+   //--- Phase 15.8: partition (half-open) + research gate
+   g_partition.Set(InpHistStart, GZHistEndExclusive(InpHistEnd), InpDevStart, InpDevEnd, InpNewOosStart, InpNewOosEnd, InpLegacyStart, InpLegacyEnd);
+   GZPartitionValidate(g_partition);
+   GZPartitionGate(g_partition, g_res_range, g_gate);
+   g_p158_dataset_id = StringFormat("%s_M1M5_HIST_%s_%s_P158", InpSymbol, TimeToString(InpHistStart, TIME_DATE), TimeToString(InpHistEnd, TIME_DATE));
+   g_load_start = g_res_start;
+   g_measure_from = 0; g_warm_requested = InpWarmupM5Bars; g_warm_actual = 0;
+   if(!g_partition.valid)
+      g_logger.Error("Partition", "INVALID PARTITION - no research will run: " + g_partition.error);
+   else if(StringLen(g_partition.warning)>0)
+      g_logger.Warning("Partition", g_partition.warning);
+
    //--- dataset-level runtime validations (independent of the research range)
    CGZCoverage *cv = g_dataset.Coverage();
    P157AddVal("R01_DATASET_LOADED", loaded,
@@ -1279,40 +1334,62 @@ void Phase157Prepare(MqlRates &m1[], MqlRates &m5[], int &n1, int &n5)
               StringFormat("months with M1/M5 mismatch=%d, MISSING months=%d, PARTIAL months=%d of %d (mismatch/missing must be 0)",
                            n_mism, n_miss, cv.CountStatus(GZ_COV_PARTIAL), cv.MonthCount()));
 
+   P157AddVal("R10_PARTITION_VALID", g_partition.valid,
+              g_partition.valid ? StringFormat("Historical %s -> %s | DEVELOPMENT %s -> %s | NEW FINAL OOS %s -> %s | LEGACY/TOUCHED %s -> %s (all half-open, contiguous, inside Historical)%s",
+                                               GZPartDate(g_partition.hist_start), GZPartDate(g_partition.hist_end), GZPartDate(g_partition.dev_start), GZPartDate(g_partition.dev_end),
+                                               GZPartDate(g_partition.oos_start), GZPartDate(g_partition.oos_end), GZPartDate(g_partition.leg_start), GZPartDate(g_partition.leg_end),
+                                               (StringLen(g_partition.warning)>0) ? (" | WARNING: " + g_partition.warning) : "")
+                                : ("INVALID PARTITION: " + g_partition.error));
+
    //--- decide whether research may run in THIS attachment
    g_p157_research_allowed = false;
    if(!loaded)
       g_p157_note = "research NOT run: the historical dataset could not be loaded (no M1/M5 returned).";
    else if(g_res_range.status!=GZ_RSTATUS_OK)
       g_p157_note = StringFormat("research NOT run: invalid research range (%s: %s).", GZRStatusToString(g_res_range.status), g_res_range.note);
-   else if(g_res_partition!=GZ_PART_DEVELOPMENT_ELIGIBLE)
-      g_p157_note = StringFormat("research NOT run: range is %s relative to the preserved Development/Final-OOS boundary %s. The data stays in the dataset and in the coverage report, but the research engines refuse it (never shifted, never clipped). Choose a range that ends before the boundary (e.g. FULL_DEV, or any year/month/week/day/custom range before it).",
-                                 GZPartitionToString(g_res_partition), TimeToString(InpOosStart, TIME_DATE|TIME_MINUTES));
+   else if(!g_gate.allowed)
+      g_p157_note = g_gate.reason + " The data stays in the dataset and in the coverage report (never shifted, never clipped).";
    else if(InpP157CoverageOnly)
       g_p157_note = "research NOT run: coverage-only mode (InpP157CoverageOnly=true).";
    else
      {
       g_p157_research_allowed = true;
-      g_p157_note = "research range is DEVELOPMENT_ELIGIBLE - slice handed to the unchanged Phase 2-15.5 engines.";
+      g_p157_note = "research range gate: " + g_gate.label + " - " + g_gate.reason + " Slice handed to the unchanged Phase 2-15.5 engines.";
      }
    g_logger.Info("Dataset", "Phase 15.7: " + g_p157_note);
 
    //--- the slice (cold start): the dataset's own arrays are never handed out, only copies
    if(g_p157_research_allowed)
      {
-      g_dataset.Slice(g_res_range, m1, m5);
+      //--- warm-up (0 = exactly the old cold start). The floor is the start of the partition of the measured range.
+      GZ_ResearchRange rw = g_res_range;
+      if(InpWarmupM5Bars>0)
+        {
+         g_load_start = g_dataset.WarmupStart(g_res_range.eff_start, InpWarmupM5Bars, GZPartitionPartStart(g_partition, g_gate.part_class), g_warm_actual);
+         rw.eff_start = g_load_start;
+         if(g_warm_actual>0) g_measure_from = g_res_range.eff_start;
+        }
+      g_dataset.Slice(rw, m1, m5);
       n1 = ArraySize(m1); n5 = ArraySize(m5);
       g_p157_slice_m1 = n1; g_p157_slice_m5 = n5;
       if(n5>0) { g_p157_slice_first = m5[0].time; g_p157_slice_last = m5[n5-1].time; }
 
       //--- R08: slice bounds (no bar outside the effective range; no partial trailing M5 window)
       bool b_ok = true;
-      if(n1>0) b_ok = b_ok && (m1[0].time>=g_res_range.eff_start) && (m1[n1-1].time<=g_res_range.eff_end);
+      if(n1>0) b_ok = b_ok && (m1[0].time>=rw.eff_start) && (m1[n1-1].time<=g_res_range.eff_end);
       if(n5>0)
         {
-         b_ok = b_ok && (m5[0].time>=g_res_range.eff_start) && (m5[n5-1].time<=g_res_range.eff_end);
+         b_ok = b_ok && (m5[0].time>=rw.eff_start) && (m5[n5-1].time<=g_res_range.eff_end);
          if(g_res_range.m5_aligned) b_ok = b_ok && ((long)m5[n5-1].time + 240 <= (long)g_res_range.eff_end);
         }
+      if(n5>0 && g_measure_from>0)
+        {
+         int wb = 0;
+         for(int wi=0; wi<n5; wi++) if(m5[wi].time < g_measure_from) wb++;
+         g_p158_measured_m5 = n5 - wb;
+        }
+      else
+         g_p158_measured_m5 = n5;
       P157AddVal("R08_SLICE_WITHIN_RANGE_NO_LEAK", b_ok && n5>0,
                  StringFormat("slice M1=%d M5=%d bars, first M5=%s last M5=%s, effective range %s -> %s (no bar outside it; last M5 window complete)",
                               n1, n5, n5>0?TimeToString(m5[0].time, TIME_DATE|TIME_MINUTES):"-", n5>0?TimeToString(m5[n5-1].time, TIME_DATE|TIME_MINUTES):"-",
@@ -1355,18 +1432,37 @@ void Phase157PostRun(bool pipeline_ran)
    if(pipeline_ran && g_res_range.kind==GZ_RANGE_LEGACY_DEV)
      {
       bool base_cfg = (MathAbs(InpTpRMultiple-2.0)<0.000001 && InpBeTriggerR<=0.0);
-      if(base_cfg)
+      //--- figure source: the main pipeline, or (duplicate main run skipped on purpose) the TP 2R / BE off matrix row
+      bool have_src = !g_main_skipped;
+      int    src_trades = g_metrics.trade.trade_count;
+      double src_win = g_metrics.trade.win_rate, src_exp = g_metrics.trade.expectancy, src_pf = g_metrics.trade.profit_factor;
+      double src_net = g_metrics.trade.net_r, src_dd = g_metrics.risk.max_drawdown_r;
+      string src_name = "main pipeline";
+      if(g_main_skipped)
         {
-         double dw = MathAbs(g_metrics.trade.win_rate - InpP155RefWinRate);
-         double de = MathAbs(g_metrics.trade.expectancy - InpP155RefExpectancy);
-         double dp = MathAbs(g_metrics.trade.profit_factor - InpP155RefPF);
-         double dn = MathAbs(g_metrics.trade.net_r - InpP155RefNetR);
-         double dd = MathAbs(g_metrics.risk.max_drawdown_r - InpP155RefMaxDD);
-         bool ok = (g_metrics.trade.trade_count==InpP155RefTrades) && (dw<=0.0006) && (de<=0.0002) && (dp<=0.0015) && (dn<=0.6) && (dd<=0.05);
+         src_name = "TP 2R / BE off matrix row (main run skipped by InpSkipDuplicateMainRun)";
+         for(int ri=0; ri<g_rewardbe_engine.RowCount(); ri++)
+           {
+            GZ_RewardBeRow rr = g_rewardbe_engine.GetRow(ri);
+            if(rr.kind==GZ_RB_OFF && MathAbs(rr.tp_r-2.0)<0.000001)
+              {
+               have_src = true;
+               src_trades = rr.trades; src_win = rr.win_rate; src_exp = rr.expectancy; src_pf = rr.profit_factor; src_net = rr.net_r; src_dd = rr.max_dd_r;
+              }
+           }
+        }
+      if(base_cfg && have_src)
+        {
+         double dw = MathAbs(src_win - InpP155RefWinRate);
+         double de = MathAbs(src_exp - InpP155RefExpectancy);
+         double dp = MathAbs(src_pf - InpP155RefPF);
+         double dn = MathAbs(src_net - InpP155RefNetR);
+         double dd = MathAbs(src_dd - InpP155RefMaxDD);
+         bool ok = (src_trades==InpP155RefTrades) && (dw<=0.0006) && (de<=0.0002) && (dp<=0.0015) && (dn<=0.6) && (dd<=0.05);
          g_p157_regression_evaluated = true;
          P157AddVal("R07_BASELINE_REGRESSION_TP2_BE_OFF", ok,
-                    StringFormat("main pipeline over the LEGACY_DEV slice, TP=2R BE off: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.3f max_dd=%.2f | previously validated baseline: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.1f max_dd=%.2f | |diff| win=%.5f exp=%.5f pf=%.4f net_r=%.3f max_dd=%.3f (tolerances = rounding of the printed baseline; trade count exact). %s",
-                                 g_metrics.trade.trade_count, g_metrics.trade.win_rate, g_metrics.trade.expectancy, g_metrics.trade.profit_factor, g_metrics.trade.net_r, g_metrics.risk.max_drawdown_r,
+                    StringFormat("[REGRESSION_ONLY_LEGACY] " + src_name + " over the LEGACY_DEV slice, TP=2R BE off: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.3f max_dd=%.2f | previously validated baseline: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.1f max_dd=%.2f | |diff| win=%.5f exp=%.5f pf=%.4f net_r=%.3f max_dd=%.3f (tolerances = rounding of the printed baseline; trade count exact). %s",
+                                 src_trades, src_win, src_exp, src_pf, src_net, src_dd,
                                  InpP155RefTrades, InpP155RefWinRate, InpP155RefExpectancy, InpP155RefPF, InpP155RefNetR, InpP155RefMaxDD, dw, de, dp, dn, dd,
                                  ok ? "" : "REGRESSION CHANGED UNEXPECTEDLY - STOP: do not continue the historical expansion until the cause is identified."));
         }
@@ -1376,6 +1472,12 @@ void Phase157PostRun(bool pipeline_ran)
 
    //--- Final OOS untouched: Phase 15 (the only place that loads it) never ran, and any executed research range ends at/before the boundary
    bool oos_ok = !g_phase15_ran && (!pipeline_ran || g_res_end <= InpOosStart);
+   //--- Phase 15.8: the NEW Final OOS part is never inside the loaded research population (measured range AND warm-up)
+   bool new_oos_touched = pipeline_ran && (g_load_start < InpNewOosEnd) && (g_p157_slice_last >= InpNewOosStart);
+   P157AddVal("R11_NEW_FINAL_OOS_NOT_LOADED", !new_oos_touched && !(pipeline_ran && !g_gate.allowed),
+              StringFormat("research executed=%s (gate %s); loaded research bars %s -> %s vs NEW FINAL OOS %s -> %s: overlap=%s; research on a refused range=%s (both false required)",
+                           pipeline_ran?"true":"false", g_gate.label, TimeToString(g_load_start, TIME_DATE|TIME_MINUTES), TimeToString(g_p157_slice_last, TIME_DATE|TIME_MINUTES),
+                           TimeToString(InpNewOosStart, TIME_DATE|TIME_MINUTES), TimeToString(InpNewOosEnd, TIME_DATE|TIME_MINUTES), new_oos_touched?"true":"false", (pipeline_ran && !g_gate.allowed)?"true":"false"));
    P157AddVal("R09_FINAL_OOS_NOT_USED", oos_ok,
               StringFormat("Phase 15 (Final OOS loader) ran=%s; research executed=%s; effective research end %s vs preserved boundary %s (end <= boundary required when research runs)",
                            g_phase15_ran?"true":"false", pipeline_ran?"true":"false", TimeToString(g_res_end, TIME_DATE|TIME_MINUTES), TimeToString(InpOosStart, TIME_DATE|TIME_MINUTES)));
@@ -1477,11 +1579,11 @@ void EmitPhase157Report()
       GZ_TestResult r = g_harness.GetResult(i);
       if(StringLen(r.id)<2 || StringGetCharacter(r.id,0)!='T') continue;
       int num = (int)StringToInteger(StringSubstr(r.id,1));
-      if(num<188) continue;
+      if(num<188 || num>209) continue;   // T210+ (Phase 15.8) are reported in GZ_Phase158_Report.txt
       s += StringFormat("%s: %s - %s\n", r.id, r.passed?"PASS":"FAIL", r.detail);
       if(r.passed) tp_++; else tf_++;
      }
-   s += StringFormat("Phase 15.7 tests: %d PASS / %d FAIL | full suite T01-T209: %d PASS / %d FAIL\n\n", tp_, tf_, g_harness.PassCount(), g_harness.FailCount());
+   s += StringFormat("Phase 15.7 tests: %d PASS / %d FAIL | full suite T01-T%d: %d PASS / %d FAIL\n\n", tp_, tf_, g_harness.ResultCount(), g_harness.PassCount(), g_harness.FailCount());
 
    s += "--- 10. Design decisions left OPEN for the next phase (NOT decided here) ---\n";
    s += "* The Development / Training / Validation / Walk-Forward / Final-OOS partition of the expanded history. The previous Final OOS boundary is only PRESERVED (research refuses ranges beyond it); no new OOS was defined and no TP/BE/parameter was chosen from any range.\n";
@@ -1524,6 +1626,154 @@ void EmitPhase157Report()
   }
 
 //+------------------------------------------------------------------+
+//| Phase 15.8 report (Common\Files\GZ_Phase158_Report.txt)           |
+//+------------------------------------------------------------------+
+void EmitPhase158Report()
+  {
+   if(!g_p157_active)
+      return;
+
+   string s = "";
+   s += "===================================================\n";
+   s += "PHASE: Dataset Partition + Net-of-Cost R Layer + Progress/Speed (Phase 15.8)\n";
+   s += "===================================================\n";
+   s += "DATA INFRASTRUCTURE / MEASUREMENT ONLY. No strategy rule, no parameter, no TP/BE selection, no freeze, no new Final OOS run, Phase 16 NOT executed.\n\n";
+
+   s += "--- A. Identity / metadata ---\n";
+   s += StringFormat("dataset ID=%s | dataset version=%s | phase spec=%s | strategy version=%s\n", g_p158_dataset_id, GZ_DATASET_VERSION_P158, GZ_PROJECT_VERSION_P158, GZ_STRATEGY_VERSION);
+   s += StringFormat("symbol=%s | execution timeframe=M1 | structure timeframe=M5 | historical %s -> %s (half-open end; input end %s inclusive)\n", InpSymbol,
+                     GZPartDate(g_partition.hist_start), GZPartDate(g_partition.hist_end), TimeToString(InpHistEnd, TIME_DATE|TIME_MINUTES));
+   s += StringFormat("development %s -> %s | NEW final OOS %s -> %s | legacy/touched %s -> %s\n", GZPartDate(g_partition.dev_start), GZPartDate(g_partition.dev_end),
+                     GZPartDate(g_partition.oos_start), GZPartDate(g_partition.oos_end), GZPartDate(g_partition.leg_start), GZPartDate(g_partition.leg_end));
+   s += StringFormat("executed range: kind=%s label=%s effective %s -> %s | partition class=%s | gate label=%s\n", GZRangeKindToString(g_res_range.kind), g_res_range.label,
+                     TimeToString(g_res_range.eff_start, TIME_DATE|TIME_MINUTES), TimeToString(g_res_range.eff_end, TIME_DATE|TIME_MINUTES), GZPartClassToString(g_gate.part_class), g_gate.label);
+   s += StringFormat("config: TP=%.2fR BE trigger=%.2fR (0=OFF) SL=%s entry=%s pivot=%d break=%s buffer=%.2fATR | experiment IDs: see the experiment_id column of GZ_Phase155_Matrix_<label>.csv\n",
+                     InpTpRMultiple, InpBeTriggerR, EnumToString(InpSlModel), EnumToString(InpEntryModel), InpPivotStrength, EnumToString(InpBreakMode), InpBreakBufferAtrMult);
+   string hole = (g_res_range.status==GZ_RSTATUS_OK) ? GZAcceptedHoleNote(g_res_range.eff_start, g_res_range.eff_end) : "";
+   s += "accepted data-hole note: " + (StringLen(hole)>0 ? hole : "none (the executed range does not contain the accepted hole)") + "\n";
+   s += "(The hole 2022-08-31 23:59 -> 2022-09-05 01:00 is part of the DEVELOPMENT partition identity: any range containing it carries that caveat.)\n\n";
+
+   s += "--- B. Partition validation and research gate ---\n";
+   s += StringFormat("partition valid=%s%s\n", g_partition.valid?"true":"false", g_partition.valid ? "" : (" | ERROR: " + g_partition.error));
+   if(StringLen(g_partition.warning)>0) s += "partition warning: " + g_partition.warning + "\n";
+   s += "research allowed: " + (g_p157_research_allowed ? "YES" : "NO") + " | " + g_gate.reason + "\n";
+   s += "Development may be used for: strategy development, TP/BE/SL/filter research, robustness, sensitivity, walk-forward, Monte Carlo diagnostics, parameter comparison.\n";
+   s += "NEW FINAL OOS must NOT be used for: parameter/TP/BE/filter/robustness selection, strategy modification, threshold tuning, deciding which configuration is better. It is executed only after a candidate is defined (research protocol, not a trading recommendation).\n";
+   s += "2026 (legacy/touched) was used in Phases 15-15.5 and is never treated as clean OOS.\n\n";
+
+   s += "--- C. Boundary semantics (half-open [start,end) -> engines' inclusive ends) ---\n";
+   s += "end_inclusive = end_exclusive - 1 M1 minute, then the existing M5 alignment (start rounded UP, end rounded DOWN to the last minute of a complete M5 window).\n";
+   s += "M1 bars: start <= time <= end_inclusive. M5 bars: only complete windows. Each partition run is simulated separately from a clean state (cold start).\n";
+   s += "Case A (setup before Development end, entry inside, exit after): engines never see bars after the range end -> closed by the existing DATA_END rule at the last Development bar; belongs to DEVELOPMENT by ENTRY time; censored (T220).\n";
+   s += "Case B (setup before a partition start, entry after): no setup survives a partition start (T220). Case D (trade open at the boundary): impossible - closed by DATA_END or never opened (T220).\n";
+   s += "Warm-up (Case C) below.\n\n";
+
+   s += "--- D. Warm-up vs measured population ---\n";
+   s += StringFormat("warm-up bars requested=%d, actually loaded=%d (real M5 bars, never before the start of the measured range's partition) | loaded M5 bars=%d | measured M5 bars=%d | measured trades=%d\n",
+                     g_warm_requested, g_warm_actual, g_p157_slice_m5, g_p158_measured_m5, g_main_skipped ? -1 : g_metrics.trade.trade_count);
+   s += "Measured trades = trades whose ENTRY time >= measured start (existing metrics engine on that population). Setup counts include setups created in the warm-up window. Default 0 = cold start = the validated 412-trade baseline.\n";
+   if(g_main_skipped) s += "(measured trades of the main run: -1 = main run skipped; see the matrix row TP 2R / BE off)\n";
+   s += "\n";
+
+   s += "--- E. Net-of-cost layer (Part B) ---\n";
+   s += StringFormat("configured=%s | spread source=%s (fixed %.1f pts) | commission=%s (%.5f %% of open price | $%.2f per lot round turn | contract %.0f oz) | slippage %.1f pts/side | point=%.5f\n",
+                     InpCostsConfigured?"true":"false", GZCostSpreadModeToString(InpCostSpreadMode), InpCostFixedSpreadPts, GZCostCommissionModeToString(InpCostCommissionMode),
+                     InpCostCommissionPercent, InpCostCommissionPerLot, InpCostContractSize, InpCostSlippagePts, g_cost_cfg.point);
+   if(g_cost_cfg.NetEqualsGross()) s += "NET = GROSS: costs are not deliberately set (or all zero).\n";
+   s += "Formula: cost_price = spread_pts*point + 2*slippage_pts*point + commission_price; commission_price = open*percent/100 (PERCENT, once at open) or USD_per_lot/contract (FIXED); net_R = gross_R - cost_price/initial_risk.\n";
+   s += "Venue proposal (FundedNext MT5 gold, 0.0016% of open price once at open, structure effective 2026-01-12) is applied to ALL history on purpose; user must confirm the account model. Swap is NOT modelled.\n";
+   s += "Approximation: bid-based candles; entry-bar spread charged once as proxy for ask/bid. Error direction: cost UNDER-stated where the exit spread is wider than the entry spread (news, rollover, fast stops); short TP/SL trigger on the ask is not modelled.\n";
+   if(g_main_net_ready && g_main_net.available)
+     {
+      s += StringFormat("MAIN RUN (gross | net): trades=%d | expectancy %.4f | %.4f | net R %.2f | %.2f | PF %s | %s | max DD %.2f | %.2f | win rate %.1f%% (R>0) | %.1f%% (net R>0) | avg cost %.4fR max %.4fR (>=0.25R: %d trades)\n",
+                        g_main_net.trades, g_main_net.gross_expectancy, g_main_net.expectancy, g_main_net.gross_net_r, g_main_net.net_r,
+                        g_metrics.trade.profit_factor_undefined?"inf":DoubleToString(g_metrics.trade.profit_factor,3), g_main_net.pf_undefined?"inf":DoubleToString(g_main_net.profit_factor,3),
+                        g_metrics.risk.max_drawdown_r, g_main_net.max_dd_r, g_metrics.trade.win_rate*100.0, g_main_net.win_rate*100.0,
+                        g_main_net.avg_cost_r, g_main_net.max_cost_r, g_main_net.cost_ge_quarter_r);
+      s += StringFormat("MAIN RUN slippage sensitivity (net expectancy R): 0 pts %.4f | 20 pts %.4f | 50 pts %.4f\n", g_main_net.sens[0].expectancy, g_main_net.sens[1].expectancy, g_main_net.sens[2].expectancy);
+      s += StringFormat("Swap (not modelled): %d of %d trades open across a server midnight (%.1f%%).\n", g_main_net.rollover_crossings, g_main_net.trades, 100.0*(double)g_main_net.rollover_crossings/(double)g_main_net.trades);
+     }
+   else
+      s += "MAIN RUN net figures: not available in this attachment (no trades, research not run, or the main run was skipped: matrix rows carry the net figures - GZ_Phase155_Report section I).\n";
+   if(g_phase155_ran && StringLen(g_rewardbe_engine.SpreadStatsText())>0)
+     {
+      s += "Recorded ENTRY-bar spread (points), per year and overall:\n" + g_rewardbe_engine.SpreadStatsText();
+      GZ_SpreadStatsTotals st = g_rewardbe_engine.SpreadStatsTotals();
+      if(st.implausible) s += "NOTE: implausible for XAUUSD (median 0 or >=50% zero): the spread may not be recorded here; consider FIXED spread mode.\n";
+     }
+   s += "\n";
+
+   s += "--- F. Progress / speed (Part C) ---\n";
+   s += StringFormat("quiet main pipeline logs=%s | duplicate main run skipped=%s | matrix run time=%s (progress lines [GZ][PROGRESS] are printed per run in the Experts log)\n",
+                     InpQuietMainPipeline?"true":"false", g_main_skipped?"true":"false", GZFormatDurationMs(g_rewardbe_engine.ElapsedMs()));
+   s += "Both switches change log output / avoid a duplicate computation only; gross results are identical (T229; runtime R07 on the legacy range).\n\n";
+
+   s += "--- G. Generic dates ---\n";
+   s += "2020-07-01 is only the current earliest usable date, NOT an engine limit. Changing the historical start/end inputs is enough to load earlier/later data; the partition layer accepts it (extra data is UNASSIGNED until the partition inputs cover it) and coverage reports its quality (sparse months are flagged PARTIAL).\n\n";
+
+   s += "--- H. Runtime validations of this attachment ---\n";
+   int vp = 0, vf = 0;
+   bool data_fail = false, core_fail = false;
+   for(int i=0;i<ArraySize(g_p157_val);i++)
+     {
+      s += StringFormat("%s: %s - %s\n", g_p157_val[i].id, g_p157_val[i].passed?"PASS":"FAIL", g_p157_val[i].detail);
+      if(g_p157_val[i].passed) vp++;
+      else
+        {
+         vf++;
+         string id3 = StringSubstr(g_p157_val[i].id, 0, 3);
+         if(id3=="R01" || id3=="R02" || id3=="R03" || id3=="R04") data_fail = true; else core_fail = true;
+        }
+     }
+   s += StringFormat("Runtime validation: %d PASS / %d FAIL\n\n", vp, vf);
+
+   s += "--- I. Automated tests T210-T235 (synthetic data) ---\n";
+   int tp_ = 0, tf_ = 0;
+   for(int i=0;i<g_harness.ResultCount();i++)
+     {
+      GZ_TestResult r = g_harness.GetResult(i);
+      if(StringLen(r.id)<2 || StringGetCharacter(r.id,0)!='T') continue;
+      int num = (int)StringToInteger(StringSubstr(r.id,1));
+      if(num<210) continue;
+      s += StringFormat("%s: %s - %s\n", r.id, r.passed?"PASS":"FAIL", r.detail);
+      if(r.passed) tp_++; else tf_++;
+     }
+   s += StringFormat("Phase 15.8 tests: %d PASS / %d FAIL | full suite T01-T%d: %d PASS / %d FAIL\n\n", tp_, tf_, g_harness.ResultCount(), g_harness.PassCount(), g_harness.FailCount());
+
+   s += "--- J. Regression statement ---\n";
+   s += "No entry, exit, TP/BE, intrabar-conflict, MAE/MFE, Reach or strategy rule changed. Gross R is untouched. Regression (TP 2R / BE off on LEGACY_DEV = REGRESSION_ONLY_LEGACY): " +
+        (g_p157_regression_evaluated ? "EVALUATED (R07 above)" : "NOT EVALUATED in this attachment") + "\n";
+   s += "TP x BE grid preserved exactly (reduced grid, 26 main configs + 1 reference + 2 determinism repeats).\n\n";
+
+   s += "--- Phase Status ---\n";
+   string status;
+   if(tf_>0 || core_fail)
+      status = "PHASE 15.8 FAILED";
+   else if(data_fail)
+      status = "PHASE 15.8 BLOCKED (historical data coverage/validation problem - see runtime validations R01-R04)";
+   else if(!g_p157_research_allowed)
+      status = "PHASE 15.8 COVERAGE RUN COMPLETE (partition, coverage and tests OK; research/regression not executed in this attachment)";
+   else if(g_res_range.kind==GZ_RANGE_LEGACY_DEV && !g_p157_regression_evaluated)
+      status = "PHASE 15.8 BLOCKED (regression could not be evaluated)";
+   else
+      status = "PHASE 15.8 COMPLETE";
+   s += status + "\n";
+   s += "Phase 16 was NOT executed. The new Final OOS was not loaded, used for selection or tuned on. Historical research only.\n";
+   s += "===================================================\n";
+
+   PrintReportChunked(s);
+   int h = FileOpen("GZ_Phase158_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   if(h!=INVALID_HANDLE)
+     {
+      FileWriteString(h, s);
+      FileClose(h);
+      Print("[GZ] Phase 15.8 output written to Common\\Files\\GZ_Phase158_Report.txt");
+     }
+   else
+      Print("[GZ] WARNING: could not open GZ_Phase158_Report.txt for writing, error=", GetLastError());
+  }
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                    |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -1531,7 +1781,7 @@ int OnInit()
    // Runtime marker: proves the EA currently attached/running is compiled
    // from THIS source file. Printed first, before anything else, and via
    // raw Print() (not CGZLogger) so nothing upstream can suppress it.
-   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260924_V15_7_HIST_DATA");
+   Print("[GZ][BUILD] GoldenZoneSTR_Research_RUNTIME_MARKER_20260925_V15_8_PARTITION");
 
    // Runtime Inputs marker: prints the ACTUAL live values of the inputs
    // this specific EA instance is running with (per-attachment values from
@@ -1677,6 +1927,29 @@ int OnInit()
                         InpSessionEndHour, InpSessionEndMinute,
                         InpSessionInclude, true);
 
+   //--- Phase 15.8 Part B: net-of-cost layer (post-hoc; can never change a gross figure)
+   g_cost_cfg.Default();
+   g_cost_cfg.spread_mode        = InpCostSpreadMode;
+   g_cost_cfg.fixed_spread_pts   = InpCostFixedSpreadPts;
+   g_cost_cfg.commission_mode    = InpCostCommissionMode;
+   g_cost_cfg.commission_percent = InpCostCommissionPercent;
+   g_cost_cfg.commission_per_lot = InpCostCommissionPerLot;
+   g_cost_cfg.contract_size      = InpCostContractSize;
+   g_cost_cfg.slippage_pts       = InpCostSlippagePts;
+   g_cost_cfg.configured         = InpCostsConfigured;
+   double sym_point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+   if(sym_point<=0.0)
+     {
+      sym_point = 0.01;
+      g_logger.Warning("Cost", "SYMBOL_POINT unavailable - 0.01 assumed for the net-of-cost layer.");
+     }
+   g_cost_cfg.point = sym_point;
+   g_cost_engine.Configure(g_cost_cfg, time_cfg, session_profile);
+   g_rewardbe_engine.SetCostEngine(GetPointer(g_cost_engine));
+   g_rewardbe_engine.SetProgress(true);
+   if(!InpCostsConfigured)
+      g_logger.Warning("Cost", "InpCostsConfigured=false: NET equals GROSS (no cost is charged in the net figures).");
+
    GZ_EntryConfig entry_cfg; entry_cfg.Default();
    entry_cfg.model                = InpEntryModel;
    entry_cfg.entry_fib_ratio      = InpEntryFibRatio;
@@ -1706,10 +1979,20 @@ int OnInit()
    g_metrics.Clear();
    if(n5>0)
      {
-      g_trade_simulator.Run(m1, m5, g_swings, g_swing_count,
+      //--- Phase 15.8 Part C: optional skip of the duplicate main run (only when the TP 2R / BE off matrix row can replace it)
+      g_main_skipped = (InpSkipDuplicateMainRun && InpRunPhase155 && g_p155_only && MathAbs(InpTpRMultiple-2.0)<0.000001 && InpBeTriggerR<=0.0);
+      if(InpSkipDuplicateMainRun && !g_main_skipped)
+         g_logger.Warning("Init", "InpSkipDuplicateMainRun IGNORED: it needs the Phase 15.5 matrix + its 'only' mode with TP=2R / BE off; the main run is executed.");
+      if(InpQuietMainPipeline)
+         g_logger.SetMinLevel(GZ_SEV_WARNING);     // log output only - results unchanged
+      if(!g_main_skipped)
+         g_trade_simulator.Run(m1, m5, g_swings, g_swing_count,
                              g_leg_engine, g_break_engine, g_setup_sm, g_entry_engine, g_exit_engine,
                              g_journal_engine, g_event_ledger,
                              g_time_engine, g_session_engine, session_profile, InpApplySessionFilter, InpForceSessionExit);
+      g_logger.SetMinLevel(GZ_SEV_INFO);
+      if(g_main_skipped)
+         g_logger.Info("Init", "Phase 15.8: main pipeline run SKIPPED on purpose; the matrix row TP 2R / BE off provides the figures.");
 
       g_leg_count = g_leg_engine.LegCount();
       for(int j=0;j<g_leg_count;j++)
@@ -1811,7 +2094,26 @@ int OnInit()
 
       //--- Phase 8: Metrics + Reporting - one deterministic, post-hoc pass
       //--- over the now-final Phase 7 journal (see GZ_MetricsEngine.mqh).
-      g_metrics_engine.Compute(g_journal_engine, g_time_engine, g_session_engine, session_profile, g_metrics);
+      if(g_measure_from>0)
+        {
+         //--- warm-up mode: measured population = trades whose ENTRY time >= measure start (existing metrics engine, masked)
+         bool measured_mask[];
+         ArrayResize(measured_mask, g_journal_engine.JournalCount());
+         for(int mk=0; mk<g_journal_engine.JournalCount(); mk++)
+            measured_mask[mk] = (g_journal_engine.GetJournal(mk).entry_time >= g_measure_from);
+         g_metrics_engine.ComputeFiltered(g_journal_engine, g_time_engine, g_session_engine, session_profile, measured_mask, g_metrics);
+        }
+      else
+         g_metrics_engine.Compute(g_journal_engine, g_time_engine, g_session_engine, session_profile, g_metrics);
+
+      //--- Phase 15.8 Part B: net-of-cost figures of the main run (post-hoc, next to the gross ones)
+      g_main_net_ready = false;
+      if(!g_main_skipped)
+        {
+         g_main_detail.Capture(g_exit_engine, g_journal_engine, g_measure_from);
+         g_cost_engine.Evaluate(GetPointer(g_main_detail), m1, g_main_net);
+         g_main_net_ready = true;
+        }
       g_logger.Info("Metrics", StringFormat(
          "Phase 8: closed_trades=%d winners=%d losers=%d win_rate=%.1f%% net_r=%.3f avg_r=%.3f pf=%s | max_dd=%.3fR avg_dd=%.3fR dd_len=%d win_streak=%d lose_streak=%d",
          g_metrics.trade.trade_count, g_metrics.trade.winners, g_metrics.trade.losers, g_metrics.trade.win_rate*100.0,
@@ -1896,7 +2198,7 @@ int OnInit()
          bool fpass = true; // a journal entry whose setup somehow is not found stays included (defensive default)
          for(int fk=0; fk<g_setup_count; fk++)
             if(filter_setup_ids[fk]==fj.setup_id) { fpass = filter_setup_pass[fk]; break; }
-         filter_journal_mask[ji] = fpass;
+         filter_journal_mask[ji] = fpass && (g_measure_from<=0 || fj.entry_time>=g_measure_from);
          if(!fj.is_open && !fpass)
             g_filter_rejections++;
         }
@@ -2233,9 +2535,11 @@ int OnInit()
          GZ_ExperimentConfig p155_cfg = exp_cfg;
          p155_cfg.range_start = m5[0].time;
          p155_cfg.range_end   = m5[n5-1].time;
+         p155_cfg.measure_from = g_measure_from;      // 0 = cold start (unchanged); >0 = warm-up mode
 
          GZ_RewardBeBaselineRef p155_ref; p155_ref.Clear();
-         if(MathAbs(InpTpRMultiple-2.0)<0.000001 && InpBeTriggerR<=0.0)
+         p155_ref.main_skipped = g_main_skipped;
+         if(!g_main_skipped && MathAbs(InpTpRMultiple-2.0)<0.000001 && InpBeTriggerR<=0.0)
            {
             p155_ref.main_available  = true;
             p155_ref.main_trades     = g_metrics.trade.trade_count;
@@ -2257,7 +2561,7 @@ int OnInit()
          g_logger.Info("RewardBe", StringFormat("Phase 15.5: starting TP x BE matrix on Development data %s (%d M1 / %d M5 bars). This runs 29 full simulations (26 main TP x BE configurations + 1 high-TP reference + 2 determinism repeats).",
                        g_p155_dataset_id, n1, n5));
          g_rewardbe_engine.Run(p155_cfg, m1, m5, g_p155_dataset_id, g_info_m1.validation_status, g_info_m5.validation_status,
-                               g_res_start, g_res_end, InpOosStart, !g_phase15_ran, p155_ref);
+                               g_load_start, g_res_end, InpOosStart, !g_phase15_ran, p155_ref);
          g_phase155_ran = true;
          g_logger.Info("RewardBe", StringFormat("Phase 15.5: %d experiments executed, %d matrix rows, runtime validations failed=%d blocked=%d.",
                        g_rewardbe_engine.ExperimentCount(), g_rewardbe_engine.RowCount(),
@@ -2296,8 +2600,9 @@ int OnInit()
    BuildAndEmitReport();
    EmitPhase155Report();
    EmitPhase157Report();
+   EmitPhase158Report();
 
-   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 diagnostics complete. STOPPING after Phase 15.7 (Historical Data Expansion) - not proceeding to Phase 16 (Research Freeze) logic.");
+   g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 diagnostics complete. STOPPING after Phase 15.8 (dataset partition + net-of-cost layer) - not proceeding to Phase 16 (Research Freeze) logic.");
 
    // Initialization succeeds regardless of data/test outcome so the report is
    // visible in the Experts log; the report itself states BLOCKED/FAILED status.

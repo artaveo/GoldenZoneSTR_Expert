@@ -184,4 +184,9 @@
 #define GZ_OOS_NOISE_FLOOR_R             0.05  // development expectancy at/below this (R) -> retention UNDEFINED
 #define GZ_PROJECT_VERSION_P15           "GZ-P15-ROADMAP v1.0"
 
+// Phase 15.8 - Dataset partition architecture + net-of-cost R layer + run progress.
+// DATA INFRASTRUCTURE / MEASUREMENT ONLY: no strategy rule, no parameter, no selection.
+#define GZ_PROJECT_VERSION_P158          "GZ-P158-PARTITION v1.0"
+#define GZ_DATASET_VERSION_P158          "GZ-DATASET v1 (partitioned, P15.8)"
+
 #endif // __GZ_CONSTANTS_MQH__

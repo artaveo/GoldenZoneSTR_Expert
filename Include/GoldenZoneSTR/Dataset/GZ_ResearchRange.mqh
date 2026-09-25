@@ -44,7 +44,10 @@ enum ENUM_GZ_RANGE_KIND
    GZ_RANGE_MONTH,            // MONTH: InpResYear + InpResMonth
    GZ_RANGE_DAY,              // DAY: InpResYear + InpResMonth + InpResDay
    GZ_RANGE_WEEK,             // WEEK: 7 days starting at the date of InpResCustomStart
-   GZ_RANGE_CUSTOM            // CUSTOM: InpResCustomStart..InpResCustomEnd (end inclusive)
+   GZ_RANGE_CUSTOM,           // CUSTOM: InpResCustomStart..InpResCustomEnd (end inclusive)
+   GZ_RANGE_DEVELOPMENT,      // DEVELOPMENT: the whole DEVELOPMENT partition
+   GZ_RANGE_NEW_FINAL_OOS,    // NEW_FINAL_OOS: the whole new Final OOS partition (research refused)
+   GZ_RANGE_LEGACY_TOUCHED    // LEGACY_TOUCHED: the whole legacy/touched partition (research refused)
   };
 
 enum ENUM_GZ_RSTATUS
@@ -73,6 +76,9 @@ string GZRangeKindToString(ENUM_GZ_RANGE_KIND k)
       case GZ_RANGE_DAY:          return "DAY";
       case GZ_RANGE_WEEK:         return "WEEK";
       case GZ_RANGE_CUSTOM:       return "CUSTOM";
+      case GZ_RANGE_DEVELOPMENT:  return "DEVELOPMENT";
+      case GZ_RANGE_NEW_FINAL_OOS:return "NEW_FINAL_OOS";
+      case GZ_RANGE_LEGACY_TOUCHED:return "LEGACY_TOUCHED";
      }
    return "UNKNOWN";
   }

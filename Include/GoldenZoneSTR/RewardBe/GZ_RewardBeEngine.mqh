@@ -26,11 +26,14 @@
 #include "..\Experiment\GZ_ExperimentTypes.mqh"
 #include "..\Experiment\GZ_ExperimentRunner.mqh"
 #include "..\Diagnostics\GZ_Logger.mqh"
+#include "..\Cost\GZ_CostEngine.mqh"
+#include "..\Core\GZ_Progress.mqh"
 
 //--- Comparison inputs the caller supplies (all optional).
 struct GZ_RewardBeBaselineRef
   {
    bool     main_available;   // true only if the main pipeline ran TP=2.0 / BE off / offset 0 (comparison is then valid)
+   bool     main_skipped;     // Phase 15.8: the duplicate main-pipeline run was skipped ON PURPOSE -> V02 is not applicable and not recorded
    int      main_trades;
    int      main_winners;
    double   main_net_r;
@@ -47,7 +50,7 @@ struct GZ_RewardBeBaselineRef
 
    void Clear()
      {
-      main_available=false; main_trades=0; main_winners=0; main_net_r=0.0; main_expectancy=0.0;
+      main_available=false; main_skipped=false; main_trades=0; main_winners=0; main_net_r=0.0; main_expectancy=0.0;
       ext_available=false; ext_not_applicable=false; ext_win_rate=0.0; ext_expectancy=0.0; ext_pf=0.0; ext_net_r=0.0; ext_trades=0; ext_max_dd_r=0.0;
      }
   };
@@ -69,6 +72,17 @@ private:
    datetime              m_dev_first, m_dev_last;
    int                   m_m1_bars, m_m5_bars;
    string                m_dataset_id;
+
+   //--- Phase 15.8 Part B (net-of-cost layer) and Part C (progress) - both purely diagnostic/additive
+   CGZCostEngine        *m_cost;             // NULL = no net layer (every net field stays cleared)
+   bool                  m_progress;         // true = print per-run progress / ETA / start-end timestamps
+   int                   m_total_runs;       // planned experiments (main matrix + reference + determinism repeats)
+   ulong                 m_t0_tick;          // tick count at Run() start (elapsed time for the ETA; diagnostic only)
+   ulong                 m_run_tick;         // tick count at the current run's start
+   ulong                 m_elapsed_ms;       // total Run() duration, for the report
+   string                m_spread_text;      // recorded entry-bar spread table (first evaluated population)
+   GZ_SpreadStatsTotals  m_spread_tot;
+   bool                  m_spread_done;
 
    //--- text helpers -------------------------------------------------------
    string PadR(string s, int w) const { while(StringLen(s)<w) s += " "; return s; }
@@ -96,17 +110,44 @@ private:
      }
 
    //--- One experiment: ONLY tp and be trigger are set here.
+   //--- `tag` is a progress label only (never affects the run).
    void RunOne(const GZ_ExperimentConfig &base, double tp, double trig, const MqlRates &m1[], const MqlRates &m5[],
                ENUM_GZ_VALIDATION_STATUS s1, ENUM_GZ_VALIDATION_STATUS s5,
-               GZ_ExperimentResult &res, CGZRunDetail *detail)
+               GZ_ExperimentResult &res, CGZRunDetail *detail, string tag="")
      {
       GZ_ExperimentConfig cfg = base;
       cfg.exit_config.tp_r_multiple    = tp;
       cfg.exit_config.be_trigger_r     = trig;
       cfg.exit_config.be_level_mode    = GZ_BE_LEVEL_ENTRY;   // approved decision: BE level = Entry, offset 0R only
       cfg.exit_config.be_level_offset_r= 0.0;
+      if(m_progress)
+        {
+         string what = tag;
+         if(StringLen(what)==0)
+            what = (tp >= GZ_RB_REFERENCE_TP_R) ? StringFormat("REFERENCE_ONLY TP=%.0fR BE=OFF", tp)
+                                                 : StringFormat("TP=%.2fR BE=%s", tp, (trig>0.0) ? (DoubleToString(trig,2)+"R") : "OFF");
+         m_run_tick = GetTickCount64();
+         Print(GZProgressLine(m_runs+1, m_total_runs, m_run_tick - m_t0_tick, what));
+         Print(StringFormat("[GZ][PROGRESS] run %d START %s (terminal local time; diagnostic only)", m_runs+1, TimeToString(TimeLocal(), TIME_DATE|TIME_SECONDS)));
+        }
       m_runner.RunSingleDetailed(cfg, m1, m5, m_dataset_id, s1, s5, res, detail);
       m_runs++;
+      if(m_progress)
+         Print(StringFormat("[GZ][PROGRESS] run %d END   %s | this run took %s", m_runs, TimeToString(TimeLocal(), TIME_DATE|TIME_SECONDS),
+                            GZFormatDurationMs(GetTickCount64() - m_run_tick)));
+     }
+
+   //--- Phase 15.8 Part B: attach the post-hoc net-of-cost figures to a filled row (gross fields untouched)
+   void ApplyNet(GZ_RewardBeRow &row, CGZRunDetail *d, const MqlRates &m1[])
+     {
+      if(m_cost==NULL)
+         return;
+      m_cost.Evaluate(d, m1, row.net);
+      if(!m_spread_done && d.count>0)
+        {
+         m_spread_text = m_cost.BuildSpreadStats(d, m1, m_spread_tot);
+         m_spread_done = true;
+        }
      }
 
    void FillRow(const GZ_ExperimentResult &res, CGZRunDetail *d, ENUM_GZ_RB_KIND kind, double tp, double trig, GZ_RewardBeRow &row)
@@ -252,7 +293,17 @@ public:
       m_quiet.SetMinLevel(GZ_SEV_ERROR);
       m_runs = 0; m_matrix_runs = 0; m_detail_mismatch = 0; m_entry_mismatch_total = 0; m_unmatched_total = 0;
       m_dev_first = 0; m_dev_last = 0; m_m1_bars = 0; m_m5_bars = 0; m_dataset_id = "";
+      m_cost = NULL; m_progress = false; m_total_runs = 0; m_t0_tick = 0; m_run_tick = 0; m_elapsed_ms = 0;
+      m_spread_text = ""; m_spread_tot.Clear(); m_spread_done = false;
      }
+
+   //--- Phase 15.8: attach the cost layer (NULL = no net figures) / switch progress printing on. Both are
+   //--- diagnostic/additive: neither can change a gross result.
+   void              SetCostEngine(CGZCostEngine *ce) { m_cost = ce; }
+   void              SetProgress(bool on)             { m_progress = on; }
+   ulong             ElapsedMs() const                { return m_elapsed_ms; }
+   string            SpreadStatsText() const          { return m_spread_text; }
+   GZ_SpreadStatsTotals SpreadStatsTotals() const     { return m_spread_tot; }
 
    ENUM_GZ_RB_STATUS Status() const       { return m_status; }
    int               RowCount() const     { return ArraySize(m_rows); }
@@ -307,6 +358,13 @@ public:
       ArrayResize(m_val, 0);
       m_runs = 0; m_matrix_runs = 0; m_detail_mismatch = 0; m_entry_mismatch_total = 0; m_unmatched_total = 0;
       m_dataset_id = dataset_id;
+      m_spread_text = ""; m_spread_tot.Clear(); m_spread_done = false;
+      m_t0_tick = GetTickCount64(); m_elapsed_ms = 0;
+      {
+       int cg_off, cg_act;
+       CountGrid(cg_off, cg_act);
+       m_total_runs = cg_off + cg_act + 1 + 2;   // main matrix + ONE reference run + 2 determinism repeats
+      }
 
       int n1 = ArraySize(m1);
       int n5 = ArraySize(m5);
@@ -344,6 +402,7 @@ public:
          RunOne(base_cfg, tp, 0.0, m1, m5, m1_status, m5_status, r_off, d_off);
          GZ_RewardBeRow row_off;
          FillRow(r_off, d_off, GZ_RB_OFF, tp, 0.0, row_off);
+         ApplyNet(row_off, d_off, m1);
          int off_idx = AppendRow(row_off);
          m_matrix_runs++;
          if(m_logger!=NULL)
@@ -360,6 +419,7 @@ public:
             RunOne(base_cfg, tp, trig, m1, m5, m1_status, m5_status, r_on, d_on);
             GZ_RewardBeRow row_on;
             FillRow(r_on, d_on, GZ_RB_BE_ACTIVE, tp, trig, row_on);
+            ApplyNet(row_on, d_on, m1);
             ComparePairs(d_off, d_on, row_on.pair);
             m_entry_mismatch_total += row_on.pair.entry_mismatch;
             m_unmatched_total      += (row_on.pair.unmatched_on + row_on.pair.unmatched_off);
@@ -381,6 +441,7 @@ public:
       RunOne(base_cfg, GZ_RB_REFERENCE_TP_R, 0.0, m1, m5, m1_status, m5_status, r_ref, d_ref);
       GZ_RewardBeRow row_ref;
       FillRow(r_ref, d_ref, GZ_RB_REFERENCE_ONLY, GZ_RB_REFERENCE_TP_R, 0.0, row_ref);
+      ApplyNet(row_ref, d_ref, m1);
       AppendRow(row_ref);
       m_matrix_runs++;
       delete d_ref;
@@ -393,9 +454,9 @@ public:
         {
          GZ_ExperimentResult rr1, rr2;
          CGZRunDetail dd1, dd2;
-         RunOne(base_cfg, 2.0, 0.0, m1, m5, m1_status, m5_status, rr1, GetPointer(dd1));
+         RunOne(base_cfg, 2.0, 0.0, m1, m5, m1_status, m5_status, rr1, GetPointer(dd1), "determinism repeat TP=2.00R BE=OFF");
          GZ_RewardBeRow rw1; FillRow(rr1, GetPointer(dd1), GZ_RB_OFF, 2.0, 0.0, rw1);
-         RunOne(base_cfg, 2.0, 1.0, m1, m5, m1_status, m5_status, rr2, GetPointer(dd2));
+         RunOne(base_cfg, 2.0, 1.0, m1, m5, m1_status, m5_status, rr2, GetPointer(dd2), "determinism repeat TP=2.00R BE=1.00R");
          GZ_RewardBeRow rw2; FillRow(rr2, GetPointer(dd2), GZ_RB_BE_ACTIVE, 2.0, 1.0, rw2);
          det_off_ok = RowsIdentical(m_rows[i_off2], rw1);
          det_on_ok  = RowsIdentical(m_rows[i_on2], rw2);
@@ -404,6 +465,7 @@ public:
 
       delete m_runner;
       m_runner = NULL;
+      m_elapsed_ms = GetTickCount64() - m_t0_tick;
 
       EvaluateValidations(dev_range_start, dev_range_end, oos_start, phase15_skipped,
                           det_done, det_off_ok, det_on_ok, bref, m1, m5);
@@ -439,7 +501,11 @@ public:
       int i_base = FindOffRow(2.0);
 
       // V02 - TP=2R + BE off reproduces the main pipeline (same inputs, same data) EXACTLY
-      if(!bref.main_available || i_base<0)
+      if(bref.main_skipped)
+        {
+         // Phase 15.8: the duplicate main-pipeline run was skipped on purpose; this matrix row IS the figure source, so there is nothing to compare (not recorded)
+        }
+      else if(!bref.main_available || i_base<0)
          AddVal("V02_BASELINE_EQUALS_MAIN_PIPELINE", false, true,
                 "main pipeline was not run with TP=2.0/BE off/offset 0 in this attachment (or no TP=2.0 row) - comparison not applicable");
       else
@@ -787,6 +853,66 @@ public:
         }
       s += "\n";
 
+      //--- I (Phase 15.8 Part B) -------------------------------------------------
+      s += "--- I. Net-of-cost layer (post-hoc and ADDITIVE: every gross figure above is unchanged; nothing is ranked or selected) ---\n";
+      if(m_cost==NULL)
+         s += "No cost engine attached: net figures not produced.\n\n";
+      else
+        {
+         GZ_CostConfig cc = m_cost.Config();
+         s += StringFormat("Cost inputs: configured=%s | spread source=%s (fixed %.1f pts) | commission=%s (percent of open price %.5f | USD per lot round turn %.4f | contract size %.1f oz) | slippage %.1f pts per side | point=%.5f\n",
+                           YN(cc.configured), GZCostSpreadModeToString(cc.spread_mode), cc.fixed_spread_pts,
+                           GZCostCommissionModeToString(cc.commission_mode), cc.commission_percent, cc.commission_per_lot, cc.contract_size, cc.slippage_pts, cc.point);
+         if(cc.NetEqualsGross())
+            s += "NET = GROSS: the cost inputs are not deliberately set (or every component is zero). The net columns below repeat the gross figures.\n";
+         s += "Formula (price units per ounce): commission_price = open_price*percent/100 (PERCENT, charged once at open) or USD_per_lot/contract_size (FIXED); cost_price = spread_pts*point + 2*slippage_pts*point + commission_price; net_R = gross_R - cost_price/initial_risk_price.\n";
+         s += "Net win rate counts trades with NET R > 0. Net PF/max drawdown/streaks come from the EXISTING Phase 8 metrics logic run on the net R series (trade-entry order).\n";
+         s += "Venue model = a researched PROPOSAL for FundedNext MT5 gold (0.0016% of open price, charged once at open; structure effective 2026-01-12), applied to ALL history on purpose (the cost of trading the strategy now). No slippage figure is published: 0 by default plus the sensitivity columns.\n";
+         s += "SWAP is NOT modelled. Trades open across a server midnight (rollover) are counted below so the omission can be judged.\n";
+         s += "APPROXIMATION: candles are BID-based and the simulator fills on them; the ENTRY bar's spread is charged once as a proxy for the ask/bid difference. Where the spread at the EXIT is wider than at entry (news, rollover, fast stop-outs) the cost is UNDER-stated; a short's TP/SL are really triggered by the ask and that is not modelled. Exact bid/ask fill modelling is out of scope.\n\n";
+         s += PadL("TP",4)+PadL("BE",6)+PadL("N",5)+PadL("GrossExp",10)+PadL("NetExp",9)+PadL("GrossNetR",10)+PadL("NetNetR",9)+PadL("NetPF",8)+PadL("NetMaxDD",9)+PadL("NetWin%",8)+PadL("AvgCostR",9)
+              +PadL("Exp@0",8)+PadL("Exp@20",8)+PadL("Exp@50",8)+"\n";
+         for(int i=0;i<n;i++)
+           {
+            GZ_RewardBeRow r = m_rows[i];
+            if(r.kind!=GZ_RB_OFF && r.kind!=GZ_RB_BE_ACTIVE) continue;
+            GZ_NetSummary q = r.net;
+            string tag = (r.kind==GZ_RB_OFF) ? "OFF" : Dbl(r.be_trigger_r,2);
+            if(!q.available)
+              { s += PadL(Dbl(r.tp_r,1),4)+PadL(tag,6)+PadL(IntegerToString(r.trades),5)+"  (no trades)\n"; continue; }
+            s += PadL(Dbl(r.tp_r,1),4)+PadL(tag,6)+PadL(IntegerToString(q.trades),5)+PadL(Dbl(q.gross_expectancy,4),10)+PadL(Dbl(q.expectancy,4),9)
+                 +PadL(Dbl(q.gross_net_r,1),10)+PadL(Dbl(q.net_r,1),9)+PadL(q.pf_undefined?"inf":Dbl(q.profit_factor,3),8)+PadL(Dbl(q.max_dd_r,2),9)
+                 +PadL(Pct(q.win_rate),8)+PadL(Dbl(q.avg_cost_r,4),9)
+                 +PadL(Dbl(q.sens[0].expectancy,4),8)+PadL(Dbl(q.sens[1].expectancy,4),8)+PadL(Dbl(q.sens[2].expectancy,4),8)+"\n";
+           }
+         s += "Exp@0 / Exp@20 / Exp@50 = NET expectancy (R) if slippage were 0 / 20 / 50 points per side (10 points = $0.10 on XAUUSD), every other cost as configured.\n";
+         int ir_ref = FindRow(GZ_RB_REFERENCE_ONLY, GZ_RB_REFERENCE_TP_R, 0.0);
+         if(ir_ref>=0 && m_rows[ir_ref].net.available)
+           {
+            GZ_NetSummary qr = m_rows[ir_ref].net;
+            s += StringFormat("Reference run (TP=%.0fR, BE off; REFERENCE_ONLY): N=%d gross exp=%.4f net exp=%.4f gross net R=%.1f net net R=%.1f net PF=%s net max DD=%.2f avg cost=%.4fR. (NOT a strategy TP.)\n",
+                              GZ_RB_REFERENCE_TP_R, qr.trades, qr.gross_expectancy, qr.expectancy, qr.gross_net_r, qr.net_r, qr.pf_undefined?"inf":Dbl(qr.profit_factor,3), qr.max_dd_r, qr.avg_cost_r);
+           }
+         int i0 = FindOffRow(2.0);
+         if(i0<0) i0 = 0;
+         if(n>0 && m_rows[i0].net.available)
+           {
+            GZ_NetSummary q0 = m_rows[i0].net;
+            s += StringFormat("Cost distribution (population of the TP=%.1fR BE-off row, N=%d): charged spread avg=%.1f pts, entries charged 0 spread=%d, entry bar not found in M1 data=%d, max cost=%.4fR, trades costing >=0.25R=%d.\n",
+                              m_rows[i0].tp_r, q0.trades, q0.avg_spread_pts, q0.spread_zero, q0.spread_missing, q0.max_cost_r, q0.cost_ge_quarter_r);
+            s += StringFormat("Swap (NOT modelled): %d of %d trades (%.1f%%) were open across a server midnight (rollover).\n", q0.rollover_crossings, q0.trades,
+                              (q0.trades>0) ? 100.0*(double)q0.rollover_crossings/(double)q0.trades : 0.0);
+           }
+         if(m_spread_done)
+           {
+            s += "Recorded ENTRY-bar spread (points) per year and overall (independent of the configured spread source; a 0 can mean 'not recorded'; median = mean of the two middle values for an even count; p95 = nearest rank):\n";
+            s += m_spread_text;
+            if(m_spread_tot.implausible)
+               s += "NOTE: the recorded spread looks implausible for XAUUSD (median 0 or at least half of the entry bars show 0): the spread field may not be recorded in this terminal's history. Consider FIXED spread mode; no broker is assumed here.\n";
+           }
+         s += "\n";
+        }
+
       //--- G ------------------------------------------------------------------
       s += "--- G. Deterministic validation (runtime, on the Development data) ---\n";
       for(int i=0;i<ArraySize(m_val);i++)
@@ -823,7 +949,8 @@ public:
                  "max_dd_r,max_lose_streak,avg_lose_streak,avg_mae_r,max_mae_r,avg_mfe_r,max_mfe_r,"
                  "exit_tp_hit,exit_sl_hit,exit_break_even,exit_session_exit,exit_data_end,exit_other,"
                  "reach_0.5,reach_1.0,reach_1.5,reach_2.0,reach_2.5,reach_3.0,reach_3.5,reach_4.0,reach_4.5,reach_5.0,"
-                 "be_armed,intrabar_conflicts,entry_bar_exit_total,entry_bar_exit_tp,entry_bar_exit_sl,be_armed_on_entry_bar,be_arm_retrace,be_arm_retrace_non_entry,mfe_set_on_exit_bar,mae_set_on_exit_bar,tp_exit_mfe_overshoot,sl_exit_mae_beyond_stop\n";
+                 "be_armed,intrabar_conflicts,entry_bar_exit_total,entry_bar_exit_tp,entry_bar_exit_sl,be_armed_on_entry_bar,be_arm_retrace,be_arm_retrace_non_entry,mfe_set_on_exit_bar,mae_set_on_exit_bar,tp_exit_mfe_overshoot,sl_exit_mae_beyond_stop,"
+                 "net_available,net_equals_gross,net_expectancy,net_net_r,net_profit_factor,net_pf_undefined,net_max_dd_r,net_win_rate,avg_cost_r,net_exp_slip0,net_exp_slip20,net_exp_slip50\n";
       int n = ArraySize(m_rows);
       for(int i=0;i<n;i++)
         {
@@ -837,9 +964,12 @@ public:
                            r.exit_count[GZ_EXIT_TP_HIT], r.exit_count[GZ_EXIT_SL_HIT], r.exit_count[GZ_EXIT_BREAK_EVEN],
                            r.exit_count[GZ_EXIT_SESSION_EXIT], r.exit_count[GZ_EXIT_DATA_END], r.exit_count[GZ_EXIT_OTHER]);
          for(int l=0;l<GZ_REACH_LEVEL_COUNT;l++) s += IntegerToString(r.reach_count[l]) + ",";
-         s += StringFormat("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n", r.be_armed, r.intrabar_conflicts, r.eb_exit_total, r.eb_exit_tp, r.eb_exit_sl,
+         s += StringFormat("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,", r.be_armed, r.intrabar_conflicts, r.eb_exit_total, r.eb_exit_tp, r.eb_exit_sl,
                            r.be_armed_on_entry_bar, r.be_arm_retrace, r.be_arm_retrace_non_entry,
                            r.mfe_set_on_exit_bar, r.mae_set_on_exit_bar, r.tp_exit_mfe_overshoot, r.sl_exit_mae_beyond_stop);
+         s += StringFormat("%s,%s,%.6f,%.6f,%s,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", YN(r.net.available), YN(r.net.net_equals_gross), r.net.expectancy, r.net.net_r,
+                           r.net.pf_undefined ? "inf" : DoubleToString(r.net.profit_factor,6), YN(r.net.pf_undefined), r.net.max_dd_r, r.net.win_rate, r.net.avg_cost_r,
+                           r.net.sens[0].expectancy, r.net.sens[1].expectancy, r.net.sens[2].expectancy);
         }
       return s;
      }

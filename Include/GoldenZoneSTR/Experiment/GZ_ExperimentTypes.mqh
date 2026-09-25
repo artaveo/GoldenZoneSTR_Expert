@@ -124,6 +124,10 @@ struct GZ_ExperimentConfig
    GZ_EntryConfig       entry_config;          // Phase 5
    GZ_ExitConfig        exit_config;           // Phase 6
 
+   datetime             measure_from;          // Phase 15.8: 0 (default) = every closed trade is measured (cold start, unchanged).
+                                               // >0 = warm-up mode: only trades whose ENTRY time >= measure_from belong to the
+                                               // measured population (metrics recomputed by the existing metrics engine on it).
+
    void Default()
      {
       symbol               = "XAUUSD";
@@ -140,6 +144,7 @@ struct GZ_ExperimentConfig
       fib_zone_max_ratio   = GZ_DEFAULT_FIB_ZONE_MAX_RATIO;
       entry_config.Default();
       exit_config.Default();
+      measure_from         = 0;
      }
   };
 

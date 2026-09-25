@@ -69,6 +69,7 @@
 #include "..\FinalOOS\GZ_FinalOosEngine.mqh"
 #include "..\RewardBe\GZ_RewardBeTests.mqh"
 #include "..\Dataset\GZ_DatasetTests.mqh"
+#include "..\Dataset\GZ_PartitionTests.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -5693,6 +5694,15 @@ public:
         {
          GZ_TestResult dsr = ds_suite.GetResult(dsi);
          AddResult(dsr.id, dsr.passed, dsr.detail);
+        }
+
+      //--- Phase 15.8 (T210-T235): partition architecture, net-of-cost layer, progress - synthetic data only
+      CGZPartitionTests pt_suite(m_logger);
+      pt_suite.RunAll();
+      for(int pti=0; pti<pt_suite.ResultCount(); pti++)
+        {
+         GZ_TestResult ptr = pt_suite.GetResult(pti);
+         AddResult(ptr.id, ptr.passed, ptr.detail);
         }
      }
 

@@ -116,12 +116,25 @@ private:
       out.exit_count  = exit_engine.ExitCount();
 
       CGZMetricsEngine metrics_engine(m_logger);
-      metrics_engine.Compute(journal_engine, time_engine, session_engine, cfg.session_profile, out.metrics);
+      if(cfg.measure_from > 0)
+        {
+         //--- Phase 15.8 warm-up mode: the measured population = trades whose ENTRY time >= measure_from.
+         //--- Metrics are recomputed by the EXISTING metrics engine on that population (mask by journal index);
+         //--- nothing inside the simulator, journal or metrics engines changed.
+         int jn = journal_engine.JournalCount();
+         bool measured_mask[];
+         ArrayResize(measured_mask, jn);
+         for(int mi=0; mi<jn; mi++)
+            measured_mask[mi] = (journal_engine.GetJournal(mi).entry_time >= cfg.measure_from);
+         metrics_engine.ComputeFiltered(journal_engine, time_engine, session_engine, cfg.session_profile, measured_mask, out.metrics);
+        }
+      else
+         metrics_engine.Compute(journal_engine, time_engine, session_engine, cfg.session_profile, out.metrics);
 
       //--- Phase 15.5: OPTIONAL read-only snapshot of per-trade exit/journal
       //--- detail. NULL (every pre-15.5 caller) = exactly the old behavior.
       if(detail!=NULL)
-         detail.Capture(exit_engine, journal_engine);
+         detail.Capture(exit_engine, journal_engine, cfg.measure_from);
 
       if(out.trade_count==0)
          out.AddWarning("NO_TRADES_PRODUCED");

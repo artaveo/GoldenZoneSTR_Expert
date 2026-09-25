@@ -625,6 +625,30 @@ public:
       return c5;
      }
 
+   //--- Phase 15.8 warm-up: the time of the M5 bar `warm_bars` bars before the first M5 bar at/after `measure_start`
+   //--- (counted in real stored M5 bars, so weekends/closures do not shrink the warm-up), never earlier than `floor`
+   //--- (0 = no floor; the caller passes the start of the partition of the measured range) and never before the first
+   //--- stored bar. `actual_bars` = number of M5 bars really placed in [result, measure_start). warm_bars<=0 or an
+   //--- unavailable dataset returns measure_start unchanged (cold start).
+   datetime          WarmupStart(datetime measure_start, int warm_bars, datetime floor_time, int &actual_bars)
+     {
+      actual_bars = 0;
+      if(warm_bars<=0 || !m_loaded || m_released || m_n5==0)
+         return measure_start;
+      int i_ms = GZLowerBoundTime(m_m5, measure_start);
+      int i_ws = i_ms - warm_bars;
+      if(i_ws < 0) i_ws = 0;
+      if(floor_time > 0)
+        {
+         int i_floor = GZLowerBoundTime(m_m5, floor_time);
+         if(i_ws < i_floor) i_ws = i_floor;
+        }
+      if(i_ws >= i_ms)
+         return measure_start;
+      actual_bars = i_ms - i_ws;
+      return m_m5[i_ws].time;
+     }
+
    //--- Free the bar arrays once every slice needed has been taken (coverage/validation stay).
    void              ReleaseBars()
      {

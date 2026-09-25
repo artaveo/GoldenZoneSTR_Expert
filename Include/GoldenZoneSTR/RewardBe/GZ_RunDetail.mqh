@@ -88,7 +88,9 @@ public:
 
    //--- Snapshot every CLOSED exit (all of them, after OnDataEnd()) joined
    //--- with its journal record by trade_id. Read-only on both engines.
-   void              Capture(CGZExitEngine &ex, CGZJournalEngine &jr)
+   //--- min_entry_time (Phase 15.8 warm-up): 0 = every closed trade (the pre-15.8 behavior); >0 = only
+   //--- trades whose ENTRY time >= min_entry_time (the measured population).
+   void              Capture(CGZExitEngine &ex, CGZJournalEngine &jr, datetime min_entry_time=0)
      {
       Clear();
       int n  = ex.ExitCount();
@@ -97,6 +99,8 @@ public:
         {
          GZ_TradeExit e = ex.GetExit(i);
          if(e.is_open)
+            continue;
+         if(min_entry_time>0 && e.entry_time<min_entry_time)
             continue;
          double mae = 0.0, mfe = 0.0;
          datetime t_mae = 0, t_mfe = 0;

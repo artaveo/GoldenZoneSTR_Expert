@@ -131,7 +131,7 @@ No live trading.
   tuned from the OOS result - changing parameters afterward contaminates it (Phase 16: freeze + new data).
   Set `InpRunPhase15=false` to skip it.
 - **Phase 15.7 (Historical Data Expansion):** `CGZHistoricalDataset` loads the whole requested history
-  (`InpHistStart..InpHistEnd`, default 2019-12-23 -> 2026-09-24) ONCE, validates it ONCE with the unchanged
+  (`InpHistStart..InpHistEnd`, default 2020-07-01 -> 2026-09-24) ONCE, validates it ONCE with the unchanged
   Phase 1 validator, builds a year-by-year and month-by-month coverage report (Requested / Available /
   Validated / Missing, `GZ_Phase157_Report.txt` + `GZ_Phase157_Coverage.csv`) and then hands ONE time slice
   (`InpResRangeKind`: LEGACY_DEV / FULL_DEV / FULL_DATASET / YEAR / MONTH / DAY / WEEK / CUSTOM) to the
@@ -139,7 +139,24 @@ No live trading.
   The Development/Final-OOS boundary (`InpOosStart`) is preserved: research refuses a range that ends after
   it, the data itself stays in the dataset. No new OOS, no TP/BE selection, no Phase 16.
   Design and boundary rules: `Docs/Phase15_7_HistoricalData_Design.md`.
-- Runs 209 deterministic, synthetic-data self-tests (T01-T209; T188-T209 = Phase 15.7) - the list below covers T01-T166; T167-T187 are Phase 15.5 (T01–T166: T01–T18 Phase 1, T19–T23 Phase 2,
+- **Phase 15.8 (Partition + Net-of-Cost R + Progress):** `GZ_Partition.mqh` splits the expanded history
+  into three half-open, contiguous, non-overlapping parts - `InpDevStart..InpDevEnd` (DEVELOPMENT, research
+  allowed), `InpNewOosStart..InpNewOosEnd` (NEW FINAL OOS, research refused until a candidate is defined),
+  `InpLegacyStart..InpLegacyEnd` (LEGACY/TOUCHED, the already-observed 2026 data, never treated as clean
+  OOS) - validated for contiguity/overlap/order, with any Historical data outside every part kept as
+  UNASSIGNED (warned, not silently dropped). The research gate replaces the old `InpOosStart` gate: only
+  ranges fully inside DEVELOPMENT run, plus one labelled exception, `REGRESSION_ONLY_LEGACY` (the LEGACY_DEV
+  range over 2026, used only to reproduce the validated 412-trade baseline). An optional
+  `InpWarmupM5Bars` (default 0 = today's cold start) loads extra M5 bars before the measured start purely to
+  build causal state (swings/ATR/legs); only trades entered at/after the measured start are counted (existing
+  metrics engine, masked). A post-hoc, additive net-of-cost R layer (`GZ_CostEngine`) computes NET figures
+  next to every GROSS one from the per-trade record and the M1 `spread` field - RECORDED or FIXED spread,
+  PERCENT-of-open or FIXED-per-lot commission (a researched FundedNext-gold proposal, 0.0016% once at open),
+  optional slippage with a mandatory 0/20/50-point sensitivity table; swap is not modelled; costs left
+  unconfigured print NET = GROSS. `InpQuietMainPipeline` (default true) and `InpSkipDuplicateMainRun` only
+  change log verbosity / avoid a duplicate run and cannot change any gross result (proven by T229 and R07).
+  Report: `GZ_Phase158_Report.txt`. Design: `Docs/Phase15_8_Partition_Design.md`.
+- Runs 235 deterministic, synthetic-data self-tests (T01-T235; T188-T209 = Phase 15.7, T210-T235 = Phase 15.8) - the list below covers T01-T166; T167-T187 are Phase 15.5 (T01–T166: T01–T18 Phase 1, T19–T23 Phase 2,
   T24–T34 Phase 3, T35–T45 Phase 4, T46–T54 Phase 5, T55–T64 Phase 6, T65–T74 Phase 7,
   T75–T86 Phase 8, T87–T96 Phase 9, T97–T106 Phase 10, T107–T116 Phase 11, T117–T127 Phase 12,
   T128–T142 Phase 13, T143–T158 Phase 14, T159–T166 Phase 15) and reports PASS/FAIL

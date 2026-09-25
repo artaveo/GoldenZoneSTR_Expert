@@ -34,6 +34,7 @@
 #include "..\Core\GZ_Types.mqh"
 #include "..\Exit\GZ_ExitTypes.mqh"
 #include "..\Journal\GZ_JournalTypes.mqh"
+#include "..\Cost\GZ_CostTypes.mqh"
 
 #define GZ_RB_TP_COUNT           9
 #define GZ_RB_BE_STEP_R          0.25   // BE trigger step (R)
@@ -181,6 +182,8 @@ struct GZ_RewardBeRow
 
    GZ_PairStats     pair;                              // vs BE-off run of the same TP (valid only for BE runs)
 
+   GZ_NetSummary    net;                               // Phase 15.8 Part B: post-hoc net-of-cost figures (gross fields above are never changed)
+
    void Clear()
      {
       run_index=0; experiment_id=""; kind=GZ_RB_OFF; tp_r=0.0; be_trigger_r=0.0; be_offset_r=0.0;
@@ -193,6 +196,7 @@ struct GZ_RewardBeRow
       be_armed_on_entry_bar=0; be_arm_retrace=0; be_arm_retrace_non_entry=0;
       mfe_set_on_exit_bar=0; mae_set_on_exit_bar=0; tp_exit_mfe_overshoot=0; sl_exit_mae_beyond_stop=0;
       pair.Clear();
+      net.Clear();
      }
   };
 
