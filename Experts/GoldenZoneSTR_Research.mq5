@@ -1474,9 +1474,11 @@ void Phase157PostRun(bool pipeline_ran)
    bool oos_ok = !g_phase15_ran && (!pipeline_ran || g_res_end <= InpOosStart);
    //--- Phase 15.8: the NEW Final OOS part is never inside the loaded research population (measured range AND warm-up)
    bool new_oos_touched = pipeline_ran && (g_load_start < InpNewOosEnd) && (g_p157_slice_last >= InpNewOosStart);
+   string r11_loaded = pipeline_ran ? StringFormat("%s -> %s", TimeToString(g_load_start, TIME_DATE|TIME_MINUTES), TimeToString(g_p157_slice_last, TIME_DATE|TIME_MINUTES))
+                                    : "NONE (pipeline did not run in this attachment)";
    P157AddVal("R11_NEW_FINAL_OOS_NOT_LOADED", !new_oos_touched && !(pipeline_ran && !g_gate.allowed),
-              StringFormat("research executed=%s (gate %s); loaded research bars %s -> %s vs NEW FINAL OOS %s -> %s: overlap=%s; research on a refused range=%s (both false required)",
-                           pipeline_ran?"true":"false", g_gate.label, TimeToString(g_load_start, TIME_DATE|TIME_MINUTES), TimeToString(g_p157_slice_last, TIME_DATE|TIME_MINUTES),
+              StringFormat("research executed=%s (gate %s); loaded research bars %s vs NEW FINAL OOS %s -> %s: overlap=%s; research on a refused range=%s (both false required)",
+                           pipeline_ran?"true":"false", g_gate.label, r11_loaded,
                            TimeToString(InpNewOosStart, TIME_DATE|TIME_MINUTES), TimeToString(InpNewOosEnd, TIME_DATE|TIME_MINUTES), new_oos_touched?"true":"false", (pipeline_ran && !g_gate.allowed)?"true":"false"));
    P157AddVal("R09_FINAL_OOS_NOT_USED", oos_ok,
               StringFormat("Phase 15 (Final OOS loader) ran=%s; research executed=%s; effective research end %s vs preserved boundary %s (end <= boundary required when research runs)",
@@ -1656,7 +1658,7 @@ void EmitPhase158Report()
    s += "--- B. Partition validation and research gate ---\n";
    s += StringFormat("partition valid=%s%s\n", g_partition.valid?"true":"false", g_partition.valid ? "" : (" | ERROR: " + g_partition.error));
    if(StringLen(g_partition.warning)>0) s += "partition warning: " + g_partition.warning + "\n";
-   s += "research allowed: " + (g_p157_research_allowed ? "YES" : "NO") + " | " + g_gate.reason + "\n";
+   s += "research allowed: " + (g_p157_research_allowed ? "YES" : "NO") + " | " + g_p157_note + "\n";
    s += "Development may be used for: strategy development, TP/BE/SL/filter research, robustness, sensitivity, walk-forward, Monte Carlo diagnostics, parameter comparison.\n";
    s += "NEW FINAL OOS must NOT be used for: parameter/TP/BE/filter/robustness selection, strategy modification, threshold tuning, deciding which configuration is better. It is executed only after a candidate is defined (research protocol, not a trading recommendation).\n";
    s += "2026 (legacy/touched) was used in Phases 15-15.5 and is never treated as clean OOS.\n\n";
