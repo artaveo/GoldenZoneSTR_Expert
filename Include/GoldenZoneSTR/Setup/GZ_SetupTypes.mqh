@@ -55,6 +55,22 @@ enum ENUM_GZ_SETUP_STATE
   };
 
 //--- Terminal cancellation reason (Roadmap Phase 4 list) --------------
+//--- Phase "First_Change_In_Structure" additions (documented per this file's
+//--- own design-note discipline, same as GZ_CANCEL_INVALID_PENETRATION's
+//--- original "reserved, deferred" pattern):
+//---   GZ_CANCEL_OUTSIDE_SESSION_HOURS - Step 0.5 (Session Hour Gate): a
+//---     setup formed, or an entry that would have triggered, outside the
+//---     configured session-hour window (independent of the historical
+//---     date range - see GZ_SetupStateMachine.mqh / GZ_TradeSimulator.mqh).
+//---   GZ_CANCEL_RISK_TOO_TIGHT - Step 4 (Minimum Risk Gate): the setup's
+//---     structural stop distance is too tight relative to estimated
+//---     round-turn cost (see GZ_EntryEngine.mqh).
+//---   GZ_CANCEL_ELEVATED_SPREAD - reserved for Step 3 (Elevated Spread
+//---     Gate); NOT YET ASSIGNED anywhere - Step 3 itself is deferred until
+//---     the user confirms the three spread numbers from the Step 1 report
+//---     (see Phase_First_Change_In_Structure spec Section 4). Documented
+//---     here now, same "reserved, deferred" pattern, so the enum does not
+//---     need to change again once Step 3 is implemented.
 enum ENUM_GZ_SETUP_CANCEL_REASON
   {
    GZ_CANCEL_NONE = 0,
@@ -63,7 +79,10 @@ enum ENUM_GZ_SETUP_CANCEL_REASON
    GZ_CANCEL_SESSION_END,
    GZ_CANCEL_INVALID_PENETRATION,  // reserved; DEFERRED TO PHASE 5, never assigned here
    GZ_CANCEL_DATA_END,
-   GZ_CANCEL_INVALID_DATA
+   GZ_CANCEL_INVALID_DATA,
+   GZ_CANCEL_OUTSIDE_SESSION_HOURS, // Phase FCIS Step 0.5
+   GZ_CANCEL_RISK_TOO_TIGHT,        // Phase FCIS Step 4
+   GZ_CANCEL_ELEVATED_SPREAD        // reserved; DEFERRED TO Phase FCIS Step 3, never assigned here yet
   };
 
 //+------------------------------------------------------------------+
@@ -137,6 +156,9 @@ struct GZ_Setup
          case GZ_CANCEL_INVALID_PENETRATION:  return "INVALID_PENETRATION";
          case GZ_CANCEL_DATA_END:             return "DATA_END";
          case GZ_CANCEL_INVALID_DATA:         return "INVALID_DATA";
+         case GZ_CANCEL_OUTSIDE_SESSION_HOURS:return "OUTSIDE_SESSION_HOURS";
+         case GZ_CANCEL_RISK_TOO_TIGHT:       return "RISK_TOO_TIGHT";
+         case GZ_CANCEL_ELEVATED_SPREAD:      return "ELEVATED_SPREAD";
         }
       return "UNKNOWN";
      }

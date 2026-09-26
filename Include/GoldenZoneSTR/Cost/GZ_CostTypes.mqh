@@ -107,6 +107,29 @@ struct GZ_CostConfig
      }
   };
 
+//+------------------------------------------------------------------+
+//| Phase FCIS: the CostPrice formula, extracted into a free function |
+//| so it has exactly ONE implementation shared by CGZCostEngine's    |
+//| post-hoc net-of-cost layer (Phase 15.8, unchanged) AND the Entry  |
+//| Engine's live Minimum Risk Gate (Phase FCIS Step 4) - per the     |
+//| Phase_First_Change_In_Structure spec's own instruction not to     |
+//| copy this formula. See design note 2 above for the formula.       |
+//+------------------------------------------------------------------+
+double GZCost_CommissionPrice(double open_price, const GZ_CostConfig &cfg)
+  {
+   if(cfg.commission_mode == GZ_COST_COMM_PERCENT)
+      return open_price * cfg.commission_percent / 100.0;
+   if(cfg.contract_size > 0.0)
+      return cfg.commission_per_lot / cfg.contract_size;
+   return 0.0;
+  }
+
+double GZCost_ComputeCostPrice(double open_price, double spread_pts, double slippage_pts, const GZ_CostConfig &cfg)
+  {
+   if(!cfg.configured) return 0.0;
+   return spread_pts*cfg.point + 2.0*slippage_pts*cfg.point + GZCost_CommissionPrice(open_price, cfg);
+  }
+
 //--- net figures of one population at one slippage level (sensitivity table row)
 struct GZ_NetSens
   {

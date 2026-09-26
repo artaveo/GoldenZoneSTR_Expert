@@ -162,12 +162,26 @@ public:
    //--- `event_ledger` must already be Init()'d too and is populated
    //--- once, deterministically, at the end of this call (see
    //--- CGZEventLedger::BuildFromFinalState()).
+   //--- `use_session_hour_gate` (Phase FCIS Step 0.5): default false = pre-
+   //--- FCIS behavior. When true, reuses the SAME `session_profile` already
+   //--- passed in (no new profile type - per spec Section 3) as a HARD gate,
+   //--- independent of `apply_session_filter`/`force_session_exit` (which
+   //--- keep their own pre-existing, different meanings - see
+   //--- GZ_SetupStateMachine.mqh / GZ_ExitEngine.mqh):
+   //---   - a leg created OUTSIDE the window never becomes/keeps a setup
+   //---     (cancelled immediately, GZ_CANCEL_OUTSIDE_SESSION_HOURS);
+   //---   - the Entry Engine's trigger is suppressed for any bar (M1 or M5)
+   //---     outside the window (GZ_EntryEngine.mqh's `allow_entry_this_bar`).
+   //--- Additive trailing parameter - every existing call site (including
+   //--- every unit test that calls Run() directly) keeps its exact prior
+   //--- behavior unless the caller opts in.
    void Run(const MqlRates &m1[], const MqlRates &m5[], const GZ_Swing &swings[], int swing_count,
             CGZLegEngine &leg_engine, CGZBreakEngine &break_engine, CGZSetupStateMachine &setup_sm,
             CGZEntryEngine &entry_engine, CGZExitEngine &exit_engine,
             CGZJournalEngine &journal_engine, CGZEventLedger &event_ledger,
             CGZTimeEngine &time_engine, CGZSessionEngine &session_engine,
-            const GZ_SessionProfile &session_profile, bool apply_session_filter, bool force_session_exit)
+            const GZ_SessionProfile &session_profile, bool apply_session_filter, bool force_session_exit,
+            bool use_session_hour_gate=false)
      {
       int n1 = ArraySize(m1);
       int n5 = ArraySize(m5);
@@ -188,17 +202,27 @@ public:
          MqlRates bar5 = m5[m5_ptr];
          datetime bar5_close_time = bar5.time + GZ_SPACING_M5_SECONDS;
 
+         //--- computed once per M5 bar, up front, so it is available both to
+         //--- the leg-creation gate below and to setup_sm.OnBar()/the M5-
+         //--- granularity entry call at the end of this iteration.
+         GZ_TimeContext ctx;
+         time_engine.BuildContext(bar5.time, ctx);
+         bool inside_session = (session_engine.Evaluate(ctx, session_profile)==GZ_SESSION_INSIDE);
+         bool allow_entry_m5 = (!use_session_hour_gate) || inside_session;
+
          //--- 1. M1 bars belonging to this STILL-FORMING M5 candle, using
          //---    only structure state as of the previous M5 close.
          while(m1_ptr<n1 && m1[m1_ptr].time<bar5_close_time)
            {
-            entry_engine.OnBar(setup_sm, m1[m1_ptr], true, break_engine.CurrentAtr(), break_engine.AtrReady());
-            trades_handled = HandOffNewTrades(entry_engine, setup_sm, exit_engine, journal_engine, trades_handled,
-                                               break_engine.CurrentAtr(), break_engine.AtrReady());
-
             GZ_TimeContext m1_ctx;
             time_engine.BuildContext(m1[m1_ptr].time, m1_ctx);
             bool m1_inside_session = (session_engine.Evaluate(m1_ctx, session_profile)==GZ_SESSION_INSIDE);
+            bool allow_entry_m1 = (!use_session_hour_gate) || m1_inside_session;
+
+            entry_engine.OnBar(setup_sm, m1[m1_ptr], true, break_engine.CurrentAtr(), break_engine.AtrReady(), allow_entry_m1);
+            trades_handled = HandOffNewTrades(entry_engine, setup_sm, exit_engine, journal_engine, trades_handled,
+                                               break_engine.CurrentAtr(), break_engine.AtrReady());
+
             exit_engine.OnBar(m1[m1_ptr], m1_inside_session, force_session_exit);
             journal_engine.OnBar(m1[m1_ptr]);
             SyncJournalClosures(exit_engine, journal_engine);
@@ -212,7 +236,19 @@ public:
            {
             int new_idx=-1;
             if(leg_engine.Update(swings[swing_ptr], break_engine.CurrentAtr(), break_engine.AtrReady(), new_idx))
-               setup_sm.OnLegCreated(leg_engine.GetLeg(new_idx));
+              {
+               GZ_Leg new_leg = leg_engine.GetLeg(new_idx);
+               int setup_idx = setup_sm.OnLegCreated(new_leg);
+               //--- Phase FCIS Step 0.5: a leg formed outside the session-hour
+               //--- window never keeps its setup - cancel it immediately with
+               //--- the dedicated reason, rather than silently never creating
+               //--- it (so the Event Ledger/cancellation counts still show it).
+               if(use_session_hour_gate && !inside_session)
+                 {
+                  GZ_Setup just_created = setup_sm.GetSetup(setup_idx);
+                  setup_sm.CancelForOutsideSessionHours(just_created.id, bar5.time);
+                 }
+              }
             swing_ptr++;
            }
 
@@ -232,14 +268,11 @@ public:
               }
            }
 
-         GZ_TimeContext ctx;
-         time_engine.BuildContext(bar5.time, ctx);
-         bool inside_session = (session_engine.Evaluate(ctx, session_profile)==GZ_SESSION_INSIDE);
          setup_sm.OnBar(bar5, inside_session, apply_session_filter);
 
          //--- 3. Entry Engine's M5-granularity path (CLOSE_CONFIRMATION
          //---    model only - no-op for every other model, see OnBar()).
-         entry_engine.OnBar(setup_sm, bar5, false, break_engine.CurrentAtr(), break_engine.AtrReady());
+         entry_engine.OnBar(setup_sm, bar5, false, break_engine.CurrentAtr(), break_engine.AtrReady(), allow_entry_m5);
          trades_handled = HandOffNewTrades(entry_engine, setup_sm, exit_engine, journal_engine, trades_handled,
                                             break_engine.CurrentAtr(), break_engine.AtrReady());
         }

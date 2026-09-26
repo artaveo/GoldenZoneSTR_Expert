@@ -252,6 +252,36 @@ public:
       return true;
      }
 
+   //--- Phase FCIS Step 0.5 (Session Hour Gate) hook: cancel a setup the
+   //--- instant it is detected outside the configured session-hour window
+   //--- (independent of the historical date range), or an otherwise-
+   //--- triggering entry that fell outside the window - see
+   //--- GZ_TradeSimulator.mqh / GZ_EntryEngine.mqh callers. Same guarantee
+   //--- as every other cancel hook: never overrides an existing terminal
+   //--- outcome. Returns false if the setup id is unknown or already
+   //--- terminal.
+   bool              CancelForOutsideSessionHours(long setup_id, datetime t)
+     {
+      int idx = FindById(setup_id);
+      if(idx<0 || m_setups[idx].IsTerminal())
+         return false;
+      CancelSetup(idx, GZ_CANCEL_OUTSIDE_SESSION_HOURS, t);
+      return true;
+     }
+
+   //--- Phase FCIS Step 4 (Minimum Risk Gate) hook: cancel a setup whose
+   //--- estimated structural stop distance is too tight relative to the
+   //--- estimated round-turn cost - see GZ_EntryEngine.mqh. Same terminal
+   //--- guarantee as every other cancel hook.
+   bool              CancelForMinRiskTooTight(long setup_id, datetime t)
+     {
+      int idx = FindById(setup_id);
+      if(idx<0 || m_setups[idx].IsTerminal())
+         return false;
+      CancelSetup(idx, GZ_CANCEL_RISK_TOO_TIGHT, t);
+      return true;
+     }
+
    //--- Phase 5 (Entry Engine) hook: mark a setup as ENTERED once the
    //--- Entry Engine has produced a fill for it. Wires up the
    //--- GZ_SETUP_ENTERED stub state that GZ_SetupTypes.mqh explicitly

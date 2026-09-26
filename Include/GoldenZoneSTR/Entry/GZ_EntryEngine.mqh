@@ -38,6 +38,7 @@
 #include "..\Setup\GZ_SetupTypes.mqh"
 #include "..\Setup\GZ_FibEngine.mqh"
 #include "..\Setup\GZ_SetupStateMachine.mqh"
+#include "..\Cost\GZ_CostTypes.mqh"
 #include "..\Diagnostics\GZ_Logger.mqh"
 
 class CGZEntryEngine
@@ -105,6 +106,72 @@ private:
       return m_cfg.penetration_atr_mult * current_atr;
      }
 
+   //--- Step 2 (real bid/ask fills): a Long (Buy) fill happens at the ASK of
+   //--- the fill bar (bid + spread*point); a Short (Sell) fill is unaffected
+   //--- (spec Section 5.2 table). `false` for use_real_spread_fills, or
+   //--- bearish direction, returns raw_bid_price unchanged - the exact
+   //--- pre-FCIS value.
+   double ApplyRealSpreadIfLong(double raw_bid_price, bool bullish, long bar_spread) const
+     {
+      if(!m_cfg.use_real_spread_fills || !bullish)
+         return raw_bid_price;
+      return raw_bid_price + (double)bar_spread * m_cfg.point;
+     }
+
+   //--- Step 4 (Minimum Risk Gate): an EARLY estimate of the structural stop
+   //--- distance, using the exact same STRUCTURE/ATR formula the Exit Engine
+   //--- will use at OnTradeEntered() (GZ_ExitEngine.mqh) - mirrored here
+   //--- (not called there) because the actual trade/SL do not exist yet at
+   //--- this gating point. `usable`=false means an ATR-based estimate was
+   //--- requested but ATR is not ready - caller must skip gating this bar
+   //--- (never guess), same discipline as PenetrationPrice() above.
+   double EstimateStructuralRisk(const GZ_Setup &s, double candidate_fill_price, bool bullish,
+                                  double current_atr, bool atr_ready, bool &usable) const
+     {
+      bool needs_atr = (m_cfg.gate_sl_model==GZ_SL_ATR) || (m_cfg.gate_sl_model==GZ_SL_STRUCTURE && m_cfg.gate_sl_buffer_atr_mult>0.0);
+      if(needs_atr && !atr_ready)
+        {
+         usable = false;
+         return 0.0;
+        }
+      usable = true;
+      double sl_price;
+      if(m_cfg.gate_sl_model==GZ_SL_ATR)
+        {
+         double dist = m_cfg.gate_sl_atr_mult * current_atr;
+         sl_price = bullish ? (candidate_fill_price-dist) : (candidate_fill_price+dist);
+        }
+      else
+        {
+         double buffer = m_cfg.gate_sl_buffer_atr_mult * current_atr;
+         sl_price = bullish ? (s.leg.origin_swing.price-buffer) : (s.leg.origin_swing.price+buffer);
+        }
+      return MathAbs(candidate_fill_price - sl_price);
+     }
+
+   //--- Step 4: true => gate BLOCKS this entry (reject the setup). `usable`
+   //--- mirrors EstimateStructuralRisk()'s own guard - false means the gate
+   //--- cannot be evaluated yet (ATR not ready) and the caller must not
+   //--- guess; a not-usable gate never blocks an entry on its own.
+   bool MinRiskGateBlocks(const GZ_Setup &s, double candidate_fill_price, bool bullish, long bar_spread,
+                          double current_atr, bool atr_ready, bool &usable) const
+     {
+      if(!m_cfg.use_min_risk_gate)
+        {
+         usable = true;
+         return false;
+        }
+      double structural_risk = EstimateStructuralRisk(s, candidate_fill_price, bullish, current_atr, atr_ready, usable);
+      if(!usable)
+         return false;
+      double cost_price = GZCost_ComputeCostPrice(candidate_fill_price, (double)bar_spread,
+                                                   m_cfg.cost_cfg_for_gate.slippage_pts, m_cfg.cost_cfg_for_gate);
+      if(m_cfg.max_cost_fraction_of_r<=0.0)
+         return false; // gate misconfigured (no fraction set) - never silently block
+      double required_risk = cost_price / m_cfg.max_cost_fraction_of_r;
+      return (structural_risk < required_risk);
+     }
+
    void DoEnter(CGZSetupStateMachine &sm, const GZ_Setup &s, datetime t, double fill_price, double entry_level_price, long bar_spread)
      {
       if(!sm.MarkEntered(s.id, t))
@@ -155,7 +222,17 @@ public:
    //--- `current_atr`/`atr_ready` must be the shared Break Engine ATR
    //--- value as of this same point in the replay (no duplicate ATR
    //--- series - see GZ_EntryTypes.mqh).
-   void              OnBar(CGZSetupStateMachine &sm, const MqlRates &bar, bool is_m1_bar, double current_atr, bool atr_ready)
+   //--- `allow_entry_this_bar` (Phase FCIS Step 0.5, Session Hour Gate):
+   //--- default true = pre-FCIS behavior. When false, the entry TRIGGER
+   //--- (TOUCH/LIMIT fire, or a CLOSE_CONFIRMATION/M1_CONFIRMATION streak
+   //--- increment) is skipped for this bar - the invalid-penetration check
+   //--- above still runs unconditionally (that is a structural invalidation,
+   //--- not an entry decision, and must not depend on session hours). This
+   //--- is an ADDITIVE trailing parameter specifically so every existing
+   //--- call site (including every unit test in GZ_TestHarness.mqh) keeps
+   //--- its exact prior behavior unless the caller opts in.
+   void              OnBar(CGZSetupStateMachine &sm, const MqlRates &bar, bool is_m1_bar, double current_atr, bool atr_ready,
+                            bool allow_entry_this_bar=true)
      {
       bool model_wants_this_stream = (m_cfg.model==GZ_ENTRY_CLOSE_CONFIRMATION) ? (!is_m1_bar) : is_m1_bar;
       if(!model_wants_this_stream)
@@ -193,6 +270,14 @@ public:
          if(bar.time < s.waiting_entry_time)
             continue; // no lookahead relative to that gate
 
+         //--- Phase FCIS Step 0.5 (Session Hour Gate): outside the window,
+         //--- the entry TRIGGER itself does not fire this bar (structural
+         //--- invalidation above already ran regardless). Documented as an
+         //--- explicit skip, not a cancellation - the setup stays WAITING_
+         //--- ENTRY and may still trigger on a later bar inside the window.
+         if(!allow_entry_this_bar)
+            continue;
+
          double entry_level_price = CGZFibEngine::PriceAtRatio(s.leg, m_cfg.entry_fib_ratio);
 
          bool   pen_usable;
@@ -206,7 +291,19 @@ public:
                                       : (bar.high>=entry_level_price+pen_price);
             if(!triggered)
                continue;
-            double fill_price = (m_cfg.model==GZ_ENTRY_LIMIT) ? entry_level_price : (bullish ? bar.low : bar.high);
+            double raw_fill_price = (m_cfg.model==GZ_ENTRY_LIMIT) ? entry_level_price : (bullish ? bar.low : bar.high);
+            double fill_price = ApplyRealSpreadIfLong(raw_fill_price, bullish, bar.spread);
+
+            bool gate_usable;
+            if(MinRiskGateBlocks(s, fill_price, bullish, bar.spread, current_atr, atr_ready, gate_usable))
+              {
+               sm.CancelForMinRiskTooTight(s.id, bar.time);
+               ResetStreak(s.id);
+               continue;
+              }
+            if(!gate_usable)
+               continue; // Step 4 gate on, but ATR not ready - do not guess
+
             DoEnter(sm, s, bar.time, fill_price, entry_level_price, bar.spread);
             continue;
            }
@@ -223,7 +320,22 @@ public:
             m_streak_count[idx] = 0;
 
          if(m_streak_count[idx]>=m_cfg.confirmation_candles)
-            DoEnter(sm, s, bar.time, bar.close, entry_level_price, bar.spread);
+           {
+            double raw_fill_price = bar.close;
+            double fill_price = ApplyRealSpreadIfLong(raw_fill_price, bullish, bar.spread);
+
+            bool gate_usable;
+            if(MinRiskGateBlocks(s, fill_price, bullish, bar.spread, current_atr, atr_ready, gate_usable))
+              {
+               sm.CancelForMinRiskTooTight(s.id, bar.time);
+               ResetStreak(s.id);
+               continue;
+              }
+            if(!gate_usable)
+               continue; // Step 4 gate on, but ATR not ready - do not guess
+
+            DoEnter(sm, s, bar.time, fill_price, entry_level_price, bar.spread);
+           }
         }
      }
   };

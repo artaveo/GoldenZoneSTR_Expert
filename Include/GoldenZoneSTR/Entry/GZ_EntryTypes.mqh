@@ -53,6 +53,8 @@
 #define __GZ_ENTRY_TYPES_MQH__
 
 #include "..\Leg\GZ_LegTypes.mqh"
+#include "..\Exit\GZ_ExitTypes.mqh"
+#include "..\Cost\GZ_CostTypes.mqh"
 
 //--- Entry trigger model (Roadmap Phase 5) --------------------------------
 enum ENUM_GZ_ENTRY_MODEL
@@ -77,6 +79,29 @@ enum ENUM_GZ_ENTRY_MODEL
 //|   way CGZLegEngine::Update() already consumes it - no duplicate  |
 //|   ATR series, one shared deterministic source.                   |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Phase FCIS additions (documented, additive - every new field      |
+//| defaults to the pre-FCIS/OFF behavior so the 412-trade baseline   |
+//| reproduces exactly when every FCIS switch stays off):             |
+//|   use_real_spread_fills / point  - Step 2 (real bid/ask fills):   |
+//|     a Long (Buy) entry fills at ask = bid + spread*point of the   |
+//|     entry M1 bar; a Short (Sell) entry is unaffected (spec        |
+//|     Section 5.2). See GZ_EntryEngine.mqh::DoEnter().              |
+//|   use_min_risk_gate / max_cost_fraction_of_r / cost_cfg_for_gate /|
+//|   gate_sl_model / gate_sl_buffer_atr_mult / gate_sl_atr_mult -    |
+//|     Step 4 (Minimum Risk Gate): rejects a setup whose ESTIMATED   |
+//|     structural stop distance is too tight relative to the         |
+//|     estimated round-turn cost. gate_sl_* MIRROR the Exit Engine's |
+//|     own SL formula (GZ_ExitEngine.mqh::OnTradeEntered) purely as  |
+//|     an early estimate at the pre-trade gating point - the ACTUAL  |
+//|     SL is still computed exactly once, by the Exit Engine, the    |
+//|     instant the trade is actually entered; this is not a second   |
+//|     authoritative SL. cost_cfg_for_gate reuses GZ_CostConfig      |
+//|     (GZ_CostTypes.mqh) purely for its spread/slippage/commission  |
+//|     fields, through the SAME free-function formula the Phase 15.8 |
+//|     post-hoc layer uses (GZCost_ComputeCostPrice) - see that      |
+//|     file's own note; no duplicated formula.                      |
+//+------------------------------------------------------------------+
 struct GZ_EntryConfig
   {
    ENUM_GZ_ENTRY_MODEL model;
@@ -84,12 +109,32 @@ struct GZ_EntryConfig
    int                 confirmation_candles;
    double              penetration_atr_mult;
 
+   bool                use_real_spread_fills;    // Step 2 - default false = pre-FCIS behavior
+   double              point;                    // SYMBOL_POINT, needed only when use_real_spread_fills==true
+
+   bool                use_min_risk_gate;        // Step 4 - default false = pre-FCIS behavior
+   double              max_cost_fraction_of_r;   // required_risk = cost_price / this
+   GZ_CostConfig       cost_cfg_for_gate;        // spread/slippage/commission fields only (see note above)
+   ENUM_GZ_SL_MODEL    gate_sl_model;            // mirrors InpSlModel, for the gate's early SL estimate only
+   double              gate_sl_buffer_atr_mult;  // mirrors InpSlBufferAtrMult
+   double              gate_sl_atr_mult;         // mirrors InpSlAtrMult
+
    void Default()
      {
       model                 = GZ_ENTRY_TOUCH;
       entry_fib_ratio       = 0.618;
       confirmation_candles  = 1;
       penetration_atr_mult  = 0.0;
+
+      use_real_spread_fills = false;
+      point                 = 0.01;
+
+      use_min_risk_gate       = false;
+      max_cost_fraction_of_r  = 0.05;
+      cost_cfg_for_gate.Default();
+      gate_sl_model            = GZ_SL_STRUCTURE;
+      gate_sl_buffer_atr_mult  = 0.0;
+      gate_sl_atr_mult         = 1.5;
      }
   };
 

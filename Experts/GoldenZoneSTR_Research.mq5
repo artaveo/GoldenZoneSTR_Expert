@@ -126,6 +126,7 @@
 #include <GoldenZoneSTR\Dataset\GZ_Partition.mqh>
 #include <GoldenZoneSTR\Cost\GZ_CostTypes.mqh>
 #include <GoldenZoneSTR\Cost\GZ_CostEngine.mqh>
+#include <GoldenZoneSTR\Cost\GZ_SpreadHourReport.mqh>
 #include <GoldenZoneSTR\Core\GZ_Progress.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_Logger.mqh>
 #include <GoldenZoneSTR\Diagnostics\GZ_TestHarness.mqh>
@@ -349,6 +350,15 @@ input double                InpCostContractSize  = 100.0;                     //
 input double                InpCostSlippagePts   = 0.0;                       // slippage in points per side (XAUUSD: 10 points = $0.10)
 input bool                  InpCostsConfigured   = false;                     // true = the cost inputs above are deliberately set (false = NET equals GROSS)
 
+//--- Phase "First_Change_In_Structure" (Steps 0.5/2/4 below are OFF by default so the
+//--- 412-trade LEGACY_DEV baseline reproduces exactly until explicitly switched on.
+//--- Step 3 (Elevated Spread Gate) has NO input here yet - it is NOT coded until the
+//--- Step 1 report's three numbers are confirmed, per the spec's own STOP rule).
+input bool                  InpUseSessionHourGate = false;                    // Session Hour Gate (Step 0.5): true blocks BOTH new setup formation and entry outside the session window above (InpSessionStartHour..InpSessionEndHour), independent of the historical date range - unlike InpApplySessionFilter, which only cancels an already-pending setup once the session ends
+input bool                  InpUseRealSpreadFills = false;                    // Real bid/ask fills (Step 2): true fills a Long at the entry candle's ask (bid+spread*point) and checks/fills a Short's SL/TP/BE at the ask of the candle that touches it; false = exact pre-FCIS bid-only behavior
+input bool                  InpUseMinRiskGate     = false;                    // Minimum Risk Gate (Step 4): true rejects a setup whose structural stop distance is smaller than (estimated round-turn cost / InpMaxCostFractionOfR)
+input double                InpMaxCostFractionOfR = 0.05;                     // Minimum Risk Gate (Step 4): required minimum structural risk = estimated round-turn cost divided by this fraction
+
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
 CGZDataProvider   g_provider(GetPointer(g_logger));
@@ -374,6 +384,10 @@ CGZWalkForwardEngine g_walkforward_engine(GetPointer(g_logger));
 CGZMonteCarloEngine  g_montecarlo_engine(GetPointer(g_logger));
 CGZFinalOosEngine    g_oos_engine(GetPointer(g_logger));
 CGZRewardBeEngine    g_rewardbe_engine(GetPointer(g_logger));
+
+//--- Phase "First_Change_In_Structure" (Step 1 spread report) ---
+CGZSpreadHourReport  g_fcis_spread_report;
+string               g_fcis_step1_text = "";
 
 CGZDatasetInfo    g_info_m1;
 CGZDatasetInfo    g_info_m5;
@@ -1776,6 +1790,96 @@ void EmitPhase158Report()
   }
 
 //+------------------------------------------------------------------+
+//| Phase "First_Change_In_Structure" report - Step 0.5 (Session Hour |
+//| Gate), Step 1 (spread diagnostic - STOP for user confirmation),   |
+//| Step 2 (real bid/ask fills), Step 4 (Minimum Risk Gate). Step 3   |
+//| is explicitly NOT coded/reported as running - only as a pending   |
+//| proposal awaiting the user's three confirmed numbers (spec        |
+//| Section 4). Broker DST handling is the pre-existing InpDstMode /  |
+//| InpBrokerUtcOffsetHrs mechanism, unchanged by this phase.         |
+//+------------------------------------------------------------------+
+void EmitFcisReport()
+  {
+   string s = "";
+   s += "===================================================\n";
+   s += "PHASE: First_Change_In_Structure (real spread simulation, elevated-spread/min-risk/session-hour gates)\n";
+   s += "===================================================\n";
+   s += "Baseline (all three FCIS switches OFF) must reproduce the LEGACY_DEV 412-trade result exactly - see Section C below.\n";
+   s += "Step 3 (Elevated Spread Gate) is NOT CODED YET - it waits for the user to confirm the three numbers proposed in Section A.\n\n";
+
+   s += "--- A. Step 1 - Hourly spread diagnostic (STOP: confirm/edit these before Step 3 is coded) ---\n";
+   s += g_fcis_step1_text + "\n";
+   s += "(Re-run with a different InpResRangeKind - e.g. GZ_RANGE_LEGACY_DEV vs the LEGACY/TOUCHED range - to see the other partition's table; this report covers only the range actually loaded in THIS attachment.)\n\n";
+
+   s += "--- B. Step 0.5 / Step 2 / Step 4 - current switch settings ---\n";
+   s += StringFormat("InpUseSessionHourGate=%s (window %02d:%02d-%02d:%02d %s, time mode=%s)\n",
+                     InpUseSessionHourGate?"true":"false", InpSessionStartHour, InpSessionStartMinute,
+                     InpSessionEndHour, InpSessionEndMinute, InpSessionInclude?"INCLUDE":"EXCLUDE", EnumToString(InpTimeMode));
+   s += StringFormat("InpUseRealSpreadFills=%s (point=%.5f) | InpUseMinRiskGate=%s (max_cost_fraction_of_r=%.3f)\n",
+                     InpUseRealSpreadFills?"true":"false", g_cost_cfg.point, InpUseMinRiskGate?"true":"false", InpMaxCostFractionOfR);
+   s += "Elevated Spread Gate (Step 3): NOT CODED in this attachment - no input exists for it yet.\n\n";
+
+   s += "--- C. Baseline / regression (this run's own executed range) ---\n";
+   bool all_off = (!InpUseSessionHourGate) && (!InpUseRealSpreadFills) && (!InpUseMinRiskGate);
+   s += StringFormat("all three FCIS switches OFF in this run = %s\n", all_off?"true":"false");
+   if(g_res_range.kind==GZ_RANGE_LEGACY_DEV)
+      s += StringFormat("range=LEGACY_DEV: trades=%d (expect 412 exactly when all_off=true)\n", g_trade_count);
+   else
+      s += StringFormat("range kind=%s (not LEGACY_DEV) - the 412-trade check only applies on LEGACY_DEV; this run's trade count=%d is informational only.\n", GZRangeKindToString(g_res_range.kind), g_trade_count);
+   s += StringFormat("setup cancel reasons this run: OUTSIDE_SESSION_HOURS=%d RISK_TOO_TIGHT=%d (must both be 0 when the matching switch is OFF)\n",
+                     g_setup_sm.CountTerminalByReason(GZ_CANCEL_OUTSIDE_SESSION_HOURS), g_setup_sm.CountTerminalByReason(GZ_CANCEL_RISK_TOO_TIGHT));
+   s += "\n";
+
+   s += "--- D. Net-of-cost layer interaction (Phase 15.8) ---\n";
+   if(InpUseRealSpreadFills && InpCostsConfigured && InpCostSpreadMode==GZ_COST_SPREAD_RECORDED)
+      s += "WARNING: InpUseRealSpreadFills=true AND the Phase 15.8 post-hoc layer is charging RECORDED spread too - spread is being deducted TWICE (once inside the simulation, once again post-hoc). Set InpCostSpreadMode=GZ_COST_SPREAD_FIXED with InpCostFixedSpreadPts=0 (or leave only commission/slippage configured) while InpUseRealSpreadFills=true.\n";
+   else if(InpUseRealSpreadFills)
+      s += "InpUseRealSpreadFills=true; Phase 15.8 post-hoc spread is not concurrently double-charged in this run's configuration.\n";
+   else
+      s += "InpUseRealSpreadFills=false - no interaction with the Phase 15.8 net-of-cost layer in this run.\n";
+   s += "\n";
+
+   s += "--- E. Automated tests T236-T249 (synthetic data) ---\n";
+   int tp_ = 0, tf_ = 0;
+   for(int i=0;i<g_harness.ResultCount();i++)
+     {
+      GZ_TestResult r = g_harness.GetResult(i);
+      if(StringLen(r.id)<2 || StringGetCharacter(r.id,0)!='T') continue;
+      int num = (int)StringToInteger(StringSubstr(r.id,1));
+      if(num<236) continue;
+      s += StringFormat("%s: %s - %s\n", r.id, r.passed?"PASS":"FAIL", r.detail);
+      if(r.passed) tp_++; else tf_++;
+     }
+   s += StringFormat("FCIS tests: %d PASS / %d FAIL | full suite T01-T%d: %d PASS / %d FAIL\n\n", tp_, tf_, g_harness.ResultCount(), g_harness.PassCount(), g_harness.FailCount());
+
+   s += "--- F. Scope reminder ---\n";
+   s += "No change to Swing/Leg/Break/Fibonacci detection logic itself (only whether a setup is rejected). Phase 10 Filter Engine untouched (these gates run inside Entry/Setup, not as a post-hoc filter). No Phase 16, no TP/BE selection, no new Final OOS run in this phase.\n\n";
+
+   s += "--- Phase Status ---\n";
+   string status;
+   if(tf_>0)
+      status = "PHASE FCIS FAILED (automated test failure - see Section E)";
+   else if(g_res_range.kind==GZ_RANGE_LEGACY_DEV && all_off && g_trade_count!=412)
+      status = "PHASE FCIS BLOCKED (baseline did not reproduce 412 trades on LEGACY_DEV with every switch off)";
+   else
+      status = "PHASE FCIS STEP 0.5/2/4 IMPLEMENTED - AWAITING USER CONFIRMATION OF STEP 1 NUMBERS BEFORE STEP 3 IS CODED";
+   s += status + "\n";
+   s += "No claim of a real MT5 run result is made beyond what this attachment itself just computed. Compile and run this in your own MT5 to confirm the automated tests and the baseline reproduction before trusting this report further.\n";
+   s += "===================================================\n";
+
+   PrintReportChunked(s);
+   int hf = FileOpen("GZ_PhaseFCIS_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   if(hf!=INVALID_HANDLE)
+     {
+      FileWriteString(hf, s);
+      FileClose(hf);
+      Print("[GZ] Phase FCIS output written to Common\\Files\\GZ_PhaseFCIS_Report.txt");
+     }
+   else
+      Print("[GZ] WARNING: could not open GZ_PhaseFCIS_Report.txt for writing, error=", GetLastError());
+  }
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                    |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -1886,6 +1990,20 @@ int OnInit()
                     TimeToString(m1[mid].time), idx, idx>=0?TimeToString(m5[idx].time):"none"));
      }
 
+   //--- Phase "First_Change_In_Structure" Step 1: hourly spread diagnostic
+   //--- report over the currently loaded/sliced M1 range (see
+   //--- GZ_SpreadHourReport.mqh). DIAGNOSTIC ONLY - proposes but never sets
+   //--- InpNormalSpreadPts/InpElevatedSpreadPts/ATR-override-ratio; Step 3
+   //--- (Elevated Spread Gate) stays uncoded until the user confirms them
+   //--- (spec Section 4 STOP rule).
+   if(n1>0)
+      g_fcis_step1_text = g_fcis_spread_report.Build(m1, StringFormat("%s range kind=%s [%s .. %s]",
+                          InpSymbol, GZRangeKindToString(g_res_range.kind),
+                          TimeToString(g_res_start, TIME_DATE|TIME_MINUTES), TimeToString(g_res_end, TIME_DATE|TIME_MINUTES)));
+   else
+      g_fcis_step1_text = "Step 1 - Hourly spread diagnostic: SKIPPED (no M1 data loaded in this attachment).\n";
+   g_logger.Info("FCIS-Step1", g_fcis_step1_text);
+
    //--- Phase 2: M5 Structure Engine (swing/pivot detection) ------------------
    // Diagnostic only - detects swings over the already-loaded, already-
    // validated M5 range and logs a summary. No leg/break/fib/entry/exit
@@ -1957,7 +2075,17 @@ int OnInit()
    entry_cfg.entry_fib_ratio      = InpEntryFibRatio;
    entry_cfg.confirmation_candles = InpConfirmationCandles;
    entry_cfg.penetration_atr_mult = InpEntryPenetrationAtrMult;
+   entry_cfg.use_real_spread_fills = InpUseRealSpreadFills;
+   entry_cfg.point                  = g_cost_cfg.point;
+   entry_cfg.use_min_risk_gate     = InpUseMinRiskGate;
+   entry_cfg.max_cost_fraction_of_r = InpMaxCostFractionOfR;
+   entry_cfg.cost_cfg_for_gate       = g_cost_cfg; // same spread/commission/slippage assumptions as the Phase 15.8 net-of-cost layer
+   entry_cfg.gate_sl_model           = InpSlModel;
+   entry_cfg.gate_sl_buffer_atr_mult = InpSlBufferAtrMult;
+   entry_cfg.gate_sl_atr_mult        = InpSlAtrMult;
    g_entry_engine.Init(entry_cfg);
+   if(InpUseMinRiskGate && !InpCostsConfigured)
+      g_logger.Warning("FCIS-Step4", "InpUseMinRiskGate=true but InpCostsConfigured=false: the estimated cost is 0 for every setup, so the gate will never reject anything. Set the Phase 15.8 cost inputs (spread/commission mode) if you want this gate to actually bind.");
 
    GZ_ExitConfig exit_cfg; exit_cfg.Default();
    exit_cfg.sl_model                = InpSlModel;
@@ -1968,6 +2096,8 @@ int OnInit()
    exit_cfg.be_level_mode           = InpBeLevelMode;
    exit_cfg.be_level_offset_r       = InpBeLevelOffsetR;
    exit_cfg.intrabar_conflict_policy= InpIntrabarConflictPolicy;
+   exit_cfg.use_real_spread_fills   = InpUseRealSpreadFills;
+   exit_cfg.point                   = g_cost_cfg.point;
    g_exit_engine.Init(exit_cfg);
 
    g_journal_engine.Init();
@@ -1991,7 +2121,8 @@ int OnInit()
          g_trade_simulator.Run(m1, m5, g_swings, g_swing_count,
                              g_leg_engine, g_break_engine, g_setup_sm, g_entry_engine, g_exit_engine,
                              g_journal_engine, g_event_ledger,
-                             g_time_engine, g_session_engine, session_profile, InpApplySessionFilter, InpForceSessionExit);
+                             g_time_engine, g_session_engine, session_profile, InpApplySessionFilter, InpForceSessionExit,
+                             InpUseSessionHourGate);
       g_logger.SetMinLevel(GZ_SEV_INFO);
       if(g_main_skipped)
          g_logger.Info("Init", "Phase 15.8: main pipeline run SKIPPED on purpose; the matrix row TP 2R / BE off provides the figures.");
@@ -2026,10 +2157,11 @@ int OnInit()
          g_setup_sm.CountByState(GZ_SETUP_EXITED), g_setup_sm.CountByState(GZ_SETUP_CANCELLED),
          InpFibZoneMinRatio, InpFibZoneMaxRatio, InpApplySessionFilter?"true":"false"));
       g_logger.Info("Setup", StringFormat(
-         "  Cancel reasons: OPPOSITE_BREAK=%d NEW_VALID_SETUP=%d SESSION_END=%d INVALID_PENETRATION=%d DATA_END=%d",
+         "  Cancel reasons: OPPOSITE_BREAK=%d NEW_VALID_SETUP=%d SESSION_END=%d INVALID_PENETRATION=%d DATA_END=%d OUTSIDE_SESSION_HOURS=%d RISK_TOO_TIGHT=%d",
          g_setup_sm.CountTerminalByReason(GZ_CANCEL_OPPOSITE_BREAK), g_setup_sm.CountTerminalByReason(GZ_CANCEL_NEW_VALID_SETUP),
          g_setup_sm.CountTerminalByReason(GZ_CANCEL_SESSION_END), g_setup_sm.CountTerminalByReason(GZ_CANCEL_INVALID_PENETRATION),
-         g_setup_sm.CountTerminalByReason(GZ_CANCEL_DATA_END)));
+         g_setup_sm.CountTerminalByReason(GZ_CANCEL_DATA_END), g_setup_sm.CountTerminalByReason(GZ_CANCEL_OUTSIDE_SESSION_HOURS),
+         g_setup_sm.CountTerminalByReason(GZ_CANCEL_RISK_TOO_TIGHT)));
       int show_setups = (g_setup_count<5) ? g_setup_count : 5;
       for(int j=0;j<show_setups;j++)
         {
@@ -2603,6 +2735,7 @@ int OnInit()
    EmitPhase155Report();
    EmitPhase157Report();
    EmitPhase158Report();
+   EmitFcisReport();
 
    g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 diagnostics complete. STOPPING after Phase 15.8 (dataset partition + net-of-cost layer) - not proceeding to Phase 16 (Research Freeze) logic.");
 

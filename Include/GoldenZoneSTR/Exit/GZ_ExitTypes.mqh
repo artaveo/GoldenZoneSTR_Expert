@@ -120,6 +120,14 @@ struct GZ_ExitConfig
    double               be_level_offset_r;
    ENUM_GZ_INTRABAR_CONFLICT_POLICY intrabar_conflict_policy;
 
+   //--- Phase FCIS Step 2 (real bid/ask fills). Default false/0.01 = exact
+   //--- pre-FCIS behavior (bars are bid-based, SL/TP/BE always evaluated and
+   //--- filled on bid). See GZ_ExitEngine.mqh::OnBar() for the exact rule
+   //--- (spec Section 5.2): a Short's close (Buy) checks/fills at the ask of
+   //--- the relevant M1 candle; a Long's close (Sell) is unaffected.
+   bool                 use_real_spread_fills;
+   double               point;
+
    void Default()
      {
       sl_model                 = GZ_SL_STRUCTURE;
@@ -130,6 +138,9 @@ struct GZ_ExitConfig
       be_level_mode             = GZ_BE_LEVEL_ENTRY;
       be_level_offset_r         = 0.0;
       intrabar_conflict_policy  = GZ_CONFLICT_SL_FIRST;
+
+      use_real_spread_fills    = false;
+      point                    = 0.01;
      }
   };
 

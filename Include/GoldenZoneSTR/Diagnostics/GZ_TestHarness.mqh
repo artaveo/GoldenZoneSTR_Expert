@@ -70,6 +70,7 @@
 #include "..\RewardBe\GZ_RewardBeTests.mqh"
 #include "..\Dataset\GZ_DatasetTests.mqh"
 #include "..\Dataset\GZ_PartitionTests.mqh"
+#include "..\FCIS\GZ_FcisTests.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -5703,6 +5704,16 @@ public:
         {
          GZ_TestResult ptr = pt_suite.GetResult(pti);
          AddResult(ptr.id, ptr.passed, ptr.detail);
+        }
+
+      //--- Phase "First_Change_In_Structure" (T236-T249): Session Hour Gate,
+      //--- real bid/ask fills, Minimum Risk Gate - synthetic data only
+      CGZFcisTests fcis_suite(m_logger);
+      fcis_suite.RunAll();
+      for(int fci=0; fci<fcis_suite.ResultCount(); fci++)
+        {
+         GZ_TestResult fcr = fcis_suite.GetResult(fci);
+         AddResult(fcr.id, fcr.passed, fcr.detail);
         }
      }
 

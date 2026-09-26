@@ -83,6 +83,17 @@ private:
             e.exit_price, e.realized_r, TimeToString(t)));
      }
 
+   //--- Phase FCIS Step 2 (real bid/ask fills, spec Section 5.2): closing a
+   //--- Short is a Buy, filled at the ASK of the bar that touched the level
+   //--- (level_price + spread*point); closing a Long is a Sell, unaffected
+   //--- (bars are already bid-based). Default false / bullish -> unchanged.
+   double ExitFillPrice(double level_price, bool bullish, long bar_spread) const
+     {
+      if(!m_cfg.use_real_spread_fills || bullish)
+         return level_price;
+      return level_price + (double)bar_spread * m_cfg.point;
+     }
+
 public:
                      CGZExitEngine(CGZLogger *logger=NULL) { m_logger=logger; m_cfg.Default(); }
 
@@ -187,29 +198,46 @@ public:
 
          bool bullish = (m_exits[i].direction==GZ_LEG_BULLISH);
 
-         bool touched_sl = bullish ? (bar.low<=m_exits[i].sl_price)  : (bar.high>=m_exits[i].sl_price);
-         bool touched_tp = bullish ? (bar.high>=m_exits[i].tp_price) : (bar.low<=m_exits[i].tp_price);
+         //--- Phase FCIS Step 2: a Short's SL/TP touch is checked against the
+         //--- ASK of this bar (high/low + spread*point) - the same spec
+         //--- Section 5.2 approximation documented in GZ_CostTypes.mqh design
+         //--- note 5, now applied INSIDE the simulation itself rather than
+         //--- only post-hoc. A Long's touch check stays on raw bid HL.
+         bool  ask_adjust = (!bullish) && m_cfg.use_real_spread_fills;
+         double eval_high = ask_adjust ? (bar.high + (double)bar.spread*m_cfg.point) : bar.high;
+         double eval_low  = ask_adjust ? (bar.low  + (double)bar.spread*m_cfg.point) : bar.low;
+
+         bool touched_sl = bullish ? (bar.low<=m_exits[i].sl_price)  : (eval_high>=m_exits[i].sl_price);
+         bool touched_tp = bullish ? (bar.high>=m_exits[i].tp_price) : (eval_low<=m_exits[i].tp_price);
 
          if(touched_sl || touched_tp)
            {
+            double sl_fill = ExitFillPrice(m_exits[i].sl_price, bullish, bar.spread);
+            double tp_fill = ExitFillPrice(m_exits[i].tp_price, bullish, bar.spread);
             if(touched_sl && touched_tp)
               {
                m_exits[i].intrabar_conflict = true;
                if(m_cfg.intrabar_conflict_policy==GZ_CONFLICT_SL_FIRST)
-                  CloseTrade(m_exits[i], bar.time, m_exits[i].sl_price,
+                  CloseTrade(m_exits[i], bar.time, sl_fill,
                              m_exits[i].be_triggered ? GZ_EXIT_BREAK_EVEN : GZ_EXIT_SL_HIT);
                else
-                  CloseTrade(m_exits[i], bar.time, m_exits[i].tp_price, GZ_EXIT_TP_HIT);
+                  CloseTrade(m_exits[i], bar.time, tp_fill, GZ_EXIT_TP_HIT);
               }
             else if(touched_sl)
-               CloseTrade(m_exits[i], bar.time, m_exits[i].sl_price,
+               CloseTrade(m_exits[i], bar.time, sl_fill,
                           m_exits[i].be_triggered ? GZ_EXIT_BREAK_EVEN : GZ_EXIT_SL_HIT);
             else
-               CloseTrade(m_exits[i], bar.time, m_exits[i].tp_price, GZ_EXIT_TP_HIT);
+               CloseTrade(m_exits[i], bar.time, tp_fill, GZ_EXIT_TP_HIT);
             continue; // closed this bar - nothing else applies to it (see header)
            }
 
          //--- break-even arming (only if not already armed and configured on) ---
+         //--- Phase FCIS Step 2 note: arming is a MARKET-STATE check (did price
+         //--- move far enough in favor to justify moving the stop), not an
+         //--- order fill, so it deliberately stays on raw bid HL even when
+         //--- use_real_spread_fills is on - the ask-adjusted check on the NEXT
+         //--- bar's touched_sl (above) is what actually prices the eventual
+         //--- BE exit for a Short. Documented choice, not an oversight.
          if(!m_exits[i].be_triggered && m_cfg.be_trigger_r>0.0)
            {
             double trigger_price = bullish ? (m_exits[i].entry_price+m_cfg.be_trigger_r*m_exits[i].initial_risk)

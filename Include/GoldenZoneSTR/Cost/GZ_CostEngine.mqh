@@ -129,21 +129,15 @@ public:
    GZ_CostConfig     Config() const { return m_cfg; }
 
    //--- commission part of the cost, in price units per ounce
+   //--- Phase FCIS: delegates to the shared free function (GZ_CostTypes.mqh)
+   //--- so the Entry Engine's Minimum Risk Gate (Step 4) uses the identical
+   //--- formula without duplicating it.
    double            CommissionPrice(double open_price) const
-     {
-      if(m_cfg.commission_mode == GZ_COST_COMM_PERCENT)
-         return open_price * m_cfg.commission_percent / 100.0;
-      if(m_cfg.contract_size > 0.0)
-         return m_cfg.commission_per_lot / m_cfg.contract_size;
-      return 0.0;
-     }
+     { return GZCost_CommissionPrice(open_price, m_cfg); }
 
    //--- total cost of one trade in price units per ounce. 0.0 when the costs are not deliberately configured.
    double            CostPrice(double open_price, double spread_pts, double slippage_pts) const
-     {
-      if(!m_cfg.configured) return 0.0;
-      return spread_pts*m_cfg.point + 2.0*slippage_pts*m_cfg.point + CommissionPrice(open_price);
-     }
+     { return GZCost_ComputeCostPrice(open_price, spread_pts, slippage_pts, m_cfg); }
 
    //--- spread of the ENTRY M1 bar (exact bar time preferred; else the last bar at/before it within one M5 window).
    //--- found=false when no such bar exists.
