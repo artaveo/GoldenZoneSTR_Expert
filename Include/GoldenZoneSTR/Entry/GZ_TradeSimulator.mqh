@@ -97,6 +97,20 @@ private:
       return false;
      }
 
+   //--- Daily Loss Limit support: floor a timestamp to its own broker-
+   //--- calendar day (00:00:00), so the caller can detect a day rollover
+   //--- and reset the running daily realized-R total. Broker time is used
+   //--- (not UTC/NY) - consistent with every other day/session boundary
+   //--- already in this pipeline (session windows use GZ_TIME_BROKER by
+   //--- default, per the Time Engine's own design).
+   datetime DayStart(datetime t) const
+     {
+      MqlDateTime dt;
+      TimeToStruct(t, dt);
+      dt.hour = 0; dt.min = 0; dt.sec = 0;
+      return StructToTime(dt);
+     }
+
    //--- Hand every trade CGZEntryEngine produced since `handled_count`
    //--- to CGZExitEngine.OnTradeEntered(), then CGZJournalEngine.
    //--- OnTradeEntered() (Phase 7 - needs the initial_risk Phase 6 just
@@ -175,13 +189,29 @@ public:
    //--- Additive trailing parameter - every existing call site (including
    //--- every unit test that calls Run() directly) keeps its exact prior
    //--- behavior unless the caller opts in.
+   //--- Phase "Concurrent Same-Direction Setups + Opposite-Break Survival"
+   //--- follow-up - two more independent, additive, default-off gates on
+   //--- the Entry Engine's own trigger (see GZ_EntryEngine.mqh header):
+   //--- `use_daily_loss_limit`/`daily_loss_limit_r` - this method tracks a
+   //--- running SUM of realized_r over trades closed on the current broker
+   //--- day (via CGZExitEngine::LastBarClosedRealizedR(), read once per M1
+   //--- bar - O(1), never re-scans the exit list), resets it to 0.0 the
+   //--- instant the M1/M5 bar's own DayStart() differs from the previous
+   //--- bar's, and passes `daily_realized_r <= -|daily_loss_limit_r|` into
+   //--- both entry_engine.OnBar() calls (M1 and M5-close) as
+   //--- daily_loss_limit_active. `use_max_concurrent_trades` needs no
+   //--- extra state here - CGZExitEngine::OpenCount() as of the END of the
+   //--- previous bar (i.e. read BEFORE this bar's own entry_engine.OnBar()
+   //--- call) is passed straight through as current_open_trades_count -
+   //--- no lookahead, same principle as every other gate in this file.
    void Run(const MqlRates &m1[], const MqlRates &m5[], const GZ_Swing &swings[], int swing_count,
             CGZLegEngine &leg_engine, CGZBreakEngine &break_engine, CGZSetupStateMachine &setup_sm,
             CGZEntryEngine &entry_engine, CGZExitEngine &exit_engine,
             CGZJournalEngine &journal_engine, CGZEventLedger &event_ledger,
             CGZTimeEngine &time_engine, CGZSessionEngine &session_engine,
             const GZ_SessionProfile &session_profile, bool apply_session_filter, bool force_session_exit,
-            bool use_session_hour_gate=false)
+            bool use_session_hour_gate=false,
+            bool use_daily_loss_limit=false, double daily_loss_limit_r=3.0)
      {
       int n1 = ArraySize(m1);
       int n5 = ArraySize(m5);
@@ -196,6 +226,12 @@ public:
       int m1_ptr    = 0;
       int trades_handled = 0;
       double last_m1_close = 0.0;
+
+      //--- Daily Loss Limit running state (see header above). day_start==0
+      //--- is a deliberate sentinel meaning "no bar processed yet" so the
+      //--- very first bar always triggers the rollover branch below.
+      datetime daily_day_start   = 0;
+      double   daily_realized_r  = 0.0;
 
       for(int m5_ptr=0; m5_ptr<n5; m5_ptr++)
         {
@@ -219,11 +255,21 @@ public:
             bool m1_inside_session = (session_engine.Evaluate(m1_ctx, session_profile)==GZ_SESSION_INSIDE);
             bool allow_entry_m1 = (!use_session_hour_gate) || m1_inside_session;
 
-            entry_engine.OnBar(setup_sm, m1[m1_ptr], true, break_engine.CurrentAtr(), break_engine.AtrReady(), allow_entry_m1);
+            //--- Daily Loss Limit: roll the running total over to 0 the
+            //--- instant this bar's own broker-day differs from the
+            //--- previous bar's, THEN gate using the total as it stood at
+            //--- the end of the previous bar (no lookahead).
+            datetime this_day = DayStart(m1[m1_ptr].time);
+            if(this_day!=daily_day_start) { daily_day_start = this_day; daily_realized_r = 0.0; }
+            bool daily_loss_limit_active = use_daily_loss_limit && (daily_realized_r<=-MathAbs(daily_loss_limit_r));
+
+            entry_engine.OnBar(setup_sm, m1[m1_ptr], true, break_engine.CurrentAtr(), break_engine.AtrReady(),
+                                allow_entry_m1, daily_loss_limit_active, exit_engine.OpenCount());
             trades_handled = HandOffNewTrades(entry_engine, setup_sm, exit_engine, journal_engine, trades_handled,
                                                break_engine.CurrentAtr(), break_engine.AtrReady());
 
             exit_engine.OnBar(m1[m1_ptr], m1_inside_session, force_session_exit);
+            daily_realized_r += exit_engine.LastBarClosedRealizedR(); // fold THIS bar's closes in for the NEXT bar's gate check
             journal_engine.OnBar(m1[m1_ptr]);
             SyncJournalClosures(exit_engine, journal_engine);
 
@@ -272,7 +318,15 @@ public:
 
          //--- 3. Entry Engine's M5-granularity path (CLOSE_CONFIRMATION
          //---    model only - no-op for every other model, see OnBar()).
-         entry_engine.OnBar(setup_sm, bar5, false, break_engine.CurrentAtr(), break_engine.AtrReady(), allow_entry_m5);
+         //--- Same Daily Loss Limit rollover/gate logic as the M1 branch
+         //--- above, evaluated for bar5's own time (the M1 bars belonging
+         //--- to this candle, if any, already rolled/accumulated it above).
+         datetime this_day5 = DayStart(bar5.time);
+         if(this_day5!=daily_day_start) { daily_day_start = this_day5; daily_realized_r = 0.0; }
+         bool daily_loss_limit_active5 = use_daily_loss_limit && (daily_realized_r<=-MathAbs(daily_loss_limit_r));
+
+         entry_engine.OnBar(setup_sm, bar5, false, break_engine.CurrentAtr(), break_engine.AtrReady(),
+                             allow_entry_m5, daily_loss_limit_active5, exit_engine.OpenCount());
          trades_handled = HandOffNewTrades(entry_engine, setup_sm, exit_engine, journal_engine, trades_handled,
                                             break_engine.CurrentAtr(), break_engine.AtrReady());
         }

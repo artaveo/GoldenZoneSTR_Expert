@@ -56,6 +56,14 @@ private:
    long              m_streak_setup_id[];
    int               m_streak_count[];
 
+   //--- Diagnostics only (Phase "Concurrent Same-Direction Setups +
+   //--- Opposite-Break Survival" follow-up: Daily Loss Limit / Max
+   //--- Concurrent Open Trades). Counts how many times the entry
+   //--- TRIGGER was suppressed for a bar by each gate - mirrors
+   //--- CGZSetupStateMachine's would-have-cancelled counters in spirit.
+   long              m_blocked_by_daily_loss_limit_count;
+   long              m_blocked_by_max_concurrent_count;
+
    int FindStreak(long setup_id) const
      {
       int n = ArraySize(m_streak_setup_id);
@@ -203,7 +211,8 @@ private:
      }
 
 public:
-                     CGZEntryEngine(CGZLogger *logger=NULL) { m_logger=logger; m_next_trade_id=1; m_cfg.Default(); }
+                     CGZEntryEngine(CGZLogger *logger=NULL) { m_logger=logger; m_next_trade_id=1; m_cfg.Default();
+                        m_blocked_by_daily_loss_limit_count=0; m_blocked_by_max_concurrent_count=0; }
 
    void              Init(const GZ_EntryConfig &cfg)
      {
@@ -212,10 +221,16 @@ public:
       ArrayResize(m_trades, 0);
       ArrayResize(m_streak_setup_id, 0);
       ArrayResize(m_streak_count, 0);
+      m_blocked_by_daily_loss_limit_count = 0;
+      m_blocked_by_max_concurrent_count   = 0;
      }
 
    int               TradeCount() const { return ArraySize(m_trades); }
    GZ_Trade          GetTrade(int i) const { return m_trades[i]; }
+
+   //--- Diagnostics only - see the two counter members' own comment.
+   long              BlockedByDailyLossLimitCount() const { return m_blocked_by_daily_loss_limit_count; }
+   long              BlockedByMaxConcurrentCount() const  { return m_blocked_by_max_concurrent_count; }
 
    //--- Feed one CLOSED bar. `is_m1_bar` tells the engine which stream
    //--- this bar came from - see the granularity table in the header.
@@ -231,14 +246,36 @@ public:
    //--- is an ADDITIVE trailing parameter specifically so every existing
    //--- call site (including every unit test in GZ_TestHarness.mqh) keeps
    //--- its exact prior behavior unless the caller opts in.
+   //--- `daily_loss_limit_active` / `current_open_trades_count` (Phase
+   //--- "Concurrent Same-Direction Setups + Opposite-Break Survival"
+   //--- follow-up): two more independent, additive, default-off/0 gates
+   //--- on the same entry TRIGGER, same skip-not-cancel semantics as
+   //--- allow_entry_this_bar - the setup stays WAITING_ENTRY and may still
+   //--- fire on a later bar once the gate clears (loss limit resets next
+   //--- broker day; open-trade count drops once a trade closes). The
+   //--- caller (CGZTradeSimulator) computes both: `daily_loss_limit_active`
+   //--- from its own running daily realized-R total, `current_open_trades_
+   //--- count` from CGZExitEngine::OpenCount() as of the END of the
+   //--- previous bar (no lookahead).
    void              OnBar(CGZSetupStateMachine &sm, const MqlRates &bar, bool is_m1_bar, double current_atr, bool atr_ready,
-                            bool allow_entry_this_bar=true)
+                            bool allow_entry_this_bar=true, bool daily_loss_limit_active=false, int current_open_trades_count=0)
      {
       bool model_wants_this_stream = (m_cfg.model==GZ_ENTRY_CLOSE_CONFIRMATION) ? (!is_m1_bar) : is_m1_bar;
       if(!model_wants_this_stream)
          return;
 
       int n = sm.SetupCount();
+      //--- Max Concurrent Open Trades: a RUNNING count, starting from the
+      //--- caller's pre-bar snapshot but incremented every time THIS SAME
+      //--- call enters a trade. Without this, every setup in the loop below
+      //--- would check against the same stale pre-bar snapshot, so several
+      //--- setups whose trigger all fires on the SAME bar could each pass
+      //--- the "not yet at cap" check and enter together, blowing straight
+      //--- past the configured cap within a single bar (found via a real
+      //--- run: peak open trades reached 11 against a configured cap of 3).
+      //--- Fixed by tracking it locally and bumping it right after every
+      //--- successful DoEnter() call below - see both call sites.
+      int open_running = current_open_trades_count;
       for(int i=0;i<n;i++)
         {
          GZ_Setup s = sm.GetSetup(i);
@@ -278,6 +315,26 @@ public:
          if(!allow_entry_this_bar)
             continue;
 
+         //--- Daily Loss Limit: the day's cumulative closed-trade R has
+         //--- already breached the configured floor - no new entries
+         //--- until the next broker day (see header comment above).
+         if(daily_loss_limit_active)
+           {
+            m_blocked_by_daily_loss_limit_count++;
+            continue;
+           }
+
+         //--- Max Concurrent Open Trades: already at (or over) the cap -
+         //--- retried on a later bar once a trade closes (see header).
+         //--- Checked against the RUNNING count (see its own comment), not
+         //--- the raw parameter, so entries already made earlier in THIS
+         //--- SAME bar's loop count too.
+         if(m_cfg.use_max_concurrent_trades && open_running>=m_cfg.max_concurrent_trades)
+           {
+            m_blocked_by_max_concurrent_count++;
+            continue;
+           }
+
          double entry_level_price = CGZFibEngine::PriceAtRatio(s.leg, m_cfg.entry_fib_ratio);
 
          bool   pen_usable;
@@ -305,6 +362,8 @@ public:
                continue; // Step 4 gate on, but ATR not ready - do not guess
 
             DoEnter(sm, s, bar.time, fill_price, entry_level_price, bar.spread);
+            if(m_cfg.use_max_concurrent_trades)
+               open_running++;
             continue;
            }
 
@@ -335,6 +394,8 @@ public:
                continue; // Step 4 gate on, but ATR not ready - do not guess
 
             DoEnter(sm, s, bar.time, fill_price, entry_level_price, bar.spread);
+            if(m_cfg.use_max_concurrent_trades)
+               open_running++;
            }
         }
      }

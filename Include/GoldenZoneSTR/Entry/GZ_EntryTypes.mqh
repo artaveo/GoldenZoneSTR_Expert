@@ -119,6 +119,17 @@ struct GZ_EntryConfig
    double              gate_sl_buffer_atr_mult;  // mirrors InpSlBufferAtrMult
    double              gate_sl_atr_mult;         // mirrors InpSlAtrMult
 
+   //--- Phase "Concurrent Same-Direction Setups + Opposite-Break
+   //--- Survival" follow-up (max-concurrent-open-trades cap): default
+   //--- OFF, same discipline as every other gate above - see
+   //--- GZ_EntryEngine.mqh::OnBar()'s new trailing params. The daily
+   //--- loss limit is NOT a static config field here - it is computed
+   //--- per-bar by CGZTradeSimulator (which owns the Exit Engine and can
+   //--- see realized R) and passed into OnBar() as a plain bool, exactly
+   //--- like allow_entry_this_bar.
+   bool                use_max_concurrent_trades;
+   int                 max_concurrent_trades;
+
    void Default()
      {
       model                 = GZ_ENTRY_TOUCH;
@@ -135,6 +146,9 @@ struct GZ_EntryConfig
       gate_sl_model            = GZ_SL_STRUCTURE;
       gate_sl_buffer_atr_mult  = 0.0;
       gate_sl_atr_mult         = 1.5;
+
+      use_max_concurrent_trades = false;
+      max_concurrent_trades     = 3;
      }
   };
 

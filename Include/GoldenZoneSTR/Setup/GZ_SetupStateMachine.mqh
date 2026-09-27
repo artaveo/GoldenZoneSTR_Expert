@@ -77,6 +77,13 @@ private:
    bool              m_allow_concurrent_same_direction;
    bool              m_allow_survive_opposite_break;
 
+   //--- Follow-up: Max Concurrent Setups (FIFO cap, direction-agnostic).
+   //--- Default true/5 - see Init()'s own comment for why "on by default"
+   //--- is safe.
+   bool              m_use_max_concurrent_setups;
+   int               m_max_concurrent_setups;
+   long              m_evicted_by_max_concurrent_setups_count;
+
    //--- Diagnostics only (never read by any decision in this class or
    //--- any caller) - see header + PeakNonTerminalSetups() comment.
    int               m_peak_non_terminal_setups;
@@ -95,6 +102,20 @@ private:
          if(!m_setups[i].IsTerminal())
             c++;
       return c;
+     }
+
+   //--- Index of the OLDEST still-open (non-terminal) setup, any
+   //--- direction - setups are appended in creation order, so the first
+   //--- non-terminal one found scanning from index 0 IS the oldest.
+   //--- Returns -1 if none (defensive only - the caller only calls this
+   //--- once count already exceeds the cap, so one must exist).
+   int FindOldestNonTerminal() const
+     {
+      int n = ArraySize(m_setups);
+      for(int i=0;i<n;i++)
+         if(!m_setups[i].IsTerminal())
+            return i;
+      return -1;
      }
 
    int FindByLegId(long leg_id) const
@@ -138,6 +159,8 @@ public:
       m_peak_non_terminal_setups=0;
       m_would_have_cancelled_same_direction_count=0;
       m_would_have_cancelled_opposite_break_count=0;
+      m_use_max_concurrent_setups=true; m_max_concurrent_setups=5;
+      m_evicted_by_max_concurrent_setups_count=0;
      }
 
    //--- `allow_concurrent_same_direction_setups` (Switch A) / `allow_
@@ -145,9 +168,24 @@ public:
    //--- both default false - every existing call site (every unit test
    //--- included) keeps its exact prior behavior unless the caller
    //--- opts in. See this file's header for what each switch does.
+   //--- `use_max_concurrent_setups`/`max_concurrent_setups` (FIFO cap,
+   //--- direction-agnostic - see header): default TRUE/5, unlike every
+   //--- other switch here. This is deliberately safe as an "on by
+   //--- default": with Switch A and B both off (the historical baseline),
+   //--- at most ONE non-terminal setup ever exists at a time, so a cap
+   //--- of 5 can NEVER bind and the classic 412-trade LEGACY_DEV
+   //--- reproduction is unaffected either way. It only ever does
+   //--- anything once Switch A and/or B lets concurrency grow past 5 -
+   //--- exactly the case it exists to bound (found via a real run: peak
+   //--- reached 573 simultaneous setups with both switches on, which is
+   //--- both a real performance problem - see GZ_EntryEngine.mqh's own
+   //--- per-bar cost - and not something a real trader could act on
+   //--- anyway).
    void              Init(double zone_min_ratio, double zone_max_ratio,
                            bool allow_concurrent_same_direction_setups=false,
-                           bool allow_survive_opposite_break=false)
+                           bool allow_survive_opposite_break=false,
+                           bool use_max_concurrent_setups=true,
+                           int max_concurrent_setups=5)
      {
       m_next_id        = 1;
       m_zone_min_ratio = zone_min_ratio;
@@ -157,11 +195,17 @@ public:
       m_peak_non_terminal_setups = 0;
       m_would_have_cancelled_same_direction_count = 0;
       m_would_have_cancelled_opposite_break_count = 0;
+      m_use_max_concurrent_setups = use_max_concurrent_setups;
+      m_max_concurrent_setups     = (max_concurrent_setups>0) ? max_concurrent_setups : 5;
+      m_evicted_by_max_concurrent_setups_count = 0;
       ArrayResize(m_setups, 0);
      }
 
    bool              AllowConcurrentSameDirection() const { return m_allow_concurrent_same_direction; }
    bool              AllowSurviveOppositeBreak() const    { return m_allow_survive_opposite_break; }
+   bool              UseMaxConcurrentSetups() const       { return m_use_max_concurrent_setups; }
+   int               MaxConcurrentSetups() const          { return m_max_concurrent_setups; }
+   long              EvictedByMaxConcurrentSetupsCount() const { return m_evicted_by_max_concurrent_setups_count; }
 
    //--- Diagnostics (mandatory, for user awareness - see header): the
    //--- maximum number of setups simultaneously in a non-terminal state
@@ -233,10 +277,31 @@ public:
       m_setups[n] = s;
 
       //--- Peak concurrency: the only point non-terminal count can rise -
-      //--- see PeakNonTerminalSetups()'s own comment.
+      //--- see PeakNonTerminalSetups()'s own comment. Sampled BEFORE the
+      //--- eviction below so the peak still reflects the momentary high
+      //--- point (e.g. "reached 6 before being trimmed back to 5").
       int active_now = CountNonTerminal();
       if(active_now > m_peak_non_terminal_setups)
          m_peak_non_terminal_setups = active_now;
+
+      //--- Max Concurrent Setups (FIFO cap, direction-agnostic - see
+      //--- header/Init()). A while loop is correct even though only one
+      //--- setup is ever added per call (defensive, and cheap either
+      //--- way): keep evicting the oldest until back at/under the cap.
+      //--- The just-created setup (index n, newest by construction) can
+      //--- never itself be the one picked, since FindOldestNonTerminal()
+      //--- always returns the OLDEST non-terminal one first.
+      if(m_use_max_concurrent_setups)
+        {
+         while(CountNonTerminal() > m_max_concurrent_setups)
+           {
+            int oldest = FindOldestNonTerminal();
+            if(oldest<0)
+               break; // defensive only - cannot happen if count>cap>=0
+            CancelSetup(oldest, GZ_CANCEL_MAX_CONCURRENT_SETUPS, leg.target_swing.confirmation_time);
+            m_evicted_by_max_concurrent_setups_count++;
+           }
+        }
 
       if(m_logger!=NULL)
          m_logger.Debug("Setup", StringFormat("Setup #%d (%s) LEG_DETECTED at=%s",

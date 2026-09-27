@@ -5718,9 +5718,10 @@ public:
         }
 
       //--- Phase "Concurrent Same-Direction Setups + Opposite-Break
-      //--- Survival" (T250-T256): Switch A / Switch B independence and
-      //--- combination, plus peak-concurrency diagnostics - synthetic
-      //--- data only
+      //--- Survival" + its Daily Loss Limit / Max Concurrent Open Trades
+      //--- follow-up (T250-T263, T265-T268): Switch A / Switch B independence and
+      //--- combination, plus peak-concurrency, daily-loss and max-
+      //--- concurrent-trades diagnostics - synthetic data only
       CGZConcurrencyTests conc_suite(m_logger);
       conc_suite.RunAll();
       for(int cci=0; cci<conc_suite.ResultCount(); cci++)

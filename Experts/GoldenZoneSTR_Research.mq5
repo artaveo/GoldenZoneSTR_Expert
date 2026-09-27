@@ -138,9 +138,9 @@ input datetime            InpRangeEnd            = D'2026.06.13 00:00';
 
 input ENUM_GZ_TIME_MODE  InpTimeMode          = GZ_TIME_BROKER;
 input ENUM_GZ_DST_MODE   InpDstMode           = GZ_DST_AUTO;
-input int                InpFixedNyOffsetHrs  = -5;      // used only if InpDstMode == GZ_DST_FIXED
-input int                InpBrokerUtcOffsetHrs= 0;       // assumed broker/server offset from UTC
-input bool                InpBrokerOffsetKnown  = false;   // set true only if you have verified the broker offset
+input int                InpFixedNyOffsetHrs  = -5;
+input int                InpBrokerUtcOffsetHrs= 0;
+input bool                InpBrokerOffsetKnown  = false;
 
 input int                 InpSessionStartHour   = 21;
 input int                 InpSessionStartMinute = 30;
@@ -152,46 +152,46 @@ input bool                InpVerboseLogging     = false;
 input bool                InpLoadM15            = false;
 
 //--- Phase 2: M5 Structure Engine ---------------------------------------------
-input int                 InpPivotStrength      = 2;      // baseline=2 per roadmap; research range 1-5
+input int                 InpPivotStrength      = 2;
 
 //--- Phase 3: Leg Engine + Break Engine ---------------------------------------
-input ENUM_GZ_LEG_VARIANT InpLegVariant         = GZ_LEG_VARIANT_LAST_SWING;  // baseline; research: min-distance / min-ATR-distance
-input ENUM_GZ_BREAK_MODE  InpBreakMode          = GZ_BREAK_CLOSE;             // baseline=CLOSE; research variant=WICK
-input double               InpBreakBufferAtrMult = 0.0;    // research grid: 0/0.05/0.10/0.15/0.20/0.30/0.50
-input int                 InpAtrPeriod          = 14;      // research grid: 5/10/14/20/30 (no roadmap baseline stated)
+input ENUM_GZ_LEG_VARIANT InpLegVariant         = GZ_LEG_VARIANT_LAST_SWING;
+input ENUM_GZ_BREAK_MODE  InpBreakMode          = GZ_BREAK_CLOSE;
+input double               InpBreakBufferAtrMult = 0.0;
+input int                 InpAtrPeriod          = 14;
 
 //--- Phase 4: Fibonacci Engine + Setup State Machine --------------------------
-input double               InpFibZoneMinRatio    = 0.30;   // research grid 0.30-0.90; architecture extensible to 0.01 steps
+input double               InpFibZoneMinRatio    = 0.30;
 input double               InpFibZoneMaxRatio    = 0.90;
-input bool                 InpApplySessionFilter = false;  // if true, a setup is cancelled (SESSION_END) once price moves
+input bool                 InpApplySessionFilter = false;
                                                              // outside the Phase 1 session window (InpSession*) before entry
 
 //--- Phase 5: Entry Engine + Historical Trade Simulator -----------------------
-input ENUM_GZ_ENTRY_MODEL InpEntryModel         = GZ_ENTRY_TOUCH; // baseline=TOUCH; research: LIMIT/CLOSE_CONFIRMATION/M1_CONFIRMATION
-input double               InpEntryFibRatio      = 0.618;  // single fib ratio the Entry Engine targets (see GZ_EntryTypes.mqh design note 1)
-input int                  InpConfirmationCandles= 1;       // research range 1-3; used only by CLOSE_CONFIRMATION / M1_CONFIRMATION
-input double               InpEntryPenetrationAtrMult = 0.0; // research grid: 0/0.02/0.05/0.10/0.15 ATR
+input ENUM_GZ_ENTRY_MODEL InpEntryModel         = GZ_ENTRY_TOUCH;
+input double               InpEntryFibRatio      = 0.618;
+input int                  InpConfirmationCandles= 1;
+input double               InpEntryPenetrationAtrMult = 0.0;
 
 //--- Phase 6: Exit Engine (SL/TP/BE) -------------------------------------------
-input ENUM_GZ_SL_MODEL    InpSlModel            = GZ_SL_STRUCTURE; // baseline=STRUCTURE (Leg Origin +/- buffer); research: ATR
-input double               InpSlBufferAtrMult    = 0.0;   // STRUCTURE model only; ATR multiples beyond the leg origin
-input double               InpSlAtrMult          = 1.5;   // ATR model only; SL distance from entry, in ATR multiples
-input double               InpTpRMultiple        = 2.0;   // research grid 0.5R-5R, extensible above
-input double               InpBeTriggerR         = 0.0;   // 0.0 = OFF; research grid 0.25R-5R
-input ENUM_GZ_BE_LEVEL_MODE InpBeLevelMode       = GZ_BE_LEVEL_ENTRY; // ENTRY or ENTRY_OFFSET
-input double               InpBeLevelOffsetR     = 0.0;   // used only when InpBeLevelMode==ENTRY_OFFSET
-input ENUM_GZ_INTRABAR_CONFLICT_POLICY InpIntrabarConflictPolicy = GZ_CONFLICT_SL_FIRST; // baseline=SL_FIRST (conservative)
-input bool                 InpForceSessionExit   = false;  // if true, open trades are force-closed (SESSION_EXIT) once
+input ENUM_GZ_SL_MODEL    InpSlModel            = GZ_SL_STRUCTURE;
+input double               InpSlBufferAtrMult    = 0.0;
+input double               InpSlAtrMult          = 1.5;
+input double               InpTpRMultiple        = 1.0;
+input double               InpBeTriggerR         = 0.0;
+input ENUM_GZ_BE_LEVEL_MODE InpBeLevelMode       = GZ_BE_LEVEL_ENTRY;
+input double               InpBeLevelOffsetR     = 0.0;
+input ENUM_GZ_INTRABAR_CONFLICT_POLICY InpIntrabarConflictPolicy = GZ_CONFLICT_SL_FIRST;
+input bool                 InpForceSessionExit   = false;
                                                              // price moves outside the session window (independent of
                                                              // InpApplySessionFilter, which only governs Phase 4 setup
                                                              // cancellation before entry - see GZ_ExitEngine.mqh)
 
 //--- Phase 9: Experiment Configuration + Runner --------------------------------
-input int                  InpExperimentWindowM5Bars = 1000; // recent-window size (M5 bars) for the live Phase 9
+input int                  InpExperimentWindowM5Bars = 1000;
                                                               // CGZExperimentRunner demonstration - see
                                                               // BuildAndEmitReport()'s Phase 9 section for why a
                                                               // window, not the full requested range, is used here
-input int                  InpExperimentMaxBatchSize = GZ_DEFAULT_MAX_EXPERIMENT_BATCH_SIZE; // Roadmap "stage
+input int                  InpExperimentMaxBatchSize = GZ_DEFAULT_MAX_EXPERIMENT_BATCH_SIZE;
                                                               // research, don't run one huge Grid at once" cap
 
 //--- Phase 10: Filter Engine ----------------------------------------------------
@@ -204,17 +204,17 @@ input ENUM_GZ_FILTER_MODE InpFilterBreakQualityMode = GZ_FILTER_OFF;
 input ENUM_GZ_FILTER_MODE InpFilterLegQualityMode   = GZ_FILTER_OFF;
 input ENUM_GZ_FILTER_MODE InpFilterVolumeMode       = GZ_FILTER_OFF;
 input ENUM_GZ_FILTER_MODE InpFilterVolatilityMode   = GZ_FILTER_OFF;
-input ENUM_GZ_FILTER_MODE InpFilterVwapMode         = GZ_FILTER_OFF;        // reserved - always NOT_AVAILABLE
-input ENUM_GZ_FILTER_MODE InpFilterM15ContextMode   = GZ_FILTER_OFF;        // reserved - always NOT_AVAILABLE
+input ENUM_GZ_FILTER_MODE InpFilterVwapMode         = GZ_FILTER_OFF;
+input ENUM_GZ_FILTER_MODE InpFilterM15ContextMode   = GZ_FILTER_OFF;
 input ENUM_GZ_FILTER_MODE InpFilterSessionMode      = GZ_FILTER_OFF;
-input ENUM_GZ_FILTER_MODE InpFilterNewsMode         = GZ_FILTER_OFF;        // reserved - always NOT_AVAILABLE
+input ENUM_GZ_FILTER_MODE InpFilterNewsMode         = GZ_FILTER_OFF;
 
-input double               InpFilterBreakQualityMinAtrMult = 0.10;  // break distance beyond level, in ATR multiples
-input double               InpFilterLegQualityMinAtrMult   = 1.00;  // leg size, in ATR multiples
-input int                  InpFilterVolumeLookback         = 20;    // bars in the trailing tick-volume average
-input double               InpFilterVolumeMinMult          = 1.00;  // break bar tick_volume >= mult * trailing average
-input int                  InpFilterVolatilityLookback     = 50;    // bars in the trailing ("baseline") ATR average
-input double               InpFilterVolatilityMinMult      = 0.50;  // current ATR / baseline ATR must be in [min,max]
+input double               InpFilterBreakQualityMinAtrMult = 0.10;
+input double               InpFilterLegQualityMinAtrMult   = 1.00;
+input int                  InpFilterVolumeLookback         = 20;
+input double               InpFilterVolumeMinMult          = 1.00;
+input int                  InpFilterVolatilityLookback     = 50;
+input double               InpFilterVolatilityMinMult      = 0.50;
 input double               InpFilterVolatilityMaxMult      = 2.00;
 
 //--- Phase 11: Filter Combination Research --------------------------------------
@@ -226,13 +226,13 @@ input double               InpFilterVolatilityMaxMult      = 2.00;
 //--- configured above (Phase 10 section) as every combo's shared baseline -
 //--- Phase 11 only varies WHICH filters are turned on, never their thresholds
 //--- (a threshold sweep is a different, not-yet-specified research question).
-input bool                 InpRunPhase11                 = true;   // set false to skip Phase 11 entirely (Phase 1-10 unaffected either way)
-input bool                 InpFilterComboIncludeReserved = false;  // if true, ALSO builds/runs combos naming VWAP/M15 Context/News -
+input bool                 InpRunPhase11                 = true;
+input bool                 InpFilterComboIncludeReserved = false;
                                                                     // documented to deterministically reject every setup in this build
                                                                     // (design note 4, GZ_FilterComboTypes.mqh); OFF by default
-input int                  InpFilterComboR11CTopN        = 4;      // R11-C: builds one combo per size from 3 up to this many top-ranked
+input int                  InpFilterComboR11CTopN        = 4;
                                                                     // R11-A filters (clamped to however many are actually eligible)
-input int                  InpFilterComboMaxBatchSize    = GZ_DEFAULT_MAX_FILTER_COMBO_BATCH_SIZE; // Roadmap "stage research,
+input int                  InpFilterComboMaxBatchSize    = GZ_DEFAULT_MAX_FILTER_COMBO_BATCH_SIZE;
                                                                     // don't run one huge Grid at once" cap, reapplied to Phase 11
 
 //--- Phase 12: Robustness + Sensitivity Research --------------------------------
@@ -247,10 +247,10 @@ input int                  InpFilterComboMaxBatchSize    = GZ_DEFAULT_MAX_FILTER
 //--- information about Phase 12's own axis-sweep/sensitivity-analysis logic itself.
 //--- Two axes are demonstrated by default, reproducing the Roadmap's OWN worked
 //--- example ("مثال برای 1.50 ATR"): break-buffer ATR multiple and SL ATR multiple.
-input bool                  InpRunPhase12                 = true;   // set false to skip Phase 12 entirely (Phase 1-11 unaffected either way)
-input ENUM_GZ_ROBUSTNESS_PARAM InpRobustnessAxis1          = GZ_ROBUST_BREAK_BUFFER_ATR; // first axis to sweep (do not select the GZ_ROBUST_PARAM_COUNT sentinel)
-input ENUM_GZ_ROBUSTNESS_PARAM InpRobustnessAxis2          = GZ_ROBUST_SL_ATR_MULT;       // second axis to sweep (do not select the GZ_ROBUST_PARAM_COUNT sentinel)
-input int                   InpRobustnessMaxBatchSize     = GZ_DEFAULT_MAX_ROBUSTNESS_BATCH_SIZE; // Roadmap "stage research,
+input bool                  InpRunPhase12                 = true;
+input ENUM_GZ_ROBUSTNESS_PARAM InpRobustnessAxis1          = GZ_ROBUST_BREAK_BUFFER_ATR;
+input ENUM_GZ_ROBUSTNESS_PARAM InpRobustnessAxis2          = GZ_ROBUST_SL_ATR_MULT;
+input int                   InpRobustnessMaxBatchSize     = GZ_DEFAULT_MAX_ROBUSTNESS_BATCH_SIZE;
                                                                     // don't run one huge Grid at once" cap, reapplied to Phase 12 (axes/call)
 
 //--- Phase 13: Walk-Forward Research --------------------------------------------
@@ -263,14 +263,14 @@ input int                   InpRobustnessMaxBatchSize     = GZ_DEFAULT_MAX_ROBUS
 //--- validation window. See GZ_WalkForwardTypes.mqh design notes 1-7.
 //--- Window lengths are CALENDAR days (weekends included). The Roadmap gives no
 //--- numeric defaults - the values below are documented conventional defaults.
-input bool                  InpRunPhase13                 = true;   // set false to skip Phase 13 entirely (Phase 1-12 unaffected either way)
-input ENUM_GZ_ROBUSTNESS_PARAM InpWfAxis                  = GZ_ROBUST_BREAK_BUFFER_ATR; // axis whose value is selected per window (do not select the GZ_ROBUST_PARAM_COUNT sentinel)
-input int                   InpWfTrainDays                = GZ_DEFAULT_WF_TRAIN_DAYS;    // training window length
-input int                   InpWfValidateDays             = GZ_DEFAULT_WF_VALIDATE_DAYS; // validation window length
-input int                   InpWfStepDays                 = GZ_DEFAULT_WF_STEP_DAYS;     // how far the window slides each step (< validate days -> overlapping validation, flagged)
-input int                   InpWfMinTrades                = GZ_DEFAULT_WF_MIN_TRADES;    // a TRAINING candidate needs at least this many trades to be selectable
-input int                   InpWfMinValidationTrades      = GZ_DEFAULT_WF_MIN_VALIDATION_TRADES; // validated windows below this are flagged LOW_VALIDATION_TRADES
-input bool                  InpWfRequireSafeSelection     = true;   // true = an unsafe best (narrow peak / unstable zone, per Phase 12) is NOT taken: falls back to the baseline value
+input bool                  InpRunPhase13                 = true;
+input ENUM_GZ_ROBUSTNESS_PARAM InpWfAxis                  = GZ_ROBUST_BREAK_BUFFER_ATR;
+input int                   InpWfTrainDays                = GZ_DEFAULT_WF_TRAIN_DAYS;
+input int                   InpWfValidateDays             = GZ_DEFAULT_WF_VALIDATE_DAYS;
+input int                   InpWfStepDays                 = GZ_DEFAULT_WF_STEP_DAYS;
+input int                   InpWfMinTrades                = GZ_DEFAULT_WF_MIN_TRADES;
+input int                   InpWfMinValidationTrades      = GZ_DEFAULT_WF_MIN_VALIDATION_TRADES;
+input bool                  InpWfRequireSafeSelection     = true;
 
 //--- Phase 14: Monte Carlo Research ---------------------------------------------
 //--- Runs BOTH modes (trade-order permutation and return-sequence bootstrap) over
@@ -279,10 +279,10 @@ input bool                  InpWfRequireSafeSelection     = true;   // true = an
 //--- same seed always reproduces the same numbers; simulation k depends only on
 //--- (seed, k). The historical ledger is never modified. See GZ_MonteCarloTypes.mqh
 //--- design notes 1-7. The Roadmap gives no numeric defaults - conventional ones below.
-input bool                  InpRunPhase14                 = true;   // set false to skip Phase 14 entirely (Phase 1-13 unaffected either way)
-input int                   InpMcSimulations              = GZ_DEFAULT_MC_SIMULATIONS;     // simulations per mode
-input uint                  InpMcSeed                     = GZ_DEFAULT_MC_SEED;            // reproducibility seed (recorded in the report)
-input int                   InpMcMaxSimulations           = GZ_DEFAULT_MC_MAX_SIMULATIONS; // cap: a larger InpMcSimulations is REJECTED, never truncated
+input bool                  InpRunPhase14                 = true;
+input int                   InpMcSimulations              = GZ_DEFAULT_MC_SIMULATIONS;
+input uint                  InpMcSeed                     = GZ_DEFAULT_MC_SEED;
+input int                   InpMcMaxSimulations           = GZ_DEFAULT_MC_MAX_SIMULATIONS;
 
 //--- Phase 15: Final OOS ---------------------------------------------------------
 //--- The Development range is InpRangeStart..InpRangeEnd (the ONLY data Phases 1-14
@@ -293,23 +293,23 @@ input int                   InpMcMaxSimulations           = GZ_DEFAULT_MC_MAX_SI
 //--- contaminates it - the Roadmap's answer is Phase 16 (new version + NEW OOS data).
 //--- Default: everything after the Development end up to InpOosEnd (a fixed date, never
 //--- the wall clock, so results stay reproducible).
-input bool                  InpRunPhase15                 = true;   // set false to skip Phase 15 entirely
-input datetime              InpOosStart                   = D'2026.06.13 00:00'; // must be >= InpRangeEnd
+input bool                  InpRunPhase15                 = true;
+input datetime              InpOosStart                   = D'2026.06.13 00:00';
 input datetime              InpOosEnd                     = D'2026.09.24 00:00';
-input int                   InpOosMinTrades               = GZ_DEFAULT_OOS_MIN_TRADES; // fewer OOS trades -> LOW_OOS_TRADES flag
+input int                   InpOosMinTrades               = GZ_DEFAULT_OOS_MIN_TRADES;
 
 //--- Phase 15.5: Reward / TP x Risk-Free (BE) Research Matrix ------------------------------
 //--- RESEARCH + MEASUREMENT ONLY, on the DEVELOPMENT range (InpRangeStart..InpRangeEnd) ONLY.
 //--- While InpRunPhase155=true, Phase 15 (which loads the Final OOS) is ALWAYS skipped, so the
 //--- Final OOS is never loaded or inspected. Nothing is chosen, ranked or frozen.
-input bool                  InpRunPhase155                = true;   // run the Phase 15.5 matrix (also forces Phase 15 / Final OOS OFF)
-input bool                  InpPhase155Only               = true;   // true = also skip the heavy Phase 11-14 studies during this run (unrelated to 15.5)
-input double                InpP155RefWinRate             = 0.507;  // Phase 15 Development baseline AS REPORTED (TP 2R, BE off): win rate (fraction)
-input double                InpP155RefExpectancy          = 0.5218; //   ... expectancy (R)
-input double                InpP155RefPF                  = 2.059;  //   ... profit factor
-input double                InpP155RefNetR                = 215.0;  //   ... net R
-input int                   InpP155RefTrades              = 412;    //   ... trades
-input double                InpP155RefMaxDD               = 6.0;    //   ... max drawdown (R)
+input bool                  InpRunPhase155                = false;
+input bool                  InpPhase155Only               = true;
+input double                InpP155RefWinRate             = 0.507;
+input double                InpP155RefExpectancy          = 0.5218;
+input double                InpP155RefPF                  = 2.059;
+input double                InpP155RefNetR                = 215.0;
+input int                   InpP155RefTrades              = 412;
+input double                InpP155RefMaxDD               = 6.0;
 
 //--- Phase 15.7: Historical Data Expansion + arbitrary date-range research filtering ------------
 //--- DATA INFRASTRUCTURE ONLY - no strategy logic changes. The whole requested history is loaded ONCE and
@@ -318,50 +318,58 @@ input double                InpP155RefMaxDD               = 6.0;    //   ... max
 //--- The Development / Final-OOS boundary (InpOosStart) is preserved: a research range that ends after
 //--- it is REFUSED (never shifted or clipped). The data itself stays in the dataset and in the coverage
 //--- report. No new OOS is defined, no TP/BE is selected, Phase 16 is not executed.
-input bool                  InpRunPhase157       = true;                      // false = exactly the old Phase 15.5 behaviour (direct load of InpRangeStart..InpRangeEnd)
-input datetime              InpHistStart         = D'2020.07.01 00:00';       // historical dataset start (earliest verified XAUUSD chart data)
-input datetime              InpHistEnd           = D'2026.09.24 23:59';       // historical dataset end (explicit -> reproducible)
-input ENUM_GZ_RANGE_KIND    InpResRangeKind      = GZ_RANGE_LEGACY_DEV;       // which slice the research engines receive
-input int                   InpResYear           = 2023;                      // YEAR / MONTH / DAY
-input int                   InpResMonth          = 1;                         // MONTH / DAY
-input int                   InpResDay            = 1;                         // DAY
-input datetime              InpResCustomStart    = D'2024.06.12 00:00';       // CUSTOM start (WEEK: 7 days from this date)
-input datetime              InpResCustomEnd      = D'2024.06.19 23:59';       // CUSTOM end (inclusive)
-input bool                  InpP157CoverageOnly  = false;                     // true = load + validate + coverage report + tests, but run NO research
+input bool                  InpRunPhase157       = true;
+input datetime              InpHistStart         = D'2020.07.01 00:00';
+input datetime              InpHistEnd           = D'2026.09.24 23:59';
+input ENUM_GZ_RANGE_KIND    InpResRangeKind      = GZ_RANGE_LEGACY_DEV;
+input int                   InpResYear           = 2023;
+input int                   InpResMonth          = 1;
+input int                   InpResDay            = 1;
+input datetime              InpResCustomStart    = D'2024.06.12 00:00';
+input datetime              InpResCustomEnd      = D'2024.06.19 23:59';
+input bool                  InpP157CoverageOnly  = false;
 
 //--- Phase 15.8: dataset partition (half-open [start,end)), warm-up, net-of-cost layer, run speed/progress ------
 //--- Research runs ONLY on ranges fully inside DEVELOPMENT (plus the labelled REGRESSION_ONLY_LEGACY check).
 //--- The new FINAL OOS and the legacy/touched part are refused. All dates are configuration, never code.
-input datetime              InpDevStart          = D'2020.07.01 00:00';       // DEVELOPMENT partition start (inclusive)
-input datetime              InpDevEnd            = D'2025.01.01 00:00';       // DEVELOPMENT partition end (exclusive)
-input datetime              InpNewOosStart       = D'2025.01.01 00:00';       // NEW FINAL OOS partition start (inclusive) - never used for selection
-input datetime              InpNewOosEnd         = D'2026.01.01 00:00';       // NEW FINAL OOS partition end (exclusive)
-input datetime              InpLegacyStart       = D'2026.01.01 00:00';       // LEGACY / TOUCHED partition start (inclusive)
-input datetime              InpLegacyEnd         = D'2026.09.25 00:00';       // LEGACY / TOUCHED partition end (exclusive)
-input int                   InpWarmupM5Bars      = 0;                         // warm-up bars before the measured start (M5 bars; 0 = cold start)
-input bool                  InpQuietMainPipeline = true;                      // true = only warnings/errors from the main pipeline (faster; results unchanged)
-input bool                  InpSkipDuplicateMainRun = false;                  // true = skip the main pipeline run; the TP 2R / BE off matrix row provides the figures (results unchanged)
-input ENUM_GZ_COST_SPREAD_MODE InpCostSpreadMode = GZ_COST_SPREAD_RECORDED;   // spread source: RECORDED = spread of the entry M1 bar, FIXED = the fixed points below
-input double                InpCostFixedSpreadPts = 0.0;                      // fixed spread in points (FIXED mode only; XAUUSD: 10 points = $0.10)
-input ENUM_GZ_COST_COMMISSION_MODE InpCostCommissionMode = GZ_COST_COMM_PERCENT; // commission model: PERCENT = percent of open price charged once at open, FIXED = USD per lot round turn
-input double                InpCostCommissionPercent = 0.0;                   // commission percent of open price (PERCENT mode; FundedNext XAUUSD = 0.0016)
-input double                InpCostCommissionPerLot = 0.0;                    // commission USD per lot round turn (FIXED mode only)
-input double                InpCostContractSize  = 100.0;                     // contract size in ounces per lot (XAUUSD = 100)
-input double                InpCostSlippagePts   = 0.0;                       // slippage in points per side (XAUUSD: 10 points = $0.10)
-input bool                  InpCostsConfigured   = false;                     // true = the cost inputs above are deliberately set (false = NET equals GROSS)
+input datetime              InpDevStart          = D'2020.07.01 00:00';
+input datetime              InpDevEnd            = D'2025.01.01 00:00';
+input datetime              InpNewOosStart       = D'2025.01.01 00:00';
+input datetime              InpNewOosEnd         = D'2026.01.01 00:00';
+input datetime              InpLegacyStart       = D'2026.01.01 00:00';
+input datetime              InpLegacyEnd         = D'2026.09.25 00:00';
+input int                   InpWarmupM5Bars      = 0;
+input bool                  InpQuietMainPipeline = true;
+input bool                  InpSkipDuplicateMainRun = false;
+input ENUM_GZ_COST_SPREAD_MODE InpCostSpreadMode = GZ_COST_SPREAD_FIXED;
+input double                InpCostFixedSpreadPts = 0.0;
+input ENUM_GZ_COST_COMMISSION_MODE InpCostCommissionMode = GZ_COST_COMM_PERCENT;
+input double                InpCostCommissionPercent = 0.0016;
+input double                InpCostCommissionPerLot = 0.0;
+input double                InpCostContractSize  = 100.0;
+input double                InpCostSlippagePts   = 10.0;
+input bool                  InpCostsConfigured   = true;
 
 //--- Phase "First_Change_In_Structure" (Steps 0.5/2/4 below are OFF by default so the
 //--- 412-trade LEGACY_DEV baseline reproduces exactly until explicitly switched on.
 //--- Step 3 (Elevated Spread Gate) has NO input here yet - it is NOT coded until the
 //--- Step 1 report's three numbers are confirmed, per the spec's own STOP rule).
-input bool                  InpUseSessionHourGate = false;                    // Session Hour Gate (Step 0.5): true blocks BOTH new setup formation and entry outside the session window above (InpSessionStartHour..InpSessionEndHour), independent of the historical date range - unlike InpApplySessionFilter, which only cancels an already-pending setup once the session ends
-input bool                  InpUseRealSpreadFills = false;                    // Real bid/ask fills (Step 2): true fills a Long at the entry candle's ask (bid+spread*point) and checks/fills a Short's SL/TP/BE at the ask of the candle that touches it; false = exact pre-FCIS bid-only behavior
-input bool                  InpUseMinRiskGate     = false;                    // Minimum Risk Gate (Step 4): true rejects a setup whose structural stop distance is smaller than (estimated round-turn cost / InpMaxCostFractionOfR)
-input double                InpMaxCostFractionOfR = 0.05;                     // Minimum Risk Gate (Step 4): required minimum structural risk = estimated round-turn cost divided by this fraction
+input bool                  InpUseSessionHourGate = false;
+input bool                  InpUseRealSpreadFills = true;
+input bool                  InpUseMinRiskGate     = false;
+input double                InpMaxCostFractionOfR = 0.05;
 
 //--- Phase "Concurrent Same-Direction Setups + Opposite-Break Survival": two independent, default-OFF experimental switches (NOT part of FCIS) - see GZ_SetupStateMachine.mqh header
-input bool                  InpAllowConcurrentSameDirectionSetups = false;    // Switch A: true = a new same-direction leg no longer cancels the older still-open setup (GZ_CANCEL_NEW_VALID_SETUP skipped) - multiple same-direction setups may stay open concurrently; false = exact pre-phase behavior (at most one per direction)
-input bool                  InpAllowSurviveOppositeBreak          = false;    // Switch B: true = an opposite-direction break no longer cancels an open setup (GZ_CANCEL_OPPOSITE_BREAK skipped) - the setup's own leg/fib zone is untouched and it keeps progressing; false = exact pre-phase behavior
+input bool                  InpAllowConcurrentSameDirectionSetups = false;
+input bool                  InpAllowSurviveOppositeBreak          = false;
+
+//--- Concurrent Same-Direction Setups follow-up: two more independent, default-OFF risk-limiting gates on the Entry Engine's own trigger (own regression tests T257-T263 - see GZ_EntryEngine.mqh / GZ_TradeSimulator.mqh headers)
+input bool                  InpUseDailyLossLimit   = true;
+input double                InpDailyLossLimitR     = 3.0;
+input bool                  InpUseMaxConcurrentTrades = true;
+input int                   InpMaxConcurrentOpenTrades = 3;
+input bool                  InpUseMaxConcurrentSetups = true;
+input int                   InpMaxConcurrentSetups = 5;
 
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
@@ -1900,11 +1908,17 @@ void EmitFcisReport()
 //| Survival" report - two independent, default-OFF experimental      |
 //| switches on the Phase 4 Setup State Machine (Switch A =            |
 //| InpAllowConcurrentSameDirectionSetups, Switch B =                  |
-//| InpAllowSurviveOppositeBreak). NOT part of FCIS - own small phase, |
-//| own report file. No Swing/Leg/Break/Fibonacci detection math is    |
-//| touched; FCIS's own gates (Session Hour Gate / real spread fills / |
-//| Minimum Risk Gate) compose normally with these switches (a setup   |
-//| surviving via A/B is still subject to them).                       |
+//| InpAllowSurviveOppositeBreak), PLUS its own follow-up: two more    |
+//| independent, default-OFF risk-limiting gates on the Entry Engine's |
+//| trigger (InpUseDailyLossLimit/InpDailyLossLimitR,                  |
+//| InpUseMaxConcurrentTrades/InpMaxConcurrentOpenTrades - see Section |
+//| D2), PLUS a default-ON FIFO setup cap (InpUseMaxConcurrentSetups/  |
+//| InpMaxConcurrentSetups - see Section D3). NOT part of FCIS - own   |
+//| small phase, own report file. No Swing/Leg/Break/Fibonacci         |
+//| detection math is touched; FCIS's own gates (Session Hour Gate /   |
+//| real spread fills / Minimum Risk Gate) compose normally with all   |
+//| the switches here (a setup surviving via A/B, or a trade allowed   |
+//| in by the two follow-up gates, is still subject to them).          |
 //+------------------------------------------------------------------+
 void EmitConcurrencyReport()
   {
@@ -1913,8 +1927,9 @@ void EmitConcurrencyReport()
    s += "PHASE: Concurrent Same-Direction Setups + Opposite-Break Survival\n";
    s += "===================================================\n";
    s += "Two independent, default-OFF experimental switches on top of the Phase 4 Setup State Machine's\n";
-   s += "own baseline invalidation rules (GZ_CANCEL_NEW_VALID_SETUP / GZ_CANCEL_OPPOSITE_BREAK).\n";
-   s += "No Swing/Leg/Break/Fibonacci math changed. FCIS's gates compose normally on top of this.\n\n";
+   s += "own baseline invalidation rules (GZ_CANCEL_NEW_VALID_SETUP / GZ_CANCEL_OPPOSITE_BREAK), plus a\n";
+   s += "follow-up Daily Loss Limit / Max Concurrent Open Trades pair of risk-limiting gates (Section D2).\n";
+   s += "No Swing/Leg/Break/Fibonacci math changed. FCIS's gates compose normally on top of all of this.\n\n";
 
    s += "--- A. Switch settings this run ---\n";
    s += StringFormat("InpAllowConcurrentSameDirectionSetups (Switch A) = %s\n", InpAllowConcurrentSameDirectionSetups?"true":"false");
@@ -1938,14 +1953,33 @@ void EmitConcurrencyReport()
                      g_setup_sm.CountTerminalByReason(GZ_CANCEL_NEW_VALID_SETUP), g_setup_sm.CountTerminalByReason(GZ_CANCEL_OPPOSITE_BREAK));
    s += "exactly when both switches above are OFF - see Section F.)\n\n";
 
-   s += "--- E. Automated tests T250-T256 (synthetic data) ---\n";
+   s += "--- D2. Daily Loss Limit / Max Concurrent Open Trades follow-up ---\n";
+   s += StringFormat("InpUseDailyLossLimit=%s (InpDailyLossLimitR=%.2f) | InpUseMaxConcurrentTrades=%s (InpMaxConcurrentOpenTrades=%d)\n",
+                     InpUseDailyLossLimit?"true":"false", InpDailyLossLimitR, InpUseMaxConcurrentTrades?"true":"false", InpMaxConcurrentOpenTrades);
+   s += StringFormat("Entry triggers suppressed by Daily Loss Limit this run    = %d\n", (int)g_entry_engine.BlockedByDailyLossLimitCount());
+   s += StringFormat("Entry triggers suppressed by Max Concurrent Trades this run = %d\n", (int)g_entry_engine.BlockedByMaxConcurrentCount());
+   s += "Both gates only ever SUPPRESS the entry trigger for a bar (the setup stays WAITING_ENTRY and may\n";
+   s += "still trigger later - Daily Loss Limit resets next broker day, Max Concurrent frees up once a trade\n";
+   s += "closes); neither ever cancels a setup outright, and neither force-closes an already-open trade.\n\n";
+
+   s += "--- D3. Max Concurrent Setups follow-up (FIFO cap, direction-agnostic) ---\n";
+   s += StringFormat("InpUseMaxConcurrentSetups=%s (InpMaxConcurrentSetups=%d)\n", InpUseMaxConcurrentSetups?"true":"false", InpMaxConcurrentSetups);
+   s += StringFormat("Setups evicted (oldest cancelled to make room) this run = %d\n", (int)g_setup_sm.EvictedByMaxConcurrentSetupsCount());
+   s += "Unlike the two gates above, this one DOES cancel a setup outright (reason MAX_CONCURRENT_SETUPS) - the\n";
+   s += "OLDEST still-open setup, any direction, the instant a new one would push the count past the cap. Exists\n";
+   s += "to bound both the runtime cost and the practical meaningfulness of Switch A/B (a real trader cannot act\n";
+   s += "on hundreds of simultaneously 'waiting' setups anyway). Defaults to ON (cap 5) even though every other\n";
+   s += "switch in this phase defaults OFF, because it can never bind while Switch A and B are both off (at most\n";
+   s += "one non-terminal setup ever exists then) - see GZ_SetupStateMachine.mqh's own Init() comment.\n\n";
+
+   s += "--- E. Automated tests T250-T268 (synthetic data) ---\n";
    int cp_ = 0, cf_ = 0;
    for(int i=0;i<g_harness.ResultCount();i++)
      {
       GZ_TestResult r = g_harness.GetResult(i);
       if(StringLen(r.id)<2 || StringGetCharacter(r.id,0)!='T') continue;
       int num = (int)StringToInteger(StringSubstr(r.id,1));
-      if(num<250 || num>256) continue;
+      if(num<250 || num>268) continue;
       s += StringFormat("%s: %s - %s\n", r.id, r.passed?"PASS":"FAIL", r.detail);
       if(r.passed) cp_++; else cf_++;
      }
@@ -1953,18 +1987,30 @@ void EmitConcurrencyReport()
                      cp_, cf_, g_harness.ResultCount(), g_harness.PassCount(), g_harness.FailCount());
 
    s += "--- F. REQUIRED MANUAL VERIFICATION (do not skip - same discipline as the FCIS baseline check) ---\n";
-   bool both_off = (!InpAllowConcurrentSameDirectionSetups) && (!InpAllowSurviveOppositeBreak);
-   s += StringFormat("Both switches OFF in this run = %s\n", both_off?"true":"false");
-   if(g_res_range.kind==GZ_RANGE_LEGACY_DEV && both_off)
-      s += StringFormat("USER TEST REQUIRED #1: range=LEGACY_DEV, both switches OFF -> trades=%d. This must equal 412 exactly (the\n"
-                        "pre-phase baseline). Claude cannot claim this passed on its own - compile and run this in your own MT5\n"
+   //--- The historical "412 trades on LEGACY_DEV" number was only ever
+   //--- true with EVERY switch that can change trade admission OFF -
+   //--- the two switches this phase added originally (A/B), its own
+   //--- Daily Loss Limit / Max Concurrent follow-up, AND FCIS's three
+   //--- gates (now defaulting InpUseRealSpreadFills=true / InpUseMinRiskGate
+   //--- stays false / InpUseSessionHourGate stays false) all have to be
+   //--- OFF at once for 412 to still be the right number to expect.
+   bool all_switches_off = (!InpAllowConcurrentSameDirectionSetups) && (!InpAllowSurviveOppositeBreak) &&
+                           (!InpUseDailyLossLimit) && (!InpUseMaxConcurrentTrades) &&
+                           (!InpUseSessionHourGate) && (!InpUseRealSpreadFills) && (!InpUseMinRiskGate);
+   s += StringFormat("Every trade-admission switch OFF in this run (Switch A/B + Daily Loss Limit + Max Concurrent + all 3 FCIS gates) = %s\n", all_switches_off?"true":"false");
+   if(g_res_range.kind==GZ_RANGE_LEGACY_DEV && all_switches_off)
+      s += StringFormat("USER TEST REQUIRED #1: range=LEGACY_DEV, every switch above OFF -> trades=%d. This must equal 412 exactly (the\n"
+                        "original pre-phase baseline). Claude cannot claim this passed on its own - compile and run this in your own MT5\n"
                         "and confirm the trade count before trusting this run's other numbers.\n", g_trade_count);
-   else if(g_res_range.kind==GZ_RANGE_LEGACY_DEV && !both_off)
-      s += "One or both switches are ON in this run, so the 412-trade LEGACY_DEV baseline check does not apply here -\n"
-           "run once more with both switches OFF on LEGACY_DEV to (re)confirm the 412-trade baseline still holds.\n";
+   else if(g_res_range.kind==GZ_RANGE_LEGACY_DEV && !all_switches_off)
+      s += "One or more of the switches above is ON in this run (note: InpUseRealSpreadFills and InpUseDailyLossLimit/\n"
+           "InpUseMaxConcurrentTrades now default to true/true/true, not false, since a run with no spread/cost/risk-limit\n"
+           "applied is not decision-useful) - the 412-trade LEGACY_DEV check does NOT apply to this run's own trade count.\n"
+           "To (re)confirm the original 412-trade baseline still holds, run once more on LEGACY_DEV with EVERY switch above\n"
+           "explicitly set to false.\n";
    else
       s += StringFormat("range kind=%s (not LEGACY_DEV) - the 412-trade check only applies on LEGACY_DEV; run once on\n"
-                        "LEGACY_DEV with both switches OFF to confirm the baseline before trusting this range's numbers.\n", GZRangeKindToString(g_res_range.kind));
+                        "LEGACY_DEV with every switch above OFF to confirm the baseline before trusting this range's numbers.\n", GZRangeKindToString(g_res_range.kind));
    s += "\n";
 
    s += "--- Phase Status ---\n";
@@ -1972,7 +2018,7 @@ void EmitConcurrencyReport()
    if(cf_>0)
       status = "PHASE CONCURRENCY FAILED (automated test failure - see Section E)";
    else
-      status = "PHASE CONCURRENCY SWITCHES IMPLEMENTED - AWAITING USER'S OWN MT5 RUN TO CONFIRM SECTION F (412-trade LEGACY_DEV baseline, both switches OFF)";
+      status = "PHASE CONCURRENCY SWITCHES IMPLEMENTED - AWAITING USER'S OWN MT5 RUN TO CONFIRM SECTION F (412-trade LEGACY_DEV baseline, every trade-admission switch OFF)";
    s += status + "\n";
    s += "No claim of a real MT5 run result is made beyond what this attachment itself just computed.\n";
    s += "===================================================\n";
@@ -2151,7 +2197,8 @@ int OnInit()
    g_break_engine.Configure(break_cfg);
 
    g_setup_sm.Init(InpFibZoneMinRatio, InpFibZoneMaxRatio,
-                    InpAllowConcurrentSameDirectionSetups, InpAllowSurviveOppositeBreak);
+                    InpAllowConcurrentSameDirectionSetups, InpAllowSurviveOppositeBreak,
+                    InpUseMaxConcurrentSetups, InpMaxConcurrentSetups);
    GZ_SessionProfile session_profile;
    session_profile.Set("PROFILE_01", "Session", InpTimeMode,
                         InpSessionStartHour, InpSessionStartMinute,
@@ -2194,6 +2241,8 @@ int OnInit()
    entry_cfg.gate_sl_model           = InpSlModel;
    entry_cfg.gate_sl_buffer_atr_mult = InpSlBufferAtrMult;
    entry_cfg.gate_sl_atr_mult        = InpSlAtrMult;
+   entry_cfg.use_max_concurrent_trades = InpUseMaxConcurrentTrades;
+   entry_cfg.max_concurrent_trades     = InpMaxConcurrentOpenTrades;
    g_entry_engine.Init(entry_cfg);
    if(InpUseMinRiskGate && !InpCostsConfigured)
       g_logger.Warning("FCIS-Step4", "InpUseMinRiskGate=true but InpCostsConfigured=false: the estimated cost is 0 for every setup, so the gate will never reject anything. Set the Phase 15.8 cost inputs (spread/commission mode) if you want this gate to actually bind.");
@@ -2233,7 +2282,8 @@ int OnInit()
                              g_leg_engine, g_break_engine, g_setup_sm, g_entry_engine, g_exit_engine,
                              g_journal_engine, g_event_ledger,
                              g_time_engine, g_session_engine, session_profile, InpApplySessionFilter, InpForceSessionExit,
-                             InpUseSessionHourGate);
+                             InpUseSessionHourGate,
+                             InpUseDailyLossLimit, InpDailyLossLimitR);
       g_logger.SetMinLevel(GZ_SEV_INFO);
       if(g_main_skipped)
          g_logger.Info("Init", "Phase 15.8: main pipeline run SKIPPED on purpose; the matrix row TP 2R / BE off provides the figures.");
@@ -2583,6 +2633,18 @@ int OnInit()
       exp_cfg.fib_zone_max_ratio   = InpFibZoneMaxRatio;
       exp_cfg.entry_config         = entry_cfg;
       exp_cfg.exit_config          = exit_cfg;
+      //--- Previously missing from every phase built on exp_cfg (Robustness,
+      //--- Walk-Forward, Final OOS, Phase 15.5) - see GZ_ExperimentTypes.mqh
+      //--- design note. Max Concurrent Trades needs no line here: it already
+      //--- flows through entry_cfg above, and CGZTradeSimulator::Run() always
+      //--- computes the live open-trade count itself.
+      exp_cfg.use_session_hour_gate                  = InpUseSessionHourGate;
+      exp_cfg.allow_concurrent_same_direction_setups = InpAllowConcurrentSameDirectionSetups;
+      exp_cfg.allow_survive_opposite_break           = InpAllowSurviveOppositeBreak;
+      exp_cfg.use_daily_loss_limit                   = InpUseDailyLossLimit;
+      exp_cfg.daily_loss_limit_r                     = InpDailyLossLimitR;
+      exp_cfg.use_max_concurrent_setups              = InpUseMaxConcurrentSetups;
+      exp_cfg.max_concurrent_setups                  = InpMaxConcurrentSetups;
 
       string dataset_id = StringFormat("%s_M1M5_RECENT_%s_%s", InpSymbol,
                            TimeToString(exp_cfg.range_start, TIME_DATE), TimeToString(exp_cfg.range_end, TIME_DATE));

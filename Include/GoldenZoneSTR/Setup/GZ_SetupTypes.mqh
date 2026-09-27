@@ -82,7 +82,15 @@ enum ENUM_GZ_SETUP_CANCEL_REASON
    GZ_CANCEL_INVALID_DATA,
    GZ_CANCEL_OUTSIDE_SESSION_HOURS, // Phase FCIS Step 0.5
    GZ_CANCEL_RISK_TOO_TIGHT,        // Phase FCIS Step 4
-   GZ_CANCEL_ELEVATED_SPREAD        // reserved; DEFERRED TO Phase FCIS Step 3, never assigned here yet
+   GZ_CANCEL_ELEVATED_SPREAD,       // reserved; DEFERRED TO Phase FCIS Step 3, never assigned here yet
+   //---   GZ_CANCEL_MAX_CONCURRENT_SETUPS - Phase "Concurrent Same-Direction
+   //---     Setups + Opposite-Break Survival" follow-up: a FIFO cap on how many
+   //---     non-terminal setups (any direction) may exist at once. When a new
+   //---     setup's creation would push the count above the configured limit,
+   //---     the OLDEST still-open setup (any direction - this cap is direction-
+   //---     agnostic, unlike NEW_VALID_SETUP/OPPOSITE_BREAK above) is cancelled
+   //---     with this reason to make room. See GZ_SetupStateMachine.mqh.
+   GZ_CANCEL_MAX_CONCURRENT_SETUPS
   };
 
 //+------------------------------------------------------------------+
@@ -159,6 +167,7 @@ struct GZ_Setup
          case GZ_CANCEL_OUTSIDE_SESSION_HOURS:return "OUTSIDE_SESSION_HOURS";
          case GZ_CANCEL_RISK_TOO_TIGHT:       return "RISK_TOO_TIGHT";
          case GZ_CANCEL_ELEVATED_SPREAD:      return "ELEVATED_SPREAD";
+         case GZ_CANCEL_MAX_CONCURRENT_SETUPS:return "MAX_CONCURRENT_SETUPS";
         }
       return "UNKNOWN";
      }

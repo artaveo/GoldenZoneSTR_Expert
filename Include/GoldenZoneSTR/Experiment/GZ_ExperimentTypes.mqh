@@ -128,6 +128,36 @@ struct GZ_ExperimentConfig
                                                // >0 = warm-up mode: only trades whose ENTRY time >= measure_from belong to the
                                                // measured population (metrics recomputed by the existing metrics engine on it).
 
+   //--- Phase "Concurrent Same-Direction Setups + Opposite-Break Survival"
+   //--- (+ its Daily Loss Limit follow-up) + FCIS's Session Hour Gate: all
+   //--- three previously lived ONLY as CGZTradeSimulator::Run() trailing
+   //--- params / CGZSetupStateMachine::Init() trailing params, with NO
+   //--- GZ_ExperimentConfig field to carry them - so CGZExperimentRunner::
+   //--- Execute() (used by EVERY research phase from Phase 9 onward:
+   //--- Experiment Runner, Robustness, Walk-Forward, Final OOS, Phase 15.5)
+   //--- silently ran with all three OFF regardless of the EA's own inputs.
+   //--- Added here, defaulted OFF (matching every field above), and now
+   //--- wired through Execute() - see that file. Max Concurrent Trades
+   //--- needed NO new field: it already lives in entry_config and Run()
+   //--- computes the live open-trade count itself every call, from
+   //--- whichever CGZExitEngine the caller passed in - no caller-side
+   //--- wiring was ever missing for that one.
+   bool                 use_session_hour_gate;
+   bool                 allow_concurrent_same_direction_setups;
+   bool                 allow_survive_opposite_break;
+   bool                 use_daily_loss_limit;
+   double               daily_loss_limit_r;
+
+   //--- Max Concurrent Setups (FIFO cap, direction-agnostic) follow-up -
+   //--- see GZ_SetupStateMachine.mqh header. Defaulted true/5 here too
+   //--- (matching that file's own Init() default), for the same reason:
+   //--- harmless when Switch A/B are off (never binds), and this is the
+   //--- ONE new field among this group that genuinely needs to reach
+   //--- CGZExperimentRunner::Execute() with a safe default even for a
+   //--- config nobody explicitly touches.
+   bool                 use_max_concurrent_setups;
+   int                  max_concurrent_setups;
+
    void Default()
      {
       symbol               = "XAUUSD";
@@ -145,6 +175,15 @@ struct GZ_ExperimentConfig
       entry_config.Default();
       exit_config.Default();
       measure_from         = 0;
+
+      use_session_hour_gate                  = false;
+      allow_concurrent_same_direction_setups = false;
+      allow_survive_opposite_break           = false;
+      use_daily_loss_limit                   = false;
+      daily_loss_limit_r                     = 3.0;
+
+      use_max_concurrent_setups = true;
+      max_concurrent_setups     = 5;
      }
   };
 

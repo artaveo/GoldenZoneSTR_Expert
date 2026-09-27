@@ -97,7 +97,11 @@ private:
 
       CGZLegEngine          leg_engine(m_logger);   leg_engine.Init(cfg.leg_variant);
       CGZBreakEngine        break_engine(m_logger);  break_engine.Configure(cfg.break_config);
-      CGZSetupStateMachine  setup_sm(m_logger);      setup_sm.Init(cfg.fib_zone_min_ratio, cfg.fib_zone_max_ratio);
+      CGZSetupStateMachine  setup_sm(m_logger);      setup_sm.Init(cfg.fib_zone_min_ratio, cfg.fib_zone_max_ratio,
+                                                                    cfg.allow_concurrent_same_direction_setups,
+                                                                    cfg.allow_survive_opposite_break,
+                                                                    cfg.use_max_concurrent_setups,
+                                                                    cfg.max_concurrent_setups);
       CGZEntryEngine        entry_engine(m_logger);  entry_engine.Init(cfg.entry_config);
       CGZExitEngine         exit_engine(m_logger);   exit_engine.Init(cfg.exit_config);
       CGZJournalEngine      journal_engine(m_logger);journal_engine.Init();
@@ -108,7 +112,9 @@ private:
 
       simulator.Run(m1, m5, swings, swing_count, leg_engine, break_engine, setup_sm, entry_engine, exit_engine,
                      journal_engine, event_ledger, time_engine, session_engine, cfg.session_profile,
-                     cfg.apply_session_filter, cfg.force_session_exit);
+                     cfg.apply_session_filter, cfg.force_session_exit,
+                     cfg.use_session_hour_gate,
+                     cfg.use_daily_loss_limit, cfg.daily_loss_limit_r);
 
       out.leg_count   = leg_engine.LegCount();
       out.setup_count = setup_sm.SetupCount();

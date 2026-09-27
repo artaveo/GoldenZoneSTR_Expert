@@ -53,7 +53,7 @@ private:
    GZ_TradeExit      m_exits[];
 
    //--- Diagnostics only (Phase "Concurrent Same-Direction Setups +
-   //--- Opposite-Break Survival"): the maximum number of trades
+   //--- Opposite-Break Survival" follow-up): the maximum number of trades
    //--- simultaneously OPEN (ENTERED but not yet EXITED) at any single
    //--- point during this run - reported regardless of which switches
    //--- are on, same baseline-comparison purpose as
@@ -62,6 +62,16 @@ private:
    //--- (OnTradeEntered) - closing a trade never raises it - so
    //--- sampling there is sufficient and exact.
    int               m_peak_open_trades;
+
+   //--- Daily Loss Limit support (NOT diagnostics-only - CGZTradeSimulator
+   //--- reads this every bar to accumulate its own running daily total).
+   //--- Sum of realized_r over every trade CLOSED during the MOST RECENT
+   //--- OnBar() call only - reset to 0.0 at the top of every OnBar() call,
+   //--- accumulated by CloseTrade() (called from OnBar() and OnDataEnd()).
+   //--- This lets the caller fold "R closed just now" into a day-running
+   //--- total in O(1) per bar, without ever re-scanning the full (and
+   //--- potentially very large) m_exits[] array.
+   double            m_last_bar_closed_r_sum;
 
    int FindByTradeId(long trade_id) const
      {
@@ -87,6 +97,7 @@ private:
       e.exit_price  = price;
       e.exit_reason = reason;
       e.realized_r  = ComputeRealizedR(e, price);
+      m_last_bar_closed_r_sum += e.realized_r;
       if(m_logger!=NULL)
          m_logger.Info("Exit", StringFormat(
             "Trade #%d setup=#%d (%s) CLOSED reason=%s price=%.5f R=%.3f at=%s",
@@ -106,12 +117,13 @@ private:
      }
 
 public:
-                     CGZExitEngine(CGZLogger *logger=NULL) { m_logger=logger; m_cfg.Default(); m_peak_open_trades=0; }
+                     CGZExitEngine(CGZLogger *logger=NULL) { m_logger=logger; m_cfg.Default(); m_peak_open_trades=0; m_last_bar_closed_r_sum=0.0; }
 
    void              Init(const GZ_ExitConfig &cfg)
      {
       m_cfg = cfg;
       m_peak_open_trades = 0;
+      m_last_bar_closed_r_sum = 0.0;
       ArrayResize(m_exits, 0);
      }
 
@@ -120,6 +132,11 @@ public:
 
    //--- Diagnostics only - see m_peak_open_trades' own comment.
    int               PeakOpenTrades() const { return m_peak_open_trades; }
+
+   //--- Daily Loss Limit support - see m_last_bar_closed_r_sum's own
+   //--- comment. Valid only immediately after the OnBar() call it
+   //--- belongs to; read it once per bar, right after calling OnBar().
+   double            LastBarClosedRealizedR() const { return m_last_bar_closed_r_sum; }
 
    int               CountByReason(ENUM_GZ_EXIT_REASON reason) const
      {
@@ -213,6 +230,7 @@ public:
    //--- reason; pass force_session_exit=false to disable it entirely.
    void              OnBar(const MqlRates &bar, bool inside_session, bool force_session_exit)
      {
+      m_last_bar_closed_r_sum = 0.0; // reset for THIS bar only - see member's own comment
       int n = ArraySize(m_exits);
       for(int i=0;i<n;i++)
         {
