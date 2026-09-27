@@ -142,10 +142,10 @@ input int                InpFixedNyOffsetHrs  = -5;      // used only if InpDstM
 input int                InpBrokerUtcOffsetHrs= 0;       // assumed broker/server offset from UTC
 input bool                InpBrokerOffsetKnown  = false;   // set true only if you have verified the broker offset
 
-input int                 InpSessionStartHour   = 16;
+input int                 InpSessionStartHour   = 21;
 input int                 InpSessionStartMinute = 30;
-input int                 InpSessionEndHour     = 20;
-input int                 InpSessionEndMinute   = 30;
+input int                 InpSessionEndHour     = 3;
+input int                 InpSessionEndMinute   = 0;
 input bool                InpSessionInclude     = true;
 
 input bool                InpVerboseLogging     = false;
@@ -358,6 +358,10 @@ input bool                  InpUseSessionHourGate = false;                    //
 input bool                  InpUseRealSpreadFills = false;                    // Real bid/ask fills (Step 2): true fills a Long at the entry candle's ask (bid+spread*point) and checks/fills a Short's SL/TP/BE at the ask of the candle that touches it; false = exact pre-FCIS bid-only behavior
 input bool                  InpUseMinRiskGate     = false;                    // Minimum Risk Gate (Step 4): true rejects a setup whose structural stop distance is smaller than (estimated round-turn cost / InpMaxCostFractionOfR)
 input double                InpMaxCostFractionOfR = 0.05;                     // Minimum Risk Gate (Step 4): required minimum structural risk = estimated round-turn cost divided by this fraction
+
+//--- Phase "Concurrent Same-Direction Setups + Opposite-Break Survival": two independent, default-OFF experimental switches (NOT part of FCIS) - see GZ_SetupStateMachine.mqh header
+input bool                  InpAllowConcurrentSameDirectionSetups = false;    // Switch A: true = a new same-direction leg no longer cancels the older still-open setup (GZ_CANCEL_NEW_VALID_SETUP skipped) - multiple same-direction setups may stay open concurrently; false = exact pre-phase behavior (at most one per direction)
+input bool                  InpAllowSurviveOppositeBreak          = false;    // Switch B: true = an opposite-direction break no longer cancels an open setup (GZ_CANCEL_OPPOSITE_BREAK skipped) - the setup's own leg/fib zone is untouched and it keeps progressing; false = exact pre-phase behavior
 
 //--- Globals ------------------------------------------------------------------
 CGZLogger         g_logger;
@@ -656,10 +660,22 @@ void BuildAndEmitReport()
    report += StringFormat("Cancel reasons: OPPOSITE_BREAK=%d NEW_VALID_SETUP=%d SESSION_END=%d DATA_END=%d\n",
               g_setup_sm.CountTerminalByReason(GZ_CANCEL_OPPOSITE_BREAK), g_setup_sm.CountTerminalByReason(GZ_CANCEL_NEW_VALID_SETUP),
               g_setup_sm.CountTerminalByReason(GZ_CANCEL_SESSION_END), g_setup_sm.CountTerminalByReason(GZ_CANCEL_DATA_END));
-   report += "At most one non-terminal setup per direction is ever left standing after a new leg\n";
-   report += "is created (see T41); an opposite-direction break cancels whatever is still open on\n";
-   report += "the other side (see T42). ENTERED is assigned by Phase 5's Entry Engine; EXITED is now\n";
-   report += "assigned by Phase 6's Exit Engine (see below) whenever a trade closes.\n\n";
+   if(!InpAllowConcurrentSameDirectionSetups && !InpAllowSurviveOppositeBreak)
+     {
+      report += "At most one non-terminal setup per direction is ever left standing after a new leg\n";
+      report += "is created (see T41); an opposite-direction break cancels whatever is still open on\n";
+      report += "the other side (see T42). ENTERED is assigned by Phase 5's Entry Engine; EXITED is now\n";
+      report += "assigned by Phase 6's Exit Engine (see below) whenever a trade closes.\n\n";
+     }
+   else
+     {
+      report += "NOTE: one or both Concurrent-Setups experimental switches are ON this run, so the\n";
+      report += "'at most one non-terminal setup per direction' invariant (T41/T42, still true when both\n";
+      report += "switches are OFF) no longer holds unconditionally here - see the Concurrent Same-Direction\n";
+      report += "Setups + Opposite-Break Survival section below for exactly what changed and by how much.\n";
+      report += "ENTERED is assigned by Phase 5's Entry Engine; EXITED is assigned by Phase 6's Exit Engine\n";
+      report += "(see below) whenever a trade closes.\n\n";
+     }
 
    report += "--- Phase 5: Entry Engine + Historical Trade Simulator ---\n";
    report += StringFormat("EntryModel=%s FibRatio=%.3f ConfirmationCandles=%d PenetrationAtrMult=%.2f\n",
@@ -1880,6 +1896,100 @@ void EmitFcisReport()
   }
 
 //+------------------------------------------------------------------+
+//| Phase "Concurrent Same-Direction Setups + Opposite-Break          |
+//| Survival" report - two independent, default-OFF experimental      |
+//| switches on the Phase 4 Setup State Machine (Switch A =            |
+//| InpAllowConcurrentSameDirectionSetups, Switch B =                  |
+//| InpAllowSurviveOppositeBreak). NOT part of FCIS - own small phase, |
+//| own report file. No Swing/Leg/Break/Fibonacci detection math is    |
+//| touched; FCIS's own gates (Session Hour Gate / real spread fills / |
+//| Minimum Risk Gate) compose normally with these switches (a setup   |
+//| surviving via A/B is still subject to them).                       |
+//+------------------------------------------------------------------+
+void EmitConcurrencyReport()
+  {
+   string s = "";
+   s += "===================================================\n";
+   s += "PHASE: Concurrent Same-Direction Setups + Opposite-Break Survival\n";
+   s += "===================================================\n";
+   s += "Two independent, default-OFF experimental switches on top of the Phase 4 Setup State Machine's\n";
+   s += "own baseline invalidation rules (GZ_CANCEL_NEW_VALID_SETUP / GZ_CANCEL_OPPOSITE_BREAK).\n";
+   s += "No Swing/Leg/Break/Fibonacci math changed. FCIS's gates compose normally on top of this.\n\n";
+
+   s += "--- A. Switch settings this run ---\n";
+   s += StringFormat("InpAllowConcurrentSameDirectionSetups (Switch A) = %s\n", InpAllowConcurrentSameDirectionSetups?"true":"false");
+   s += StringFormat("InpAllowSurviveOppositeBreak          (Switch B) = %s\n\n", InpAllowSurviveOppositeBreak?"true":"false");
+
+   s += "--- B. Concurrency diagnostics (reported regardless of switch state - baseline comparison) ---\n";
+   s += StringFormat("Peak simultaneous non-terminal setups (LEG_DETECTED..WAITING_ENTRY) = %d\n", g_setup_sm.PeakNonTerminalSetups());
+   s += StringFormat("Peak simultaneous OPEN trades (ENTERED, not yet EXITED)             = %d\n", g_exit_engine.PeakOpenTrades());
+   s += "No position-sizing/concurrency risk model exists in this codebase (R-based only, per\n";
+   s += "GZ_MetricsTypes.mqh design notes) - a peak above 1 means concurrent open risk that is NOT\n";
+   s += "position-sized down; treat these numbers as exposure awareness, not a pass/fail check.\n\n";
+
+   s += "--- C. Would-have-cancelled counters (only non-zero when the matching switch is ON) ---\n";
+   s += StringFormat("Switch A: setups NOT cancelled that would have been under NEW_VALID_SETUP = %d\n",
+                     (int)g_setup_sm.WouldHaveCancelledSameDirectionCount());
+   s += StringFormat("Switch B: setups NOT cancelled that would have been under OPPOSITE_BREAK  = %d\n\n",
+                     (int)g_setup_sm.WouldHaveCancelledOppositeBreakCount());
+
+   s += "--- D. This run's own cancel-reason counts (context for B/C above) ---\n";
+   s += StringFormat("NEW_VALID_SETUP=%d  OPPOSITE_BREAK=%d  (both must match the pre-phase LEGACY_DEV baseline\n",
+                     g_setup_sm.CountTerminalByReason(GZ_CANCEL_NEW_VALID_SETUP), g_setup_sm.CountTerminalByReason(GZ_CANCEL_OPPOSITE_BREAK));
+   s += "exactly when both switches above are OFF - see Section F.)\n\n";
+
+   s += "--- E. Automated tests T250-T256 (synthetic data) ---\n";
+   int cp_ = 0, cf_ = 0;
+   for(int i=0;i<g_harness.ResultCount();i++)
+     {
+      GZ_TestResult r = g_harness.GetResult(i);
+      if(StringLen(r.id)<2 || StringGetCharacter(r.id,0)!='T') continue;
+      int num = (int)StringToInteger(StringSubstr(r.id,1));
+      if(num<250 || num>256) continue;
+      s += StringFormat("%s: %s - %s\n", r.id, r.passed?"PASS":"FAIL", r.detail);
+      if(r.passed) cp_++; else cf_++;
+     }
+   s += StringFormat("Concurrency tests: %d PASS / %d FAIL | full suite T01-T%d: %d PASS / %d FAIL\n\n",
+                     cp_, cf_, g_harness.ResultCount(), g_harness.PassCount(), g_harness.FailCount());
+
+   s += "--- F. REQUIRED MANUAL VERIFICATION (do not skip - same discipline as the FCIS baseline check) ---\n";
+   bool both_off = (!InpAllowConcurrentSameDirectionSetups) && (!InpAllowSurviveOppositeBreak);
+   s += StringFormat("Both switches OFF in this run = %s\n", both_off?"true":"false");
+   if(g_res_range.kind==GZ_RANGE_LEGACY_DEV && both_off)
+      s += StringFormat("USER TEST REQUIRED #1: range=LEGACY_DEV, both switches OFF -> trades=%d. This must equal 412 exactly (the\n"
+                        "pre-phase baseline). Claude cannot claim this passed on its own - compile and run this in your own MT5\n"
+                        "and confirm the trade count before trusting this run's other numbers.\n", g_trade_count);
+   else if(g_res_range.kind==GZ_RANGE_LEGACY_DEV && !both_off)
+      s += "One or both switches are ON in this run, so the 412-trade LEGACY_DEV baseline check does not apply here -\n"
+           "run once more with both switches OFF on LEGACY_DEV to (re)confirm the 412-trade baseline still holds.\n";
+   else
+      s += StringFormat("range kind=%s (not LEGACY_DEV) - the 412-trade check only applies on LEGACY_DEV; run once on\n"
+                        "LEGACY_DEV with both switches OFF to confirm the baseline before trusting this range's numbers.\n", GZRangeKindToString(g_res_range.kind));
+   s += "\n";
+
+   s += "--- Phase Status ---\n";
+   string status;
+   if(cf_>0)
+      status = "PHASE CONCURRENCY FAILED (automated test failure - see Section E)";
+   else
+      status = "PHASE CONCURRENCY SWITCHES IMPLEMENTED - AWAITING USER'S OWN MT5 RUN TO CONFIRM SECTION F (412-trade LEGACY_DEV baseline, both switches OFF)";
+   s += status + "\n";
+   s += "No claim of a real MT5 run result is made beyond what this attachment itself just computed.\n";
+   s += "===================================================\n";
+
+   PrintReportChunked(s);
+   int hc = FileOpen("GZ_PhaseConcurrency_Report.txt", FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   if(hc!=INVALID_HANDLE)
+     {
+      FileWriteString(hc, s);
+      FileClose(hc);
+      Print("[GZ] Phase Concurrency output written to Common\\Files\\GZ_PhaseConcurrency_Report.txt");
+     }
+   else
+      Print("[GZ] WARNING: could not open GZ_PhaseConcurrency_Report.txt for writing, error=", GetLastError());
+  }
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                    |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -2040,7 +2150,8 @@ int OnInit()
    break_cfg.atr_period      = InpAtrPeriod;
    g_break_engine.Configure(break_cfg);
 
-   g_setup_sm.Init(InpFibZoneMinRatio, InpFibZoneMaxRatio);
+   g_setup_sm.Init(InpFibZoneMinRatio, InpFibZoneMaxRatio,
+                    InpAllowConcurrentSameDirectionSetups, InpAllowSurviveOppositeBreak);
    GZ_SessionProfile session_profile;
    session_profile.Set("PROFILE_01", "Session", InpTimeMode,
                         InpSessionStartHour, InpSessionStartMinute,
@@ -2736,6 +2847,7 @@ int OnInit()
    EmitPhase157Report();
    EmitPhase158Report();
    EmitFcisReport();
+   EmitConcurrencyReport();
 
    g_logger.Info("Init", "Phase 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 diagnostics complete. STOPPING after Phase 15.8 (dataset partition + net-of-cost layer) - not proceeding to Phase 16 (Research Freeze) logic.");
 

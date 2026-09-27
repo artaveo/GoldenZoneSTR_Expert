@@ -71,6 +71,7 @@
 #include "..\Dataset\GZ_DatasetTests.mqh"
 #include "..\Dataset\GZ_PartitionTests.mqh"
 #include "..\FCIS\GZ_FcisTests.mqh"
+#include "..\Setup\GZ_ConcurrencyTests.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -5714,6 +5715,18 @@ public:
         {
          GZ_TestResult fcr = fcis_suite.GetResult(fci);
          AddResult(fcr.id, fcr.passed, fcr.detail);
+        }
+
+      //--- Phase "Concurrent Same-Direction Setups + Opposite-Break
+      //--- Survival" (T250-T256): Switch A / Switch B independence and
+      //--- combination, plus peak-concurrency diagnostics - synthetic
+      //--- data only
+      CGZConcurrencyTests conc_suite(m_logger);
+      conc_suite.RunAll();
+      for(int cci=0; cci<conc_suite.ResultCount(); cci++)
+        {
+         GZ_TestResult ccr = conc_suite.GetResult(cci);
+         AddResult(ccr.id, ccr.passed, ccr.detail);
         }
      }
 

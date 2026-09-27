@@ -5,11 +5,34 @@
 //| Drives GZ_Setup lifecycle from Leg/Break Engine (Phase 3) events  |
 //| and bar/session data. Owns cancellation among the multiple         |
 //| simultaneously-open legs that Phase 3 explicitly left unresolved  |
-//| (see GZ_LegTypes.mqh's design note): this is exactly that          |
-//| resolution - at most one non-terminal setup per direction is ever |
-//| left standing after OnLegCreated() runs (a fresher same-direction |
-//| leg cancels the older one; an opposite-direction break cancels    |
-//| whatever is still open on the other side).                        |
+//| (see GZ_LegTypes.mqh's design note): BY DEFAULT this is exactly   |
+//| that resolution - at most one non-terminal setup per direction is |
+//| ever left standing after OnLegCreated() runs (a fresher same-      |
+//| direction leg cancels the older one; an opposite-direction break  |
+//| cancels whatever is still open on the other side).                 |
+//|                                                                    |
+//| PHASE "Concurrent Same-Direction Setups + Opposite-Break Survival"|
+//| (two independent, default-OFF experimental switches - own small   |
+//| phase, NOT part of FCIS, NOT a bug fix):                           |
+//|   m_allow_concurrent_same_direction (Switch A) - when true, the   |
+//|     GZ_CANCEL_NEW_VALID_SETUP cancellation above is SKIPPED        |
+//|     entirely: the older same-direction setup is left exactly as   |
+//|     it was, and the new one is created alongside it. Only what    |
+//|     WOULD have been cancelled is counted (see                     |
+//|     WouldHaveCancelledSameDirectionCount()) - never acted on.     |
+//|   m_allow_survive_opposite_break (Switch B) - when true, the      |
+//|     GZ_CANCEL_OPPOSITE_BREAK cancellation is SKIPPED entirely: the|
+//|     setup's own leg/fib zone is untouched, only the cancellation  |
+//|     is skipped. Counted the same way (see                          |
+//|     WouldHaveCancelledOppositeBreakCount()).                       |
+//| Both default false (Init()'s trailing params) -> byte-identical   |
+//| behavior to pre-this-phase code, and every existing Init(a,b) call|
+//| site (every unit test included) is unaffected. The two switches   |
+//| are fully independent - either, both, or neither may be on.       |
+//| Diagnostics-only peak-concurrency tracking (PeakNonTerminalSetups)|
+//| is also added here - see that method's own comment - so the user  |
+//| can see how much overlap these switches introduce even though     |
+//| this codebase has no position-sizing/concurrency risk model.      |
 //|                                                                    |
 //| NO entry/exit/simulation logic lives here (Phase 5+) - a setup    |
 //| that reaches WAITING_ENTRY simply stays there until cancelled or  |
@@ -47,6 +70,33 @@ private:
    double            m_zone_max_ratio;
    CGZLogger        *m_logger;
 
+   //--- Phase "Concurrent Same-Direction Setups + Opposite-Break
+   //--- Survival": two independent, default-off experimental switches -
+   //--- see this file's header. Both false reproduces pre-phase
+   //--- behavior exactly.
+   bool              m_allow_concurrent_same_direction;
+   bool              m_allow_survive_opposite_break;
+
+   //--- Diagnostics only (never read by any decision in this class or
+   //--- any caller) - see header + PeakNonTerminalSetups() comment.
+   int               m_peak_non_terminal_setups;
+   long              m_would_have_cancelled_same_direction_count;
+   long              m_would_have_cancelled_opposite_break_count;
+
+   //--- Non-terminal == !IsTerminal(), i.e. one of LEG_DETECTED,
+   //--- BREAK_CONFIRMED, LEG_LOCKED, FIB_ACTIVE, WAITING_ENTRY - see
+   //--- GZ_SetupTypes.mqh::IsTerminal(). Linear scan is fine:
+   //--- SetupCount() is small (see FindLegForSetup's own comment in
+   //--- GZ_TradeSimulator.mqh for the same reasoning).
+   int CountNonTerminal() const
+     {
+      int c=0, n=ArraySize(m_setups);
+      for(int i=0;i<n;i++)
+         if(!m_setups[i].IsTerminal())
+            c++;
+      return c;
+     }
+
    int FindByLegId(long leg_id) const
      {
       int n = ArraySize(m_setups);
@@ -82,15 +132,57 @@ private:
 
 public:
                      CGZSetupStateMachine(CGZLogger *logger=NULL)
-     { m_logger=logger; m_next_id=1; m_zone_min_ratio=0.30; m_zone_max_ratio=0.90; }
+     {
+      m_logger=logger; m_next_id=1; m_zone_min_ratio=0.30; m_zone_max_ratio=0.90;
+      m_allow_concurrent_same_direction=false; m_allow_survive_opposite_break=false;
+      m_peak_non_terminal_setups=0;
+      m_would_have_cancelled_same_direction_count=0;
+      m_would_have_cancelled_opposite_break_count=0;
+     }
 
-   void              Init(double zone_min_ratio, double zone_max_ratio)
+   //--- `allow_concurrent_same_direction_setups` (Switch A) / `allow_
+   //--- survive_opposite_break` (Switch B): additive trailing params,
+   //--- both default false - every existing call site (every unit test
+   //--- included) keeps its exact prior behavior unless the caller
+   //--- opts in. See this file's header for what each switch does.
+   void              Init(double zone_min_ratio, double zone_max_ratio,
+                           bool allow_concurrent_same_direction_setups=false,
+                           bool allow_survive_opposite_break=false)
      {
       m_next_id        = 1;
       m_zone_min_ratio = zone_min_ratio;
       m_zone_max_ratio = zone_max_ratio;
+      m_allow_concurrent_same_direction = allow_concurrent_same_direction_setups;
+      m_allow_survive_opposite_break    = allow_survive_opposite_break;
+      m_peak_non_terminal_setups = 0;
+      m_would_have_cancelled_same_direction_count = 0;
+      m_would_have_cancelled_opposite_break_count = 0;
       ArrayResize(m_setups, 0);
      }
+
+   bool              AllowConcurrentSameDirection() const { return m_allow_concurrent_same_direction; }
+   bool              AllowSurviveOppositeBreak() const    { return m_allow_survive_opposite_break; }
+
+   //--- Diagnostics (mandatory, for user awareness - see header): the
+   //--- maximum number of setups simultaneously in a non-terminal state
+   //--- (LEG_DETECTED through WAITING_ENTRY) at any single point during
+   //--- this run. Peak concurrency can only ever INCREASE at the one
+   //--- point a new setup is appended (OnLegCreated) - every other
+   //--- transition (OnLegBroken's state advances, OnBar's zone-touch
+   //--- advance, any cancellation, MarkEntered) either leaves the non-
+   //--- terminal count unchanged or reduces it - so sampling there is
+   //--- sufficient and exact, not an approximation. Reported REGARDLESS
+   //--- of which switches are on, so the user has a baseline comparison
+   //--- too (see phase spec).
+   int               PeakNonTerminalSetups() const { return m_peak_non_terminal_setups; }
+
+   //--- How many setups were NOT cancelled that would have been under
+   //--- the old NEW_VALID_SETUP / OPPOSITE_BREAK rules - i.e. a simple
+   //--- counter of "would-have-cancelled" events, logged instead of
+   //--- acted on (see header). Naturally 0 whenever the matching switch
+   //--- is off, since the normal cancellation path runs instead.
+   long              WouldHaveCancelledSameDirectionCount() const { return m_would_have_cancelled_same_direction_count; }
+   long              WouldHaveCancelledOppositeBreakCount() const { return m_would_have_cancelled_opposite_break_count; }
 
    int               SetupCount() const { return ArraySize(m_setups); }
    GZ_Setup          GetSetup(int i) const { return m_setups[i]; }
@@ -121,7 +213,14 @@ public:
          if(m_setups[i].IsTerminal())
             continue;
          if(m_setups[i].leg.direction==leg.direction)
-            CancelSetup(i, GZ_CANCEL_NEW_VALID_SETUP, leg.target_swing.confirmation_time);
+           {
+            //--- Switch A: skip the cancellation entirely, just count
+            //--- that it would have fired under the old (default) rule.
+            if(m_allow_concurrent_same_direction)
+               m_would_have_cancelled_same_direction_count++;
+            else
+               CancelSetup(i, GZ_CANCEL_NEW_VALID_SETUP, leg.target_swing.confirmation_time);
+           }
         }
 
       GZ_Setup s; s.Clear();
@@ -132,6 +231,13 @@ public:
 
       ArrayResize(m_setups, n+1);
       m_setups[n] = s;
+
+      //--- Peak concurrency: the only point non-terminal count can rise -
+      //--- see PeakNonTerminalSetups()'s own comment.
+      int active_now = CountNonTerminal();
+      if(active_now > m_peak_non_terminal_setups)
+         m_peak_non_terminal_setups = active_now;
+
       if(m_logger!=NULL)
          m_logger.Debug("Setup", StringFormat("Setup #%d (%s) LEG_DETECTED at=%s",
                         (int)s.id, s.leg.DirectionToString(), TimeToString(s.detected_time)));
@@ -176,7 +282,15 @@ public:
          if(m_setups[i].IsTerminal())
             continue;
          if(m_setups[i].leg.direction!=broken_leg.direction)
-            CancelSetup(i, GZ_CANCEL_OPPOSITE_BREAK, broken_leg.break_time);
+           {
+            //--- Switch B: skip the cancellation entirely (the setup's
+            //--- own leg/fib zone is untouched), just count that it
+            //--- would have fired under the old (default) rule.
+            if(m_allow_survive_opposite_break)
+               m_would_have_cancelled_opposite_break_count++;
+            else
+               CancelSetup(i, GZ_CANCEL_OPPOSITE_BREAK, broken_leg.break_time);
+           }
         }
      }
 

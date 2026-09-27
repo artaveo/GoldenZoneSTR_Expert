@@ -52,6 +52,17 @@ private:
    CGZLogger        *m_logger;
    GZ_TradeExit      m_exits[];
 
+   //--- Diagnostics only (Phase "Concurrent Same-Direction Setups +
+   //--- Opposite-Break Survival"): the maximum number of trades
+   //--- simultaneously OPEN (ENTERED but not yet EXITED) at any single
+   //--- point during this run - reported regardless of which switches
+   //--- are on, same baseline-comparison purpose as
+   //--- CGZSetupStateMachine::PeakNonTerminalSetups(). Peak open count
+   //--- can only ever rise the instant a trade is opened
+   //--- (OnTradeEntered) - closing a trade never raises it - so
+   //--- sampling there is sufficient and exact.
+   int               m_peak_open_trades;
+
    int FindByTradeId(long trade_id) const
      {
       int n = ArraySize(m_exits);
@@ -95,16 +106,20 @@ private:
      }
 
 public:
-                     CGZExitEngine(CGZLogger *logger=NULL) { m_logger=logger; m_cfg.Default(); }
+                     CGZExitEngine(CGZLogger *logger=NULL) { m_logger=logger; m_cfg.Default(); m_peak_open_trades=0; }
 
    void              Init(const GZ_ExitConfig &cfg)
      {
       m_cfg = cfg;
+      m_peak_open_trades = 0;
       ArrayResize(m_exits, 0);
      }
 
    int               ExitCount() const { return ArraySize(m_exits); }
    GZ_TradeExit      GetExit(int i) const { return m_exits[i]; }
+
+   //--- Diagnostics only - see m_peak_open_trades' own comment.
+   int               PeakOpenTrades() const { return m_peak_open_trades; }
 
    int               CountByReason(ENUM_GZ_EXIT_REASON reason) const
      {
@@ -176,6 +191,14 @@ public:
       int n = ArraySize(m_exits);
       ArrayResize(m_exits, n+1);
       m_exits[n] = e;
+
+      //--- Peak concurrency: the only point open-trade count can rise -
+      //--- see m_peak_open_trades' own comment. e.is_open==true by
+      //--- construction (GZ_TradeExit::Clear()), so OpenCount() here
+      //--- already includes the trade just appended.
+      int open_now = OpenCount();
+      if(open_now > m_peak_open_trades)
+         m_peak_open_trades = open_now;
 
       if(m_logger!=NULL)
          m_logger.Info("Exit", StringFormat(
