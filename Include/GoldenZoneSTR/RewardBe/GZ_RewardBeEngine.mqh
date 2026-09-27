@@ -27,6 +27,7 @@
 #include "..\Experiment\GZ_ExperimentRunner.mqh"
 #include "..\Diagnostics\GZ_Logger.mqh"
 #include "..\Cost\GZ_CostEngine.mqh"
+#include "GZ_BaselineCompare.mqh"
 #include "..\Core\GZ_Progress.mqh"
 
 //--- Comparison inputs the caller supplies (all optional).
@@ -138,11 +139,15 @@ private:
      }
 
    //--- Phase 15.8 Part B: attach the post-hoc net-of-cost figures to a filled row (gross fields untouched)
-   void ApplyNet(GZ_RewardBeRow &row, CGZRunDetail *d, const MqlRates &m1[])
+   //--- `real_spread_fills_active` (Sub-phase C, spec Bug 3): the run's own
+   //--- use_real_spread_fills - forwarded to CGZCostEngine::Evaluate() so
+   //--- Section I can never double-charge spread against an in-simulation
+   //--- real-spread-fill run.
+   void ApplyNet(GZ_RewardBeRow &row, CGZRunDetail *d, const MqlRates &m1[], bool real_spread_fills_active)
      {
       if(m_cost==NULL)
          return;
-      m_cost.Evaluate(d, m1, row.net);
+      m_cost.Evaluate(d, m1, row.net, real_spread_fills_active);
       if(!m_spread_done && d.count>0)
         {
          m_spread_text = m_cost.BuildSpreadStats(d, m1, m_spread_tot);
@@ -402,7 +407,7 @@ public:
          RunOne(base_cfg, tp, 0.0, m1, m5, m1_status, m5_status, r_off, d_off);
          GZ_RewardBeRow row_off;
          FillRow(r_off, d_off, GZ_RB_OFF, tp, 0.0, row_off);
-         ApplyNet(row_off, d_off, m1);
+         ApplyNet(row_off, d_off, m1, base_cfg.exit_config.use_real_spread_fills);
          int off_idx = AppendRow(row_off);
          m_matrix_runs++;
          if(m_logger!=NULL)
@@ -419,7 +424,7 @@ public:
             RunOne(base_cfg, tp, trig, m1, m5, m1_status, m5_status, r_on, d_on);
             GZ_RewardBeRow row_on;
             FillRow(r_on, d_on, GZ_RB_BE_ACTIVE, tp, trig, row_on);
-            ApplyNet(row_on, d_on, m1);
+            ApplyNet(row_on, d_on, m1, base_cfg.exit_config.use_real_spread_fills);
             ComparePairs(d_off, d_on, row_on.pair);
             m_entry_mismatch_total += row_on.pair.entry_mismatch;
             m_unmatched_total      += (row_on.pair.unmatched_on + row_on.pair.unmatched_off);
@@ -441,7 +446,7 @@ public:
       RunOne(base_cfg, GZ_RB_REFERENCE_TP_R, 0.0, m1, m5, m1_status, m5_status, r_ref, d_ref);
       GZ_RewardBeRow row_ref;
       FillRow(r_ref, d_ref, GZ_RB_REFERENCE_ONLY, GZ_RB_REFERENCE_TP_R, 0.0, row_ref);
-      ApplyNet(row_ref, d_ref, m1);
+      ApplyNet(row_ref, d_ref, m1, base_cfg.exit_config.use_real_spread_fills);
       AppendRow(row_ref);
       m_matrix_runs++;
       delete d_ref;
@@ -468,14 +473,15 @@ public:
       m_elapsed_ms = GetTickCount64() - m_t0_tick;
 
       EvaluateValidations(dev_range_start, dev_range_end, oos_start, phase15_skipped,
-                          det_done, det_off_ok, det_on_ok, bref, m1, m5);
+                          det_done, det_off_ok, det_on_ok, bref, m1, m5, base_cfg);
       return m_status;
      }
 
    //--- Section G ------------------------------------------------------------
    void EvaluateValidations(datetime dev_start, datetime dev_end,
                             datetime oos_start, bool phase15_skipped, bool det_done, bool det_off_ok, bool det_on_ok,
-                            const GZ_RewardBeBaselineRef &bref, const MqlRates &m1[], const MqlRates &m5[])
+                            const GZ_RewardBeBaselineRef &bref, const MqlRates &m1[], const MqlRates &m5[],
+                            const GZ_ExperimentConfig &base_cfg)
      {
       int n = ArraySize(m_rows);
 
@@ -519,7 +525,8 @@ public:
                              bref.main_trades, bref.main_winners, bref.main_net_r, bref.main_expectancy));
         }
 
-      // V03 - TP=2R + BE off vs the REPORTED Phase 15 Development baseline (rounded figures -> tolerances)
+      // V03 - TP=2R + BE off vs the InpP155Ref* baseline (Sub-phase E, spec Bug 5:
+      // ONE shared comparison function - see GZ_BaselineCompare.mqh)
       if(bref.ext_not_applicable)
         {
          // range is not the Phase 15 Development range: the reference figures describe a different population, so no V03 row is recorded
@@ -528,17 +535,26 @@ public:
          AddVal("V03_BASELINE_EQUALS_PHASE15_DEV_REPORT", false, true, "no external Phase 15 Development reference supplied");
       else
         {
-         double dw = MathAbs(m_rows[i_base].win_rate-bref.ext_win_rate);
-         double de = MathAbs(m_rows[i_base].expectancy-bref.ext_expectancy);
-         double dp = MathAbs(m_rows[i_base].profit_factor-bref.ext_pf);
-         double dn = MathAbs(m_rows[i_base].net_r-bref.ext_net_r);
-         double dd_diff = MathAbs(m_rows[i_base].max_dd_r-bref.ext_max_dd_r);
-         bool trades_ok = (bref.ext_trades<=0) || (m_rows[i_base].trades==bref.ext_trades);
-         bool ok = (dw<=0.0006) && (de<=0.0002) && (dp<=0.0015) && (dn<=0.6) && trades_ok && (dd_diff<=0.05);
-         AddVal("V03_BASELINE_EQUALS_PHASE15_DEV_REPORT", ok, false,
-                StringFormat("matrix: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.3f max_dd=%.2f | Phase 15 report: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.1f max_dd=%.2f | |diff| win=%.5f exp=%.5f pf=%.4f net_r=%.3f max_dd=%.3f (tolerances: rounding of the printed figures; trade count exact)",
-                             m_rows[i_base].trades, m_rows[i_base].win_rate, m_rows[i_base].expectancy, m_rows[i_base].profit_factor, m_rows[i_base].net_r, m_rows[i_base].max_dd_r,
-                             bref.ext_trades, bref.ext_win_rate, bref.ext_expectancy, bref.ext_pf, bref.ext_net_r, bref.ext_max_dd_r, dw, de, dp, dn, dd_diff));
+         GZ_BaselineActiveConfig active; active.Clear();
+         active.tp_r_multiple = m_rows[i_base].tp_r;
+         active.be_trigger_r  = m_rows[i_base].be_trigger_r;
+         active.use_session_hour_gate = base_cfg.use_session_hour_gate;
+         active.use_real_spread_fills = base_cfg.exit_config.use_real_spread_fills;
+         active.use_min_risk_gate     = base_cfg.entry_config.use_min_risk_gate;
+         active.allow_concurrent_same_direction_setups = base_cfg.allow_concurrent_same_direction_setups;
+         active.allow_survive_opposite_break            = base_cfg.allow_survive_opposite_break;
+         active.use_daily_loss_limit  = base_cfg.use_daily_loss_limit;
+         active.costs_configured      = base_cfg.cost_config.configured;
+
+         string detail;
+         ENUM_GZ_BASELINE_VERDICT verdict = GZBaselineCompare(
+            m_rows[i_base].trades, m_rows[i_base].win_rate, m_rows[i_base].expectancy, m_rows[i_base].profit_factor,
+            m_rows[i_base].net_r, m_rows[i_base].max_dd_r,
+            bref.ext_trades, bref.ext_win_rate, bref.ext_expectancy, bref.ext_pf, bref.ext_net_r, bref.ext_max_dd_r,
+            active, detail);
+         //--- BASELINE_NOT_APPLICABLE is NOT a failure (spec: textually distinct
+         //--- from both PASS and FAIL) - only GZ_BASELINE_FAIL counts as failed.
+         AddVal("V03_BASELINE_EQUALS_PHASE15_DEV_REPORT", verdict!=GZ_BASELINE_FAIL, false, detail);
         }
 
       // V04 - main-matrix grid rule (reduced grid): TP <= 4.5R (no 5.0R); BE OFF once per TP; the BE-active rows of every TP are EXACTLY
@@ -869,7 +885,10 @@ public:
          s += "Net win rate counts trades with NET R > 0. Net PF/max drawdown/streaks come from the EXISTING Phase 8 metrics logic run on the net R series (trade-entry order).\n";
          s += "Venue model = a researched PROPOSAL for FundedNext MT5 gold (0.0016% of open price, charged once at open; structure effective 2026-01-12), applied to ALL history on purpose (the cost of trading the strategy now). No slippage figure is published: 0 by default plus the sensitivity columns.\n";
          s += "SWAP is NOT modelled. Trades open across a server midnight (rollover) are counted below so the omission can be judged.\n";
-         s += "APPROXIMATION: candles are BID-based and the simulator fills on them; the ENTRY bar's spread is charged once as a proxy for the ask/bid difference. Where the spread at the EXIT is wider than at entry (news, rollover, fast stop-outs) the cost is UNDER-stated; a short's TP/SL are really triggered by the ask and that is not modelled. Exact bid/ask fill modelling is out of scope.\n\n";
+         if(n>0 && m_rows[0].net.spread_excluded_real_fills)
+            s += "SPREAD EXCLUDED FROM THIS LAYER: this run has InpUseRealSpreadFills=true, so a short's TP/SL are already triggered by the ask (and a long's entry already fills at the ask) INSIDE the simulation itself (Phase FCIS Step 2) - the post-hoc layer therefore deliberately excludes spread from its own cost_price here, to avoid double-counting it (Cost-Unification Sub-phase C). Commission and slippage below are still fully charged; only spread is affected by this exclusion.\n\n";
+         else
+            s += "APPROXIMATION (InpUseRealSpreadFills=false in this run): candles are BID-based and the simulator fills on them; the ENTRY bar's spread is charged once here as a proxy for the ask/bid difference of both the fill and the exit. Where the spread at the EXIT is wider than at entry (news, rollover, fast stop-outs) the cost is UNDER-stated. This is the ONLY place spread cost is modelled when InpUseRealSpreadFills=false. Exact bid/ask fill modelling is out of scope.\n\n";
          s += PadL("TP",4)+PadL("BE",6)+PadL("N",5)+PadL("GrossExp",10)+PadL("NetExp",9)+PadL("GrossNetR",10)+PadL("NetNetR",9)+PadL("NetPF",8)+PadL("NetMaxDD",9)+PadL("NetWin%",8)+PadL("AvgCostR",9)
               +PadL("Exp@0",8)+PadL("Exp@20",8)+PadL("Exp@50",8)+"\n";
          for(int i=0;i<n;i++)

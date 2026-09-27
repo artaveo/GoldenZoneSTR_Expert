@@ -72,10 +72,16 @@ private:
    //--- RunSweep (a one-point sweep) and hand back its compact stats.
    //--- `scratch` is a caller-owned reusable result (RunSweep Clear()s it),
    //--- only to avoid stacking several very large locals.
+   //--- `out_net` (Cost-Unification Sub-phase B, spec Bug 2): the SAME
+   //--- point's parallel net-of-cost summary - GZ_NetSummary.Clear()'s own
+   //--- available=false/net_equals_gross=true whenever cost_config is
+   //--- unconfigured, so every existing caller that ignores this output is
+   //--- unaffected.
    bool RunOneValue(const GZ_ExperimentConfig &base_cfg, ENUM_GZ_ROBUSTNESS_PARAM axis, double value,
                     const MqlRates &m1[], const MqlRates &m5[], string dataset_id,
                     ENUM_GZ_VALIDATION_STATUS m1_status, ENUM_GZ_VALIDATION_STATUS m5_status,
-                    GZ_RobustnessSweepResult &scratch, GZ_TradeStats &out_stats, GZ_RiskStats &out_risk)
+                    GZ_RobustnessSweepResult &scratch, GZ_TradeStats &out_stats, GZ_RiskStats &out_risk,
+                    GZ_NetSummary &out_net)
      {
       CGZRobustnessEngine rob(m_logger);
       GZ_RobustnessSweepRequest req;
@@ -90,6 +96,7 @@ private:
          return false;
       out_stats = scratch.points[0].result.metrics.trade;
       out_risk  = scratch.points[0].result.metrics.risk;
+      out_net   = scratch.points[0].result.net_metrics;
       return true;
      }
 
@@ -318,6 +325,13 @@ public:
          r.pooled_winners += r.windows[i].val_stats.winners;
          r.pooled_losers  += r.windows[i].val_stats.losers;
          r.pooled_net_r   += r.windows[i].val_stats.net_r;
+         //--- Cost-Unification Sub-phase B (spec Bug 2): simple-sum the
+         //--- SAME validated windows' parallel net-of-cost figures.
+         if(r.windows[i].val_net.available && !r.windows[i].val_net.net_equals_gross)
+           {
+            r.pooled_net_available  = true;
+            r.pooled_net_r_cost_adj += r.windows[i].val_net.net_r;
+           }
          sum_win_r        += r.windows[i].val_stats.avg_win_r  * (double)r.windows[i].val_stats.winners;
          sum_loss_r       += r.windows[i].val_stats.avg_loss_r * (double)r.windows[i].val_stats.losers;
          if(r.windows[i].val_stats.net_r > 0.0000001)
@@ -338,6 +352,8 @@ public:
         {
          r.pooled_expectancy = r.pooled_net_r / (double)r.pooled_trades;
          r.pooled_win_rate   = (double)r.pooled_winners / (double)r.pooled_trades;
+         if(r.pooled_net_available)
+            r.pooled_expectancy_cost_adj = r.pooled_net_r_cost_adj / (double)r.pooled_trades;
         }
       if(sum_loss_r > 0.0000001)
          r.pooled_profit_factor = sum_win_r / sum_loss_r;
@@ -539,7 +555,8 @@ public:
          string ds_val = StringFormat("%s_WF%d_VAL", dataset_id, k);
 
          bool ok = RunOneValue(vbase, cfg.axis, out.windows[k].selected_value, m1_val, m5_val, ds_val,
-                                m1_status, m5_status, sweep, out.windows[k].val_stats, out.windows[k].val_risk);
+                                m1_status, m5_status, sweep, out.windows[k].val_stats, out.windows[k].val_risk,
+                                out.windows[k].val_net);
          out.windows[k].validation_ran = ok;
          if(ok)
             out.windows[k].low_validation_trades = (out.windows[k].val_stats.trade_count < cfg.min_validation_trades);
@@ -552,9 +569,10 @@ public:
          else
            {
             GZ_RiskStats unused_risk;
+            GZ_NetSummary unused_net;
             out.windows[k].baseline_val_ran = RunOneValue(vbase, cfg.axis, out.baseline_value, m1_val, m5_val, ds_val,
                                                            m1_status, m5_status, sweep,
-                                                           out.windows[k].baseline_val_stats, unused_risk);
+                                                           out.windows[k].baseline_val_stats, unused_risk, unused_net);
            }
 
          if(m_logger!=NULL)

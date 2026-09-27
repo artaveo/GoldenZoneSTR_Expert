@@ -197,6 +197,12 @@ public:
       runner.RunSingle(ocfg, o1, o5, dataset_prefix+"_OOS", oos_m1_status, oos_m5_status, ro);
       out.dev = rd.metrics;
       out.oos = ro.metrics;
+      //--- Cost-Unification Sub-phase B (spec Bug 2): carry the parallel
+      //--- net-of-cost summaries through too - available whenever
+      //--- cfg.cost_config.configured=true (both ranges share the same
+      //--- frozen config, see this file's own header design note 2).
+      out.dev_net = rd.net_metrics;
+      out.oos_net = ro.net_metrics;
 
       Compare(out, min_oos_trades);
       out.status = GZ_OOS_OK;

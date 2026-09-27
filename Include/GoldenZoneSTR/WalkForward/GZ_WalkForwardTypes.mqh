@@ -206,6 +206,10 @@ struct GZ_WalkForwardWindow
    bool        low_validation_trades;
    GZ_TradeStats val_stats;                // selected value on the validation slice
    GZ_RiskStats  val_risk;
+   //--- Cost-Unification Sub-phase B (spec Bug 2): parallel net-of-cost
+   //--- summary for the SAME validation slice/selected value - available
+   //--- whenever cfg.base_config.cost_config.configured=true.
+   GZ_NetSummary val_net;
    bool        baseline_val_ran;
    GZ_TradeStats baseline_val_stats;       // fixed BASELINE value on the same validation slice (what selection is compared against)
 
@@ -222,7 +226,7 @@ struct GZ_WalkForwardWindow
       selected_value = 0.0;
       train_stats.Clear();
       validation_ran = false; low_validation_trades = false;
-      val_stats.Clear(); val_risk.Clear();
+      val_stats.Clear(); val_risk.Clear(); val_net.Clear();
       baseline_val_ran = false; baseline_val_stats.Clear();
      }
 
@@ -272,6 +276,14 @@ struct GZ_WalkForwardResult
    bool        selection_edge_defined;        // both pooled populations non-empty
    double      selection_edge_expectancy;     // pooled_expectancy - baseline_pooled_expectancy
 
+   //--- Cost-Unification Sub-phase B (spec Bug 2): pooled net-of-cost
+   //--- figures, simple-summed across validated windows' own val_net (same
+   //--- additive-pooling discipline as pooled_net_r above) - available
+   //--- whenever at least one validated window has cost_config.configured.
+   bool        pooled_net_available;
+   double      pooled_net_r_cost_adj;
+   double      pooled_expectancy_cost_adj;
+
    double      mean_train_expectancy;         // mean over validated windows, each window weighted equally
    double      mean_val_expectancy;
    bool        efficiency_defined;
@@ -299,6 +311,7 @@ struct GZ_WalkForwardResult
       pooled_profit_factor = 0.0; pooled_profit_factor_undefined = false;
       baseline_pooled_trades = 0; baseline_pooled_net_r = 0.0; baseline_pooled_expectancy = 0.0;
       selection_edge_defined = false; selection_edge_expectancy = 0.0;
+      pooled_net_available = false; pooled_net_r_cost_adj = 0.0; pooled_expectancy_cost_adj = 0.0;
       mean_train_expectancy = 0.0; mean_val_expectancy = 0.0;
       efficiency_defined = false; walk_forward_efficiency = 0.0;
       distinct_selected_values = 0; most_common_selected_count = 0; selection_changes = 0;

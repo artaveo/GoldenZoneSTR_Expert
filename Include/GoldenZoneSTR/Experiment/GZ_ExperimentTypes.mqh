@@ -75,6 +75,7 @@
 #include "..\Entry\GZ_EntryTypes.mqh"
 #include "..\Exit\GZ_ExitTypes.mqh"
 #include "..\Metrics\GZ_MetricsTypes.mqh"
+#include "..\Cost\GZ_CostTypes.mqh"
 
 #define GZ_MAX_EXPERIMENT_WARNINGS  8
 
@@ -158,6 +159,21 @@ struct GZ_ExperimentConfig
    bool                 use_max_concurrent_setups;
    int                  max_concurrent_setups;
 
+   //--- Phase "Cost Unification + R-Symmetry Fix" Sub-phase B (spec Bug 2):
+   //--- previously NO field on this struct carried cost configuration at
+   //--- all, so CGZExperimentRunner::Execute() - the single code path every
+   //--- research phase from Phase 9 onward runs through (Experiment Runner,
+   //--- Robustness, Walk-Forward, Final OOS, Phase 15.5) - was structurally
+   //--- incapable of producing a cost-aware result, no matter what the EA's
+   //--- own cost inputs were set to (only the separate Phase 15.5 RewardBe
+   //--- report ever called CGZCostEngine directly). Reuses the EXISTING
+   //--- GZ_CostConfig struct (GZ_CostTypes.mqh) wholesale, same discipline
+   //--- as every other embedded config above. Defaulted via cost_config.
+   //--- Default(), whose own `configured=false` is the safe NET=GROSS
+   //--- sentinel - any caller that does not explicitly set this field gets
+   //--- byte-identical Gross-only behavior to every pre-this-phase run.
+   GZ_CostConfig        cost_config;
+
    void Default()
      {
       symbol               = "XAUUSD";
@@ -184,6 +200,8 @@ struct GZ_ExperimentConfig
 
       use_max_concurrent_setups = true;
       max_concurrent_setups     = 5;
+
+      cost_config.Default();
      }
   };
 
@@ -206,6 +224,14 @@ struct GZ_ExperimentResult
    datetime                   range_end;             // merely the requested config.range_start/range_end
 
    GZ_MetricsSummary          metrics;              // Phase 8 summary for this experiment's own trades
+
+   //--- Sub-phase B (spec Bug 2): parallel NET-of-cost summary, produced by
+   //--- the SAME CGZCostEngine formula Section I already uses (Phase 15.8),
+   //--- from cfg.cost_config - alongside (never replacing) `metrics` above.
+   //--- available=false / net_equals_gross=true (GZ_NetSummary.Clear()'s own
+   //--- defaults) whenever cost_config.configured=false, so every existing
+   //--- Gross figure anywhere built from this result is untouched.
+   GZ_NetSummary              net_metrics;
 
    string                     warnings[GZ_MAX_EXPERIMENT_WARNINGS]; // design note 5
    int                        warning_count;
@@ -233,6 +259,7 @@ struct GZ_ExperimentResult
       range_start          = 0;
       range_end            = 0;
       metrics.Clear();
+      net_metrics.Clear();
       for(int i=0;i<GZ_MAX_EXPERIMENT_WARNINGS;i++)
          warnings[i] = "";
       warning_count        = 0;

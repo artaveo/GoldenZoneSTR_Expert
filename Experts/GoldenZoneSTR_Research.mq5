@@ -908,10 +908,16 @@ void BuildAndEmitReport()
          report += StringFormat("  %s axis=%s baseline=%.4f points=%d/%d run:\n",
                     res.id, res.param_label, res.baseline_value, res.point_count, res.point_count);
          for(int pi=0; pi<res.point_count; pi++)
-            report += StringFormat("    %s=%.4f -> trades=%d net_r=%.3f expectancy=%.4f%s\n",
+           {
+            GZ_NetSummary pn = res.points[pi].result.net_metrics;
+            string net_txt = (pn.available && !pn.net_equals_gross)
+                              ? StringFormat(" | net(cost-adj): net_r=%.3f expectancy=%.4f", pn.net_r, pn.expectancy)
+                              : "";
+            report += StringFormat("    %s=%.4f -> trades=%d net_r=%.3f expectancy=%.4f%s%s\n",
                        res.param_label, res.points[pi].param_value, res.points[pi].result.trade_count,
                        res.points[pi].result.metrics.trade.net_r, res.points[pi].result.metrics.trade.expectancy,
-                       (pi==res.best_idx)?"  <-- best (see flags below before adopting)":"");
+                       net_txt, (pi==res.best_idx)?"  <-- best (see flags below before adopting)":"");
+           }
          report += StringFormat("  Flags: narrow_peak=%s flat_region=%s unstable_zone=%s parameter_sensitive=%s | safe_to_adopt_best=%s\n",
                     res.narrow_peak?"true":"false", res.flat_region?"true":"false", res.unstable_zone?"true":"false",
                     res.parameter_sensitive?"true":"false", res.safe_to_adopt_best?"true":"false");
@@ -923,6 +929,8 @@ void BuildAndEmitReport()
       report += "unstable_zone above. Each point above is a FULL, independent Phase 2-8 re-simulation\n";
       report += "(NOT a post-hoc mask like Phase 11 - see GZ_RobustnessTypes.mqh design note 1); an\n";
       report += "out-of-domain requested value is skipped and noted, never silently clamped or run anyway.\n";
+      report += "net(cost-adj) figures (Cost-Unification Sub-phase B) print only when InpCostsConfigured=true and\n";
+      report += "costs are non-zero; otherwise NET=GROSS and only the gross net_r/expectancy above apply.\n";
      }
    else
       report += "Skipped (InpRunPhase12=false).\n";
@@ -959,15 +967,21 @@ void BuildAndEmitReport()
             report += StringFormat("     selected=%s=%.4f | train: trades=%d expectancy=%.4f\n",
                        wf.axis_label, ww.selected_value, ww.train_stats.trade_count, ww.train_stats.expectancy);
             if(ww.validation_ran)
+              {
                report += StringFormat("     validation: trades=%d net_r=%.3f expectancy=%.4f max_dd=%.3fR%s | fixed baseline on same slice: trades=%d net_r=%.3f expectancy=%.4f\n",
                           ww.val_stats.trade_count, ww.val_stats.net_r, ww.val_stats.expectancy, ww.val_risk.max_drawdown_r,
                           ww.low_validation_trades?" LOW_VALIDATION_TRADES":"",
                           ww.baseline_val_stats.trade_count, ww.baseline_val_stats.net_r, ww.baseline_val_stats.expectancy);
+               if(ww.val_net.available && !ww.val_net.net_equals_gross)
+                  report += StringFormat("     validation (cost-adj): net_r=%.3f expectancy=%.4f\n", ww.val_net.net_r, ww.val_net.expectancy);
+              }
            }
         }
       report += StringFormat("Pooled out-of-sample (all validated windows): trades=%d winners=%d losers=%d net_r=%.3f expectancy=%.4f win_rate=%.1f%% profit_factor=%s\n",
                  wf.pooled_trades, wf.pooled_winners, wf.pooled_losers, wf.pooled_net_r, wf.pooled_expectancy, wf.pooled_win_rate*100.0,
                  wf.pooled_profit_factor_undefined ? "undefined(no losing R)" : DoubleToString(wf.pooled_profit_factor,3));
+      if(wf.pooled_net_available)
+         report += StringFormat("Pooled out-of-sample (cost-adj): net_r=%.3f expectancy=%.4f\n", wf.pooled_net_r_cost_adj, wf.pooled_expectancy_cost_adj);
       report += StringFormat("Fixed baseline over the SAME validation slices: trades=%d net_r=%.3f expectancy=%.4f | selection edge (pooled minus baseline expectancy)=%s\n",
                  wf.baseline_pooled_trades, wf.baseline_pooled_net_r, wf.baseline_pooled_expectancy,
                  wf.selection_edge_defined ? StringFormat("%.4fR", wf.selection_edge_expectancy) : "undefined");
@@ -1067,6 +1081,8 @@ void BuildAndEmitReport()
                     fo.profit_factor_delta_defined ? DoubleToString(fo.profit_factor_delta,3) : "n/a");
          report += StringFormat("  expectancy (R)              %11.4f %10.4f %+13.4f\n", fo.dev.trade.expectancy, fo.oos.trade.expectancy, fo.expectancy_delta);
          report += StringFormat("  net R                       %11.3f %10.3f\n", fo.dev.trade.net_r, fo.oos.trade.net_r);
+         if(fo.dev_net.available && !fo.dev_net.net_equals_gross)
+            report += StringFormat("  net R (cost-adj)             %11.3f %10.3f\n", fo.dev_net.net_r, fo.oos_net.net_r);
          report += StringFormat("  max drawdown (R)            %11.3f %10.3f %+13.3f\n", fo.dev.risk.max_drawdown_r, fo.oos.risk.max_drawdown_r, fo.max_dd_delta);
          report += StringFormat("  max losing streak           %11d %10d\n", fo.dev.risk.max_losing_streak, fo.oos.risk.max_losing_streak);
          report += StringFormat("  avg MAE (R)                 %11.3f %10.3f %+13.3f\n", fo.dev.behavior.avg_mae_r, fo.oos.behavior.avg_mae_r, fo.avg_mae_delta);
@@ -1491,18 +1507,27 @@ void Phase157PostRun(bool pipeline_ran)
         }
       if(base_cfg && have_src)
         {
-         double dw = MathAbs(src_win - InpP155RefWinRate);
-         double de = MathAbs(src_exp - InpP155RefExpectancy);
-         double dp = MathAbs(src_pf - InpP155RefPF);
-         double dn = MathAbs(src_net - InpP155RefNetR);
-         double dd = MathAbs(src_dd - InpP155RefMaxDD);
-         bool ok = (src_trades==InpP155RefTrades) && (dw<=0.0006) && (de<=0.0002) && (dp<=0.0015) && (dn<=0.6) && (dd<=0.05);
+         GZ_BaselineActiveConfig active; active.Clear();
+         active.tp_r_multiple = InpTpRMultiple;
+         active.be_trigger_r  = InpBeTriggerR;
+         active.use_session_hour_gate = InpUseSessionHourGate;
+         active.use_real_spread_fills = InpUseRealSpreadFills;
+         active.use_min_risk_gate     = InpUseMinRiskGate;
+         active.allow_concurrent_same_direction_setups = InpAllowConcurrentSameDirectionSetups;
+         active.allow_survive_opposite_break            = InpAllowSurviveOppositeBreak;
+         active.use_daily_loss_limit  = InpUseDailyLossLimit;
+         active.costs_configured      = InpCostsConfigured;
+
+         string detail;
+         ENUM_GZ_BASELINE_VERDICT verdict = GZBaselineCompare(
+            src_trades, src_win, src_exp, src_pf, src_net, src_dd,
+            InpP155RefTrades, InpP155RefWinRate, InpP155RefExpectancy, InpP155RefPF, InpP155RefNetR, InpP155RefMaxDD,
+            active, detail);
          g_p157_regression_evaluated = true;
-         P157AddVal("R07_BASELINE_REGRESSION_TP2_BE_OFF", ok,
-                    StringFormat("[REGRESSION_ONLY_LEGACY] " + src_name + " over the LEGACY_DEV slice, TP=2R BE off: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.3f max_dd=%.2f | previously validated baseline: trades=%d win=%.4f exp=%.4f pf=%.3f net_r=%.1f max_dd=%.2f | |diff| win=%.5f exp=%.5f pf=%.4f net_r=%.3f max_dd=%.3f (tolerances = rounding of the printed baseline; trade count exact). %s",
-                                 src_trades, src_win, src_exp, src_pf, src_net, src_dd,
-                                 InpP155RefTrades, InpP155RefWinRate, InpP155RefExpectancy, InpP155RefPF, InpP155RefNetR, InpP155RefMaxDD, dw, de, dp, dn, dd,
-                                 ok ? "" : "REGRESSION CHANGED UNEXPECTEDLY - STOP: do not continue the historical expansion until the cause is identified."));
+         //--- BASELINE_NOT_APPLICABLE is NOT a failure (spec Bug 5: distinct from
+         //--- both PASS and a genuine FAIL) - only GZ_BASELINE_FAIL fails R07.
+         P157AddVal("R07_BASELINE_REGRESSION_TP2_BE_OFF", verdict!=GZ_BASELINE_FAIL,
+                    "[REGRESSION_ONLY_LEGACY] " + src_name + " over the LEGACY_DEV slice: " + detail);
         }
       else
          g_p157_na_notes += "R07 not evaluated: the main pipeline was not run with TP=2R / BE off (InpTpRMultiple/InpBeTriggerR changed).\n";
@@ -1722,7 +1747,10 @@ void EmitPhase158Report()
    if(g_cost_cfg.NetEqualsGross()) s += "NET = GROSS: costs are not deliberately set (or all zero).\n";
    s += "Formula: cost_price = spread_pts*point + 2*slippage_pts*point + commission_price; commission_price = open*percent/100 (PERCENT, once at open) or USD_per_lot/contract (FIXED); net_R = gross_R - cost_price/initial_risk.\n";
    s += "Venue proposal (FundedNext MT5 gold, 0.0016% of open price once at open, structure effective 2026-01-12) is applied to ALL history on purpose; user must confirm the account model. Swap is NOT modelled.\n";
-   s += "Approximation: bid-based candles; entry-bar spread charged once as proxy for ask/bid. Error direction: cost UNDER-stated where the exit spread is wider than the entry spread (news, rollover, fast stops); short TP/SL trigger on the ask is not modelled.\n";
+   if(g_main_net_ready && g_main_net.spread_excluded_real_fills)
+      s += "Spread excluded from this layer: InpUseRealSpreadFills=true this run, so a short's TP/SL are already triggered by the ask (and a long's entry already fills at the ask) INSIDE the simulation itself - this post-hoc layer therefore deliberately excludes spread from cost_price here, to avoid double-counting it (Cost-Unification Sub-phase C). Commission and slippage above are still fully charged.\n";
+   else
+      s += "Approximation (InpUseRealSpreadFills=false this run): bid-based candles; entry-bar spread charged once as proxy for ask/bid. Error direction: cost UNDER-stated where the exit spread is wider than the entry spread (news, rollover, fast stops). This is the ONLY place spread cost is modelled when InpUseRealSpreadFills=false.\n";
    if(g_main_net_ready && g_main_net.available)
      {
       s += StringFormat("MAIN RUN (gross | net): trades=%d | expectancy %.4f | %.4f | net R %.2f | %.2f | PF %s | %s | max DD %.2f | %.2f | win rate %.1f%% (R>0) | %.1f%% (net R>0) | avg cost %.4fR max %.4fR (>=0.25R: %d trades)\n",
@@ -1854,13 +1882,13 @@ void EmitFcisReport()
                      g_setup_sm.CountTerminalByReason(GZ_CANCEL_OUTSIDE_SESSION_HOURS), g_setup_sm.CountTerminalByReason(GZ_CANCEL_RISK_TOO_TIGHT));
    s += "\n";
 
-   s += "--- D. Net-of-cost layer interaction (Phase 15.8) ---\n";
+   s += "--- D. Net-of-cost layer interaction (Phase 15.8 / Cost-Unification Sub-phase C) ---\n";
    if(InpUseRealSpreadFills && InpCostsConfigured && InpCostSpreadMode==GZ_COST_SPREAD_RECORDED)
-      s += "WARNING: InpUseRealSpreadFills=true AND the Phase 15.8 post-hoc layer is charging RECORDED spread too - spread is being deducted TWICE (once inside the simulation, once again post-hoc). Set InpCostSpreadMode=GZ_COST_SPREAD_FIXED with InpCostFixedSpreadPts=0 (or leave only commission/slippage configured) while InpUseRealSpreadFills=true.\n";
+      s += "INFORMATIONAL (not a risk to avoid): InpUseRealSpreadFills=true AND InpCostSpreadMode=RECORDED - the engine already excludes the post-hoc spread component from cost in this case (GZCost_ComputeCostPrice forces it to 0 structurally, regardless of spread_mode), because spread is already inside the simulated fill price. Commission and slippage are still charged normally. Nothing to change here.\n";
    else if(InpUseRealSpreadFills)
-      s += "InpUseRealSpreadFills=true; Phase 15.8 post-hoc spread is not concurrently double-charged in this run's configuration.\n";
+      s += "InpUseRealSpreadFills=true; Phase 15.8 post-hoc spread is structurally excluded from cost in this run's configuration.\n";
    else
-      s += "InpUseRealSpreadFills=false - no interaction with the Phase 15.8 net-of-cost layer in this run.\n";
+      s += "InpUseRealSpreadFills=false - no interaction with the Phase 15.8 net-of-cost layer in this run; the post-hoc spread_mode/fixed_spread_pts/recorded-spread inputs are the ONLY place spread cost is modelled.\n";
    s += "\n";
 
    s += "--- E. Automated tests T236-T249 (synthetic data) ---\n";
@@ -2406,7 +2434,10 @@ int OnInit()
       if(!g_main_skipped)
         {
          g_main_detail.Capture(g_exit_engine, g_journal_engine, g_measure_from);
-         g_cost_engine.Evaluate(GetPointer(g_main_detail), m1, g_main_net);
+         //--- Sub-phase C (spec Bug 3): pass this run's own use_real_spread_fills
+         //--- so the post-hoc layer can never double-charge spread against the
+         //--- in-simulation real-spread-fill model.
+         g_cost_engine.Evaluate(GetPointer(g_main_detail), m1, g_main_net, InpUseRealSpreadFills);
          g_main_net_ready = true;
         }
       g_logger.Info("Metrics", StringFormat(
@@ -2645,6 +2676,12 @@ int OnInit()
       exp_cfg.daily_loss_limit_r                     = InpDailyLossLimitR;
       exp_cfg.use_max_concurrent_setups              = InpUseMaxConcurrentSetups;
       exp_cfg.max_concurrent_setups                  = InpMaxConcurrentSetups;
+      //--- Cost-Unification Sub-phase B (spec Bug 2): previously missing here
+      //--- too - the exact same class of bug already found/fixed once for the
+      //--- FCIS gates above. Without this line, every phase built on exp_cfg
+      //--- (Robustness, Walk-Forward, Final OOS, Phase 15.5) would silently
+      //--- stay Gross-only regardless of InpCostsConfigured/InpCost* below.
+      exp_cfg.cost_config                            = g_cost_cfg;
 
       string dataset_id = StringFormat("%s_M1M5_RECENT_%s_%s", InpSymbol,
                            TimeToString(exp_cfg.range_start, TIME_DATE), TimeToString(exp_cfg.range_end, TIME_DATE));

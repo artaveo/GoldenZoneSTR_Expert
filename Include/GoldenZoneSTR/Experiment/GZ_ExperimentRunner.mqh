@@ -39,6 +39,7 @@
 #include "..\Time\GZ_Session.mqh"
 #include "..\Diagnostics\GZ_Logger.mqh"
 #include "..\RewardBe\GZ_RunDetail.mqh"
+#include "..\Cost\GZ_CostEngine.mqh"
 
 class CGZExperimentRunner
   {
@@ -141,6 +142,25 @@ private:
       //--- detail. NULL (every pre-15.5 caller) = exactly the old behavior.
       if(detail!=NULL)
          detail.Capture(exit_engine, journal_engine, cfg.measure_from);
+
+      //--- Sub-phase B (spec Bug 2): parallel net-of-cost summary, reusing
+      //--- the EXISTING CGZCostEngine (Phase 15.8) that Section I already
+      //--- calls - no second implementation of the cost formula. A fresh
+      //--- local detail snapshot is captured here whenever the caller did
+      //--- not already ask for one (`detail`==NULL), purely for this cost
+      //--- pass's own use - it changes nothing else and is discarded right
+      //--- after. Sub-phase C (Bug 3): the run's OWN
+      //--- cfg.exit_config.use_real_spread_fills is passed through so this
+      //--- can never double-charge spread against an in-simulation
+      //--- real-spread-fill run.
+      CGZRunDetail  local_detail;
+      CGZRunDetail *cost_detail = (detail!=NULL) ? detail : GetPointer(local_detail);
+      if(detail==NULL)
+         cost_detail.Capture(exit_engine, journal_engine, cfg.measure_from);
+
+      CGZCostEngine cost_engine;
+      cost_engine.Configure(cfg.cost_config, cfg.time_config, cfg.session_profile);
+      cost_engine.Evaluate(cost_detail, m1, out.net_metrics, cfg.exit_config.use_real_spread_fills);
 
       if(out.trade_count==0)
          out.AddWarning("NO_TRADES_PRODUCED");

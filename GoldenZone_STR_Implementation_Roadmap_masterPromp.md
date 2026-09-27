@@ -58,42 +58,43 @@ T250-T256: رفتار Switch A/B (تنها، هردو، تداخل). T257-T261: 
 ### تغییر دیگه: کامنت جلوی همهٔ Inputها حذف شد
 چون MetaTrader 5 وقتی جلوی یک `input` کامنت (`//...`) باشه، توی پنل Inputs **به‌جای اسم متغیر همون کامنت رو نشون می‌ده**، و کاربر ترجیح داد اسم واقعی متغیرها رو ببینه، تمام کامنت‌های توضیحی جلوی هر ۱۲۲ خط `input` این فایل حذف شدن. یعنی از این فاز به بعد، پنل Inputs متاتریدر دقیقاً اسم متغیر (`InpAllowConcurrentSameDirectionSetups` و امثالش) رو نشون می‌ده، نه توضیح. توضیحات هر ورودی فقط داخل خودِ کد (بالای هر بخش، به‌صورت کامنت جداگانه) و در چت باقی موندن.
 
-### وضعیت فعلی (تا پایان همون فاز اول)
+### وضعیت فعلی / قدم بعدی
 اجراهای قبلی (baseline / A-only / B-only / both-on) همه بدون اسپرد/هزینه گرفته شده بودن - قابل مقایسه نیستن با اجراهای بعدی. کاربر قصد داره یک اجرای تازه با هر دو Switch A و B روشن (به‌همراه Daily Loss Limit و Max Concurrent که الان دیفالتشون روشنه) بگیره و وین‌ریت/PF رو ببینه. فاز ۱۶ (Research Freeze) هنوز شروع نشده.
 
 ---
 
-## پیوست دوم: دو باگ واقعی پیدا و فیکس شدن + سقف جدید ستاپ‌های هم‌زمان (FIFO) + تنظیم دیفالت‌های سریع‌تر
+## پیوست: فاز "Cost Unification + R-Symmetry Fix"
+بعد از فاز FCIS و فاز Concurrency، کاربر متوجه چند تناقض در گزارش‌ها شد (وین‌ریت لانگ/شورت تقریباً یکسان ولی نت-R خیلی متفاوت؛ گزارش‌های Phase 8/9/12/13/15 هزینه رو حساب نمی‌کردن با اینکه InpCostsConfigured=true بود؛ متن گزارش ادعای اشتباه دربارهٔ short ask-fill می‌داد؛ رفرنس‌های بیس‌لاین ۴۱۲-تریدی با هم نمی‌خوندن). Claude مخزن گیت‌هاب رو کلون کرد، ۵ باگ واقعی رو در کد پیدا کرد و پیاده‌سازی کرد.
 
-### باگ ۱ — `GZ_ExperimentConfig` هیچ فیلدی برای سوییچ‌های جدید نداشت
-`CGZExperimentRunner::Execute()` (که فاز ۹، ۱۱، ۱۲، ۱۳، ۱۵، ۱۵.۵ **همه** ازش رد می‌شن) خودش مستقیم `setup_sm.Init(...)` و `simulator.Run(...)` رو صدا می‌زد، ولی این فراخوانی‌ها هیچ‌وقت آپدیت نشده بودن. یعنی Session Hour Gate (فاز FCIS)، Switch A/B، و Daily Loss Limit توی `GZ_ExperimentConfig` اصلاً فیلد نداشتن — پس این سه‌تا همیشه توی فاز ۹/۱۱/۱۲/۱۳/۱۵/۱۵.۵ خاموش می‌موندن، حتی اگه توی Inputs روشن شده بودن.
-**فیکس:** پنج فیلد جدید به `GZ_ExperimentConfig` اضافه شد (`use_session_hour_gate`, `allow_concurrent_same_direction_setups`, `allow_survive_opposite_break`, `use_daily_loss_limit`, `daily_loss_limit_r`)، و `Execute()` این‌ها رو به `setup_sm.Init(...)`/`simulator.Run(...)` پاس می‌ده. چون همه این فازها از یک `exp_cfg` مشترک کپی می‌گیرن، فیکس فقط توی یه نقطه (ساخت `exp_cfg` در main .mq5) لازم بود. Max Concurrent Trades مشکلی نداشت (خودش هر بار مستقیم `exit_engine.OpenCount()` رو حساب می‌کنه).
+### باگ ۱ — عدم‌تقارن R بین لانگ و شورت (تأیید شد، جدی بود)
+در `GZ_ExitEngine.mqh`، `initial_risk` یک شورت هیچ‌وقت هزینهٔ اسپردی که در خروج (ask) پرداخت می‌شه رو پیش‌بینی نمی‌کرد، در حالی که لانگ چون قیمت ورودش از اول ask بود، این هزینه از قبل توی `initial_risk` اش بود. نتیجه: SL شورت همیشه کمی بدتر از -1R می‌بست و TP شورت هم کمی کمتر از هدف. راه‌حل: دو تابع جدید `AnticipatedSlPriceIfShort` و `AnticipatedTpLevelIfShort` که هم مخرج ریسک و هم سطح TP ذخیره‌شدهٔ شورت رو طوری اصلاح می‌کنن که SL دقیقاً -1.000R و TP دقیقاً روی مضرب کانفیگ‌شده ببنده - دقیقاً مثل لانگ. با `InpUseRealSpreadFills=false` رفتار کاملاً بدون تغییر می‌مونه (تست‌شده). تست‌های T269-T271.
+تأیید واقعی از اجرای شما: `AvgWinR=1.000 AvgLossR=0.999` در گزارش اصلی - قبل از فیکس این دو عدد برای شورت به‌وضوح از ۱ فاصله داشتن.
 
-### باگ ۲ — سقف "۳ ترید هم‌زمان" توی یه کندل واحد رعایت نمی‌شد
-چک سقف فقط یه‌بار در شروع هر کندل عدد "الان چندتا ترید بازه" رو می‌خوند و همون عدد رو برای **همهٔ** ستاپ‌های اون کندل چک می‌کرد. پس اگه چند ستاپ دقیقاً روی یه کندل شرط ورودشون فعال می‌شد، همه هم‌زمان رد می‌شدن (Peak واقعی به ۱۱ رسید با سقف=۳).
-**فیکس:** یه شمارندهٔ زندهٔ محلی (`open_running`) داخل `GZ_EntryEngine::OnBar()` که بلافاصله بعد از هر ورود موفق، همون‌جا آپدیت می‌شه.
+### باگ ۲ — هزینه (کمیسیون+اسلیپیج) فقط توی گزارش Phase 15.5 حساب می‌شد
+`GZ_ExperimentConfig` هیچ فیلدی برای کانفیگ هزینه نداشت، پس `CGZExperimentRunner::Execute()` - که Phase 9/12/13/15 همه از همون رد می‌شن - اصلاً نمی‌تونست هزینه حساب کنه. یک فیلد `cost_config` به `GZ_ExperimentConfig` و یک فیلد موازی `net_metrics` به `GZ_ExperimentResult` اضافه شد؛ حالا Robustness/Walk-Forward/Final OOS همه خودکار این رو به ارث می‌برن (چون `GZ_ExperimentConfig` رو کامل کپی می‌کنن). گزارش‌های Phase 12/13/15 هم آپدیت شدن تا ستون‌های Net رو کنار Gross چاپ کنن (این بخش رو بعد از یک بازبینی اضافه اضافه کردم، چون اول فقط داده رو وصل کرده بودم، متن گزارش رو نه). تست‌های T272-T274.
 
-### ویژگی جدید: `InpMaxConcurrentSetups` — سقف FIFO روی خودِ ستاپ‌های فعال (نه فقط تریدهای باز)
-**چرا لازم شد:** با روشن‌بودن Switch A/B، تعداد ستاپ‌های *فعال* (نه لزوماً وارد-شده) می‌تونه به صدها تا برسه (توی یه اجرای واقعی به ۵۷۳ تا رسید) — چون دو مکانیزم قدیمی که جلوی تلنبارشدن رو می‌گرفتن (`NEW_VALID_SETUP` و `OPPOSITE_BREAK`) دقیقاً همونایی بودن که خاموش کردیم. این باعث می‌شد هر کندل، Entry Engine مجبور باشه روی صدها ستاپ محاسبهٔ واقعی انجام بده (نه فقط رد کردن ارزون) → یه اجرای فاز ۱۵.۵ (۲۹ ترکیب) از چند دقیقه به ~۹ ساعت رسید.
-**راه‌حل:** یه سقف FIFO، **مستقل از جهت** (Long و Short با هم توی یه صف): وقتی ستاپ جدید می‌خواد سقف رو رد کنه، قدیمی‌ترین ستاپ فعال (فارغ از جهتش) کنسل می‌شه با دلیل جدید `GZ_CANCEL_MAX_CONCURRENT_SETUPS`.
-- ورودی‌ها: `InpUseMaxConcurrentSetups` (پیش‌فرض **`true`** — بر خلاف بقیهٔ سوییچ‌های این فاز)، `InpMaxConcurrentSetups` (پیش‌فرض `5`).
-- **چرا پیش‌فرضش روشنه در حالی که بقیه خاموش‌ان:** وقتی Switch A و B هر دو خاموش باشن (baseline قدیمی)، همیشه حداکثر ۱ ستاپ فعال وجود داره، پس سقف ۵تایی هیچ‌وقت وارد عمل نمی‌شه — یعنی رگرسیون ۴۱۲-تریدی دست‌نخورده می‌مونه چه این سوییچ روشن باشه چه خاموش. فقط وقتی Switch A/B روشن بشن واقعاً کار می‌کنه (دقیقاً همون‌جایی که لازمه).
-- تست‌های T266 (رگرسیون، خاموش)، T267 (سقف=۵، ششمی قدیمی‌ترین رو حذف می‌کنه)، T268 (اثبات مستقل‌بودن از جهت: یه لگ Short باعث حذف قدیمی‌ترین Long می‌شه) اضافه شدن.
-- گزارش‌دهی: بخش D3 جدید توی `GZ_PhaseConcurrency_Report.txt`.
+### باگ ۳ — احتمال دوبار کم‌شدن اسپرد
+اگه `InpUseRealSpreadFills=true` و `InpCostSpreadMode=RECORDED` هر دو با هم روشن بودن، اسپرد هم توی شبیه‌سازی و هم توی لایهٔ هزینهٔ پسا-اجرا کم می‌شد. راه‌حل ساختاری (نه فقط هشدار متنی): `GZCost_ComputeCostPrice` یک پارامتر `real_spread_fills_active` گرفت که وقتی true باشه، جزء اسپرد رو در کد صفر می‌کنه، مهم نیست spread_mode چی باشه. تست T275.
 
-### بررسی یه مشکوکِ دیگه که در نهایت باگ نبود
-کاربر یه خط توی گزارش فاز ۱۵.۵ دید ("R is GROSS: no spread/commission/slippage cost model exists") و فکر کرد چون هزینهٔ واقعی الان روشنه، این خط اشتباهه. بررسی نشون داد این خط فقط دربارهٔ بخش A (ماتریکس Gross) صحبت می‌کنه؛ بخش I همون گزارش («Net-of-cost layer») از قبل NET واقعی (با اسپرد/کارمزد/اسلیپیج) رو جدا محاسبه و گزارش می‌کنه. **این باگ نبود، به همین دلیل دست‌نخورده موند.**
+### باگ ۴ — متن قدیمی و اشتباه در گزارش‌ها
+جمله‌ای که می‌گفت "خروج شورت واقعاً روی ask زده می‌شه و این مدل نشده" - این از قبل از FCIS Step 2 بود و دیگه درست نیست (الان واقعاً مدل شده). این جمله در **سه جای مختلف** پیدا و اصلاح شد: `GZ_RewardBeEngine.mqh` (بخش I گزارش Phase 15.5)، خودِ فایل اصلی `.mq5` (بخش E گزارش Phase 15.8) و کامنت طراحی داخل `GZ_CostTypes.mqh`. متن جدید بسته به `InpUseRealSpreadFills` شاخه می‌ره: اگه true باشه می‌گه "اسپرد از این لایه به‌خاطر جلوگیری از دوبار حساب کردن حذف شده"، اگه false باشه توضیح تقریبی قدیمی رو با محدودیتش نگه می‌داره.
 
-### تنظیمات پیش‌فرض جدید (برای تست سریع‌تر تک‌ستاپ)
-- `InpTpRMultiple` پیش‌فرض: `2.0` → **`1.0`** (بدون ریسک‌فری، چون `InpBeTriggerR` از قبل پیش‌فرضش `0.0`/خاموش بود)
-- `InpRunPhase155` پیش‌فرض: `true` → **`false`** (دیگه ماتریکس ۲۹تایی TP×BE به‌صورت پیش‌فرض اجرا نمی‌شه؛ فقط پایپ‌لاین اصلی تک‌ستاپ. برای چک‌کردن کل ماتریکس، این ورودی رو دستی `true` کن)
+### باگ ۵ — رفرنس‌های بیس‌لاین (۴۱۲ ترید/۵۰.۷٪/...) در چند جا تکراری بودن
+فقط **دو** جای واقعی این مقایسه بود (نه سه‌تا که حدس اولیه بود): `R07` توی فایل اصلی و `V03` توی `GZ_RewardBeEngine.mqh`. هر دو الان از یک تابع مشترک (`GZBaselineCompare`, فایل جدید `GZ_BaselineCompare.mqh`) استفاده می‌کنن که یک نتیجهٔ سوم و مشخص هم داره: `BASELINE_NOT_APPLICABLE_THIS_CONFIG` - وقتی کانفیگ فعلی (TP، سوییچ‌های FCIS، هزینه) با کانفیگی که این رفرنس‌ها براش ثبت شدن یکی نیست، این پیام میاد، نه FAIL و نه PASS. تست‌های T276-T277.
 
-### تعداد تست‌های نهایی این فاز: T250 تا T268 (۱۹ تست، مجموع کل پروژه ۲۶۸ تا)
+### تست‌های جدید: T269 تا T277 (فایل جدید `GZ_CostRSymTests.mqh`)
+مجموع تست‌ها الان ۲۷۷ تاست. یک انحراف کوچیک از متن اولیهٔ پرامپت لازم شد و به کاربر اطلاع داده شد: فرمول TP شورت هم (نه فقط `initial_risk`) باید اصلاح می‌شد تا TP دقیقاً روی مضرب کانفیگ‌شده ببنده.
 
-### وضعیت فعلی / قدم بعدی (به‌روز)
-اجرای فعلی کاربر (v6، هر دو Switch A/B روشن، ۹ ساعت طول کشید) هنوز در حال اجراست؛ بعد از اتمامش باید فاز ۱۵.۵ دوباره چک بشه که آیا سوییچ‌ها درست بهش رسیدن یا نه (فایل قبلی که چک شد مال قبل از فیکس `exp_cfg` بود، N=۴۱۲ نشون می‌داد که طبیعی بود). قدم بعدی: با پیکربندی پیش‌فرض جدید (TP=1R تک‌ستاپ)، دراودان معقول پیدا کنیم، بعد یکی‌یکی حالت‌های تعداد ترید هم‌زمان و سوییچ‌های مخالف‌جهت رو بررسی کنیم، بعد فاز ۱۵.۹ (Selection Protocol)، بعد Final OOS جدید، بعد فاز ۱۶.
+### فایل‌های تغییر یافته
+`GZ_ExitEngine.mqh` (باگ ۱)، `GZ_CostTypes.mqh` + `GZ_CostEngine.mqh` (باگ ۳)، `GZ_ExperimentTypes.mqh` + `GZ_ExperimentRunner.mqh` (باگ ۲)، `GZ_WalkForwardTypes.mqh` + `GZ_WalkForwardEngine.mqh` و `GZ_FinalOosTypes.mqh` + `GZ_FinalOosEngine.mqh` (چاپ Net در گزارش)، `GZ_RewardBeEngine.mqh` (باگ‌های ۳/۴/۵)، `GZ_BaselineCompare.mqh` و `GZ_CostRSymTests.mqh` (جدید)، `GZ_TestHarness.mqh` (قلاب تست جدید)، فایل اصلی `.mq5` (R07، بخش D و E گزارش، اتصال `exp_cfg.cost_config`).
+هیچ ورودی/کلاس/متد/فایلی تغییر نام نداد.
+
+### وضعیت
+پیاده‌سازی شده و توسط کاربر روی MT5 واقعی اجرا و تأیید شده (۲۷۷/۲۷۷ تست PASS، ماتریس LONG/SHORT حالا متقارنه). قبل از این اجرا، فقط بازبینی دستی کد انجام شده بود (این محیط کامپایلر MT5 نداره).
 
 ---
+
+
 
 # Phase 1 — Data Layer + Validator + Time Engine
 ### هدف
@@ -692,5 +693,8 @@ GoldenZone STR — Implementation Roadmap v1.3
 (v1.1: added the Deliverable Convention paragraph after Phase First_Change_In_Structure.
  v1.2: added the "Concurrent Same-Direction Setups + Opposite-Break Survival" appendix above,
  including its Daily Loss Limit / Max Concurrent Trades follow-up and the input-comment removal.
- v1.3: added the second appendix - GZ_ExperimentConfig wiring fix, same-bar Max Concurrent Trades
- fix, the new InpMaxConcurrentSetups FIFO cap, and the InpTpRMultiple/InpRunPhase155 default changes.)
+ v1.3: added the "Cost Unification + R-Symmetry Fix" appendix above - Long/Short R-symmetry fix,
+ cost-engine wiring into CGZExperimentRunner::Execute() (and Robustness/Walk-Forward/Final OOS
+ report printing), the structural double-spread-charge guard, three corrected copies of a stale
+ report claim, and one shared baseline-comparison function with a new NOT_APPLICABLE verdict;
+ tests T269-T277, confirmed by the user in real MT5.)

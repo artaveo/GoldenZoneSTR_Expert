@@ -136,8 +136,12 @@ public:
      { return GZCost_CommissionPrice(open_price, m_cfg); }
 
    //--- total cost of one trade in price units per ounce. 0.0 when the costs are not deliberately configured.
-   double            CostPrice(double open_price, double spread_pts, double slippage_pts) const
-     { return GZCost_ComputeCostPrice(open_price, spread_pts, slippage_pts, m_cfg); }
+   //--- `real_spread_fills_active` (Sub-phase C, spec Bug 3): pass the run's
+   //--- OWN use_real_spread_fills value - forces the spread component to
+   //--- zero structurally when the simulator already charged it inside the
+   //--- fill price. Default false = pre-this-phase behavior.
+   double            CostPrice(double open_price, double spread_pts, double slippage_pts, bool real_spread_fills_active=false) const
+     { return GZCost_ComputeCostPrice(open_price, spread_pts, slippage_pts, m_cfg, real_spread_fills_active); }
 
    //--- spread of the ENTRY M1 bar (exact bar time preferred; else the last bar at/before it within one M5 window).
    //--- found=false when no such bar exists.
@@ -152,8 +156,11 @@ public:
      }
 
    //--- net R of every trade in `d` (same order) at the given slippage. spread_used[] = points charged.
+   //--- `real_spread_fills_active` (Sub-phase C, spec Bug 3): see CostPrice()
+   //--- above - default false preserves pre-this-phase behavior exactly.
    void              NetSeries(CGZRunDetail *d, const MqlRates &m1[], double slippage_pts,
-                               double &net_r[], double &cost_r[], double &spread_used[], int &missing) const
+                               double &net_r[], double &cost_r[], double &spread_used[], int &missing,
+                               bool real_spread_fills_active=false) const
      {
       int n = d.count;
       ArrayResize(net_r, n); ArrayResize(cost_r, n); ArrayResize(spread_used, n);
@@ -172,11 +179,15 @@ public:
                if(!found) missing++;
               }
            }
-         double cost_price = CostPrice(d.entry_price[i], spread, slippage_pts);
+         double cost_price = CostPrice(d.entry_price[i], spread, slippage_pts, real_spread_fills_active);
          double risk = d.initial_risk[i];
          double c_r = (risk > 0.0) ? cost_price/risk : 0.0;
          cost_r[i] = c_r;
          net_r[i] = d.realized_r[i] - c_r;
+         //--- spread_used[] stays the RECORDED/FIXED spread value for reporting
+         //--- purposes even when real_spread_fills_active zeroed its cost
+         //--- contribution above - so the report can still show what spread
+         //--- mode/value was configured, distinct from what was CHARGED.
          spread_used[i] = spread;
         }
      }
@@ -201,7 +212,12 @@ public:
      }
 
    //--- Full net evaluation of one run's closed-trade population.
-   void              Evaluate(CGZRunDetail *d, const MqlRates &m1[], GZ_NetSummary &out)
+   //--- `real_spread_fills_active` (Sub-phase C, spec Bug 3): pass the run's
+   //--- OWN use_real_spread_fills value so this post-hoc layer can never
+   //--- double-charge spread against the in-simulation real-spread-fill
+   //--- model - default false preserves pre-this-phase behavior for any
+   //--- existing caller that has not been updated to pass it yet.
+   void              Evaluate(CGZRunDetail *d, const MqlRates &m1[], GZ_NetSummary &out, bool real_spread_fills_active=false)
      {
       out.Clear();
       out.net_equals_gross = m_cfg.NetEqualsGross();
@@ -209,10 +225,11 @@ public:
       if(n <= 0) return;
       out.available = true;
       out.trades = n;
+      out.spread_excluded_real_fills = real_spread_fills_active && m_cfg.configured;
 
       double net[], cost[], spr[];
       int missing = 0;
-      NetSeries(d, m1, m_cfg.slippage_pts, net, cost, spr, missing);
+      NetSeries(d, m1, m_cfg.slippage_pts, net, cost, spr, missing, real_spread_fills_active);
       out.spread_missing = missing;
 
       double sum_cost = 0.0, sum_spread = 0.0;
@@ -245,7 +262,7 @@ public:
         {
          double net2[], cost2[], spr2[];
          int miss2 = 0;
-         NetSeries(d, m1, GZ_COST_SENS_POINTS[k], net2, cost2, spr2, miss2);
+         NetSeries(d, m1, GZ_COST_SENS_POINTS[k], net2, cost2, spr2, miss2, real_spread_fills_active);
          double s_sum = 0.0, s_exp = 0.0, s_pf = 0.0;
          bool   s_pfu = false;
          AggSimple(net2, s_sum, s_exp, s_pf, s_pfu);

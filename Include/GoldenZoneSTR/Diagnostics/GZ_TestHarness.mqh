@@ -72,6 +72,7 @@
 #include "..\Dataset\GZ_PartitionTests.mqh"
 #include "..\FCIS\GZ_FcisTests.mqh"
 #include "..\Setup\GZ_ConcurrencyTests.mqh"
+#include "..\RewardBe\GZ_CostRSymTests.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -5728,6 +5729,18 @@ public:
         {
          GZ_TestResult ccr = conc_suite.GetResult(cci);
          AddResult(ccr.id, ccr.passed, ccr.detail);
+        }
+
+      //--- Phase "Cost Unification + R-Symmetry Fix" (T269-T277): R-symmetry
+      //--- fix, cost-engine wiring into CGZExperimentRunner::Execute() and its
+      //--- downstream consumers, the double-spread-charge guard, and the
+      //--- shared InpP155Ref* baseline-comparison function - synthetic data only
+      CGZCostRSymTests rsym_suite(m_logger);
+      rsym_suite.RunAll();
+      for(int rsi=0; rsi<rsym_suite.ResultCount(); rsi++)
+        {
+         GZ_TestResult rsr = rsym_suite.GetResult(rsi);
+         AddResult(rsr.id, rsr.passed, rsr.detail);
         }
      }
 

@@ -37,15 +37,23 @@
 //|    user confirms - nothing here guesses any other broker cost.      |
 //| 4) SWAP IS NOT MODELLED. Trades that cross a server midnight        |
 //|    (rollover) are only COUNTED so the omission can be judged.       |
-//| 5) APPROXIMATION (direction of error): candles are BID-based and    |
-//|    the simulator fills on them. A long is bought at the ask        |
-//|    (bid + spread) and a short is covered at the ask; the post-hoc   |
-//|    cost charges the ENTRY bar's spread once as a proxy for the      |
-//|    ask/bid difference of both fill and exit. Where the spread at    |
-//|    the EXIT is wider than at the entry (news, rollover, fast        |
-//|    stop-outs) the cost is UNDER-stated; the effect on the hit       |
-//|    conditions (a short's TP/SL are triggered by the ask) is not     |
-//|    modelled at all. Exact bid/ask fill modelling is out of scope.   |
+//| 5) APPROXIMATION (direction of error, when use_real_spread_fills=   |
+//|    false): candles are BID-based and the simulator fills on them.   |
+//|    The post-hoc cost charges the ENTRY bar's spread once as a proxy |
+//|    for the ask/bid difference of both fill and exit. Where the      |
+//|    spread at the EXIT is wider than at the entry (news, rollover,   |
+//|    fast stop-outs) the cost is UNDER-stated. This is the ONLY place |
+//|    spread cost is modelled in that case. Exact bid/ask fill         |
+//|    modelling is out of scope there.                                 |
+//|    UPDATE (Cost-Unification Sub-phase C/D): when                    |
+//|    use_real_spread_fills=true, a long's entry and a short's TP/SL   |
+//|    ARE already triggered/filled at the ask INSIDE the simulation    |
+//|    itself (Phase FCIS Step 2 - see GZ_EntryEngine.mqh/              |
+//|    GZ_ExitEngine.mqh), so this post-hoc layer structurally excludes |
+//|    spread from its own cost_price in that case instead of           |
+//|    double-charging it (GZCost_ComputeCostPrice's                    |
+//|    real_spread_fills_active parameter) - see GZ_NetSummary.         |
+//|    spread_excluded_real_fills.                                      |
 //| 6) Costs not deliberately configured (InpCostsConfigured=false)     |
 //|    => NET equals GROSS and the report says so.                      |
 //+------------------------------------------------------------------+
@@ -124,10 +132,27 @@ double GZCost_CommissionPrice(double open_price, const GZ_CostConfig &cfg)
    return 0.0;
   }
 
-double GZCost_ComputeCostPrice(double open_price, double spread_pts, double slippage_pts, const GZ_CostConfig &cfg)
+//+------------------------------------------------------------------+
+//| Phase "Cost Unification + R-Symmetry Fix" Sub-phase C (spec Bug 3)|
+//| - double-spread-charging guard, made STRUCTURAL rather than a      |
+//| printed-warning-only convention. `real_spread_fills_active` must   |
+//| be the run's OWN GZ_EntryConfig/GZ_ExitConfig.use_real_spread_fills|
+//| value: when true, the simulator has ALREADY charged the ask/bid    |
+//| spread crossing inside the fill prices themselves (GZ_EntryEngine  |
+//| ::ApplyRealSpreadIfLong / GZ_ExitEngine::ExitFillPrice), so the     |
+//| post-hoc spread component here is FORCED to zero in code - it can  |
+//| no longer be re-charged no matter what spread_mode/fixed_spread_pts|
+//| say. Commission and slippage are computed exactly as before in     |
+//| every case; only the spread term is guarded. Default false         |
+//| preserves the exact pre-this-phase value for any existing caller   |
+//| that does not (yet) pass the flag.                                 |
+//+------------------------------------------------------------------+
+double GZCost_ComputeCostPrice(double open_price, double spread_pts, double slippage_pts, const GZ_CostConfig &cfg,
+                                bool real_spread_fills_active=false)
   {
    if(!cfg.configured) return 0.0;
-   return spread_pts*cfg.point + 2.0*slippage_pts*cfg.point + GZCost_CommissionPrice(open_price, cfg);
+   double effective_spread_pts = real_spread_fills_active ? 0.0 : spread_pts;
+   return effective_spread_pts*cfg.point + 2.0*slippage_pts*cfg.point + GZCost_CommissionPrice(open_price, cfg);
   }
 
 //--- net figures of one population at one slippage level (sensitivity table row)
@@ -164,6 +189,14 @@ struct GZ_NetSummary
    int      spread_zero;        // trades charged a spread of 0 points
    int      spread_missing;     // RECORDED mode: no M1 bar found for the entry time (charged 0)
    int      rollover_crossings; // trades open across a server midnight (swap NOT modelled)
+   //--- Sub-phase C (spec Bug 3): true when the spread component of cost was
+   //--- structurally excluded from `net_r`/`cost_r`/`avg_cost_r`/etc. above
+   //--- because the run's own use_real_spread_fills was true (spread is
+   //--- already inside the simulated fill price - see GZCost_ComputeCostPrice
+   //--- design note). Informational only - reports should print this
+   //--- explicitly so "why is cost_r lower than spread_mode implies" is
+   //--- never a silent surprise. False for every pre-this-phase caller.
+   bool     spread_excluded_real_fills;
    GZ_NetSens sens[GZ_COST_SENS_COUNT];
 
    void Clear()
@@ -172,6 +205,7 @@ struct GZ_NetSummary
       net_r = 0.0; expectancy = 0.0; profit_factor = 0.0; pf_undefined = false; win_rate = 0.0;
       max_dd_r = 0.0; max_lose_streak = 0; avg_cost_r = 0.0; max_cost_r = 0.0; cost_ge_quarter_r = 0;
       avg_spread_pts = 0.0; spread_zero = 0; spread_missing = 0; rollover_crossings = 0;
+      spread_excluded_real_fills = false;
       for(int i=0;i<GZ_COST_SENS_COUNT;i++) sens[i].Clear();
      }
   };

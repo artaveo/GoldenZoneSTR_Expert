@@ -89,6 +89,12 @@ struct GZ_FinalOosResult
    GZ_MetricsSummary    dev;                 // Development-range Phase 8 summary
    GZ_MetricsSummary    oos;                 // Final OOS Phase 8 summary
 
+   //--- Cost-Unification Sub-phase B (spec Bug 2): parallel net-of-cost
+   //--- summaries for each range, alongside (never replacing) dev/oos
+   //--- above - available whenever config.cost_config.configured=true.
+   GZ_NetSummary        dev_net;
+   GZ_NetSummary        oos_net;
+
    //--- Comparison (design note 4); deltas are OOS minus Development
    double               expectancy_delta;
    double               win_rate_delta;
@@ -124,6 +130,7 @@ struct GZ_FinalOosResult
       dev_m5_bars = 0; oos_m5_bars = 0; oos_boundary_bars_dropped = 0;
       oos_m1_status = GZ_VAL_UNKNOWN; oos_m5_status = GZ_VAL_UNKNOWN;
       dev.Clear(); oos.Clear();
+      dev_net.Clear(); oos_net.Clear();
       ClearComparison();
       for(int i=0;i<GZ_MAX_OOS_NOTES;i++) notes[i]="";
       note_count = 0;

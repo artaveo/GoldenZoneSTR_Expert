@@ -116,6 +116,49 @@ private:
       return level_price + (double)bar_spread * m_cfg.point;
      }
 
+   //--- Phase "Cost Unification + R-Symmetry Fix" Sub-phase A: mirrors
+   //--- ExitFillPrice()'s ask-adjustment above, but applied to the STOP
+   //--- DISTANCE at entry time rather than to an actual fill price. A
+   //--- Long's initial_risk already includes the ask premium paid at
+   //--- entry, because trade.entry_price itself is already ask-adjusted
+   //--- there (see CGZEntryEngine::ApplyRealSpreadIfLong) - that half is
+   //--- untouched by this fix. A Short pays no premium at entry
+   //--- (trade.entry_price stays raw bid) but WILL pay one on exit
+   //--- (ExitFillPrice() above ask-adjusts a Short's SL/TP fill) - so a
+   //--- Short's initial_risk must anticipate that same eventual premium
+   //--- here, the same way Long's already does, using the entry bar's
+   //--- own recorded spread (trade.spread_assumption). Without this, "1R"
+   //--- is not the same real-world distance for both directions (spec
+   //--- Bug 1). `false` for use_real_spread_fills, or bullish direction,
+   //--- returns raw_sl_price unchanged - the exact pre-this-phase value,
+   //--- so behavior with use_real_spread_fills=false is byte-identical.
+   double AnticipatedSlPriceIfShort(double raw_sl_price, bool bullish, double entry_bar_spread) const
+     {
+      if(!m_cfg.use_real_spread_fills || bullish)
+         return raw_sl_price;
+      return raw_sl_price + entry_bar_spread * m_cfg.point;
+     }
+
+   //--- Companion to AnticipatedSlPriceIfShort() above, same Sub-phase A fix.
+   //--- ExitFillPrice() ask-adjusts a Short's TP fill exactly the same way it
+   //--- ask-adjusts its SL fill (both are a Buy-to-close) - so the STORED
+   //--- tp_price must anticipate that same future +spread addition, the same
+   //--- way the SL side already does, or a Short's TP-hit lands short of the
+   //--- configured tp_r_multiple by spread/initial_risk even after the
+   //--- initial_risk correction above (verified algebraically and by
+   //--- T-R-SYM-03). `desired_fill_price` is the untouched target this trade
+   //--- is meant to realize (entry +/- tp_r_multiple*initial_risk); this
+   //--- returns the LEVEL that must be stored so the eventual ask-adjusted
+   //--- fill lands exactly on that target. `false` for use_real_spread_fills,
+   //--- or bullish direction, returns desired_fill_price unchanged - byte-
+   //--- identical to pre-this-phase code in both those cases.
+   double AnticipatedTpLevelIfShort(double desired_fill_price, bool bullish, double entry_bar_spread) const
+     {
+      if(!m_cfg.use_real_spread_fills || bullish)
+         return desired_fill_price;
+      return desired_fill_price - entry_bar_spread * m_cfg.point;
+     }
+
 public:
                      CGZExitEngine(CGZLogger *logger=NULL) { m_logger=logger; m_cfg.Default(); m_peak_open_trades=0; m_last_bar_closed_r_sum=0.0; }
 
@@ -189,9 +232,19 @@ public:
          sl_price = bullish ? (leg.origin_swing.price-buffer) : (leg.origin_swing.price+buffer);
         }
 
-      double initial_risk = MathAbs(trade.entry_price-sl_price);
-      double tp_price = bullish ? (trade.entry_price+m_cfg.tp_r_multiple*initial_risk)
-                                 : (trade.entry_price-m_cfg.tp_r_multiple*initial_risk);
+      //--- R-Symmetry Fix (Sub-phase A, spec Bug 1): the SL/TP touch-and-fill
+      //--- logic in OnBar() below still uses the RAW sl_price stored in
+      //--- e.sl_price - that part is unaffected by this fix and continues to
+      //--- ask-adjust dynamically using each bar's OWN spread at touch time.
+      //--- Only the RISK DENOMINATOR (initial_risk) is corrected here, using
+      //--- the entry bar's spread, so a Short's "1R" already anticipates the
+      //--- same exit-side premium a Long's "1R" already anticipates via its
+      //--- ask-adjusted entry_price. See AnticipatedSlPriceIfShort() above.
+      double anticipated_sl_price_for_risk = AnticipatedSlPriceIfShort(sl_price, bullish, trade.spread_assumption);
+      double initial_risk = MathAbs(trade.entry_price-anticipated_sl_price_for_risk);
+      double tp_target_fill = bullish ? (trade.entry_price+m_cfg.tp_r_multiple*initial_risk)
+                                       : (trade.entry_price-m_cfg.tp_r_multiple*initial_risk);
+      double tp_price = AnticipatedTpLevelIfShort(tp_target_fill, bullish, trade.spread_assumption);
 
       GZ_TradeExit e; e.Clear();
       e.trade_id           = trade.id;
