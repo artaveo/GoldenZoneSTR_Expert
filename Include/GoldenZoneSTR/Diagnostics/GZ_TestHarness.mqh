@@ -73,6 +73,7 @@
 #include "..\FCIS\GZ_FcisTests.mqh"
 #include "..\Setup\GZ_ConcurrencyTests.mqh"
 #include "..\RewardBe\GZ_CostRSymTests.mqh"
+#include "..\Filter\GZ_HtfBiasTests.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -5741,6 +5742,15 @@ public:
         {
          GZ_TestResult rsr = rsym_suite.GetResult(rsi);
          AddResult(rsr.id, rsr.passed, rsr.detail);
+        }
+
+      //--- HTF Bias filter (the M15 Context slot made real): T278-T284, synthetic M5 data only
+      CGZHtfBiasTests htf_suite(m_logger);
+      htf_suite.RunAll();
+      for(int hti=0; hti<htf_suite.ResultCount(); hti++)
+        {
+         GZ_TestResult htr = htf_suite.GetResult(hti);
+         AddResult(htr.id, htr.passed, htr.detail);
         }
      }
 

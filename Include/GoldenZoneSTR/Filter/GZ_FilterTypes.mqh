@@ -19,8 +19,11 @@
 //|      IMPLEMENTED (real, data-backed evaluation - see               |
 //|      GZ_FilterEngine.mqh): Break Quality, Leg Quality, Volume,     |
 //|      Volatility, Session.                                          |
+//|      UPDATE (HTF Bias phase): the M15 Context slot is now REAL -   |
+//|      a higher-timeframe trend-alignment filter (see                |
+//|      GZ_FilterEngine.mqh). Only VWAP and News remain reserved.     |
 //|      RESERVED (always NOT_AVAILABLE - no producer exists anywhere  |
-//|      in Phases 1-9): VWAP, M15 Context, News. Each was explicitly  |
+//|      in Phases 1-9): VWAP, M15 Context (now implemented), News. Each was explicitly  |
 //|      listed OUT OF SCOPE in the Phase 1 spec's Section 2 and never |
 //|      built by any later phase (M15 structure logic is DEFERRED,   |
 //|      no VWAP engine or news/economic-calendar data source exists). |
@@ -172,6 +175,14 @@ struct GZ_FilterSetConfig
 
    GZ_SessionProfile   session_profile;               // Session filter's own window (design note above)
 
+   //--- HTF Bias (the formerly-reserved "M15 Context" slot, GZ_FILTER_M15_CONTEXT
+   //--- - the enum/input names are NOT renamed, only the slot is now real).
+   //--- Higher-timeframe trend = last COMPLETED HTF bar's close vs the EMA of
+   //--- HTF closes. htf_period_minutes must be a multiple of 5 (bars are built
+   //--- by bucketing the already-loaded M5 series - no extra data load).
+   int                 htf_period_minutes;           // default 60 (H1)
+   int                 htf_ema_period;               // default 50 (HTF bars)
+
    void Default()
      {
       for(int i=0;i<GZ_FILTER_COUNT;i++)
@@ -189,6 +200,9 @@ struct GZ_FilterSetConfig
       volatility_max_mult         = 2.00;
 
       session_profile.Set("FILTER_SESSION","FilterSession",GZ_TIME_BROKER,0,0,23,59,true,true);
+
+      htf_period_minutes          = 60;
+      htf_ema_period              = 50;
      }
   };
 

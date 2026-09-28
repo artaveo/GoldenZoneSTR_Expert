@@ -198,8 +198,10 @@ input int                  InpExperimentMaxBatchSize = GZ_DEFAULT_MAX_EXPERIMENT
 //--- Every mode defaults to OFF: a fresh Phase 10 run changes nothing about the
 //--- Phase 1-9 trade population until a filter is explicitly enabled here (see
 //--- GZ_FilterTypes.mqh design note 2 - NOT_AVAILABLE must never auto-pass, so
-//--- turning on VWAP/M15 Context/News - permanently NOT_AVAILABLE, reserved
-//--- stubs - would reject every setup; left OFF by default for that reason).
+//--- turning on VWAP/News - permanently NOT_AVAILABLE, reserved stubs - would
+//--- reject every setup; left OFF by default for that reason). The M15 Context
+//--- slot is now the REAL HTF Bias filter (INCLUDE = keep only setups whose
+//--- direction agrees with the higher-timeframe trend; EXCLUDE = the opposite).
 input ENUM_GZ_FILTER_MODE InpFilterBreakQualityMode = GZ_FILTER_OFF;
 input ENUM_GZ_FILTER_MODE InpFilterLegQualityMode   = GZ_FILTER_OFF;
 input ENUM_GZ_FILTER_MODE InpFilterVolumeMode       = GZ_FILTER_OFF;
@@ -216,6 +218,8 @@ input double               InpFilterVolumeMinMult          = 1.00;
 input int                  InpFilterVolatilityLookback     = 50;
 input double               InpFilterVolatilityMinMult      = 0.50;
 input double               InpFilterVolatilityMaxMult      = 2.00;
+input int                  InpFilterHtfPeriodMinutes       = 60;
+input int                  InpFilterHtfEmaPeriod           = 50;
 
 //--- Phase 11: Filter Combination Research --------------------------------------
 //--- Runs R11-A (single filter) / R11-B (two-filter) / R11-C (limited multi-
@@ -839,17 +843,47 @@ void BuildAndEmitReport()
    report += StringFormat("Deltas (filtered-unfiltered): WinRate=%.4f  ProfitFactor=%.4f  Expectancy=%.4f  MaxDD=%.4fR  TradeCount=%d\n",
               g_metrics.filters.win_rate_delta, g_metrics.filters.profit_factor_delta,
               g_metrics.filters.expectancy_delta, g_metrics.filters.max_drawdown_delta, g_metrics.filters.trade_count_delta);
+   if(g_metrics.filters.available && g_metrics.filters.setups_after!=g_metrics.filters.setups_before)
+     {
+      GZ_MetricsSummary fm = g_filter_metrics_after;
+      report += StringFormat("FILTERED population: trades=%d win_rate=%.1f%% net_r=%.3f PF=%s expectancy=%.4f MaxDD=%.3fR MaxLoseStreak=%d\n",
+                 fm.trade.trade_count, fm.trade.win_rate*100.0, fm.trade.net_r,
+                 fm.trade.profit_factor_undefined ? "inf" : DoubleToString(fm.trade.profit_factor,3),
+                 fm.trade.expectancy, fm.risk.max_drawdown_r, fm.risk.max_losing_streak);
+      report += StringFormat("FILTERED by direction: LONG n=%d net_r=%.3f win_rate=%.1f%%  |  SHORT n=%d net_r=%.3f win_rate=%.1f%%\n",
+                 fm.by_direction[0].stats.trade_count, fm.by_direction[0].stats.net_r, fm.by_direction[0].stats.win_rate*100.0,
+                 fm.by_direction[1].stats.trade_count, fm.by_direction[1].stats.net_r, fm.by_direction[1].stats.win_rate*100.0);
+      if(fm.by_year_count>0)
+        {
+         report += "FILTERED by year:  YEAR  trades  win_rate      net_r       PF  max_dd(R)\n";
+         for(int fyi=0; fyi<fm.by_year_count; fyi++)
+            report += StringFormat("                   %-5d %6d %8.1f%% %10.3f %8s %10.3f\n",
+                       fm.by_year[fyi].year, fm.by_year[fyi].stats.trade_count, fm.by_year[fyi].stats.win_rate*100.0,
+                       fm.by_year[fyi].stats.net_r,
+                       fm.by_year[fyi].stats.profit_factor_undefined ? "inf" : DoubleToString(fm.by_year[fyi].stats.profit_factor,3),
+                       fm.by_year[fyi].max_drawdown_r);
+        }
+      report += "The filter is applied POST-HOC to the already-simulated trades (a rejected setup's trade is simply\n";
+      report += "left out); concurrency/daily-loss dynamics are NOT re-simulated without it - read as a first-order test.\n";
+     }
    report += "Every filter mode defaults to OFF, so with the default inputs above SetupsAfter==SetupsBefore\n";
    report += "and every delta is exactly 0 (T97, and see T106 for the ComputeFiltered() diff mechanism in\n";
    report += "isolation) - Phase 10 changes nothing about the Phase 1-9 trade population until a filter is\n";
-   report += "explicitly enabled via EA input. 5 filters are REAL/data-backed (Break Quality, Leg Quality,\n";
+   report += "explicitly enabled via EA input. 6 filters are REAL/data-backed (Break Quality, Leg Quality,\n";
    report += "Volume, Volatility - all ATR/rolling-average thresholds measured at the setup's own\n";
    report += "BREAK_CONFIRMED moment, no lookahead; Session - reuses the same Time/Session Engine every\n";
-   report += "other phase already uses). 3 are RESERVED stubs that always report NOT_AVAILABLE (VWAP, M15\n";
-   report += "Context, News) - each was explicitly OUT OF SCOPE in the Phase 1 spec and never built by any\n";
-   report += "later phase (see GZ_FilterTypes.mqh design note 1); NOT_AVAILABLE never silently becomes PASS\n";
-   report += "for ANY enabled filter (explicit Roadmap requirement, see T99/T104) - enabling one of the 3\n";
-   report += "reserved filters therefore rejects every setup until a later phase supplies real data for it.\n";
+   report += "other phase already uses; M15 Context slot = HTF Bias, see below). 2 are RESERVED stubs that\n";
+   report += "always report NOT_AVAILABLE (VWAP, News) - each was explicitly OUT OF SCOPE in the Phase 1 spec\n";
+   report += "and never built by any later phase (see GZ_FilterTypes.mqh design note 1); NOT_AVAILABLE never\n";
+   report += "silently becomes PASS for ANY enabled filter (explicit Roadmap requirement, see T99/T104) -\n";
+   report += "enabling one of the 2 reserved filters therefore rejects every setup until real data exists.\n";
+   report += StringFormat("HTF Bias (M15 Context slot): HTF period=%d min, EMA period=%d HTF bars. Trend = last COMPLETED HTF\n",
+              InpFilterHtfPeriodMinutes, InpFilterHtfEmaPeriod);
+   report += "bar's close vs the EMA of HTF closes, read at the setup's break_time (only HTF bars already\n";
+   report += "finished by then - the still-forming HTF bar is never used, no lookahead). A setup passes when\n";
+   report += "its direction agrees with that trend (long needs close>EMA, short needs close<EMA). Too little\n";
+   report += "history for the EMA = NOT_AVAILABLE (rejects when enabled, never a guessed PASS). The HTF bars\n";
+   report += "are built from the loaded M5 series, so the first ~EMA-period HTF bars of a range are warm-up.\n";
    report += "EXCLUDE mode is the mirror image of INCLUDE (keeps FAIL instead of PASS, see T100); an OFF\n";
    report += "filter never gates anything regardless of its own result (see T97). The Event Ledger now\n";
    report += "carries one FILTER_RESULT row per evaluated setup and one REJECTION row per closed trade whose\n";
@@ -2505,6 +2539,8 @@ int OnInit()
       filter_cfg.volatility_lookback         = InpFilterVolatilityLookback;
       filter_cfg.volatility_min_mult         = InpFilterVolatilityMinMult;
       filter_cfg.volatility_max_mult         = InpFilterVolatilityMaxMult;
+      filter_cfg.htf_period_minutes          = InpFilterHtfPeriodMinutes;
+      filter_cfg.htf_ema_period              = InpFilterHtfEmaPeriod;
       filter_cfg.session_profile             = session_profile; // reuse the same window (design note, GZ_FilterTypes.mqh)
 
       long   filter_setup_ids[];
