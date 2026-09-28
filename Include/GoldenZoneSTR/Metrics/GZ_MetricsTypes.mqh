@@ -105,6 +105,18 @@
 #define GZ_BREAKDOWN_HOUR_COUNT       24  // broker-clock hour of entry, 0-23
 #define GZ_BREAKDOWN_DOW_COUNT        7   // MqlDateTime.day_of_week, 0=Sunday
 #define GZ_BREAKDOWN_MONTH_COUNT      12  // MqlDateTime.mon-1, 0=January
+//--- Per-calendar-year breakdown (user-requested addition): a FIXED-size
+//--- cap, never a dynamic array - GZ_MetricsSummary lives inside
+//--- GZ_ExperimentResult, which Robustness/Walk-Forward/Final OOS store in
+//--- FIXED arrays specifically BECAUSE GZ_ExperimentResult has no dynamic
+//--- array members (see GZ_ExperimentTypes.mqh design note 5 - MQL5's
+//--- documented nested-dynamic-array-in-struct-array trouble spot). 20
+//--- years comfortably covers any realistic single research range; a
+//--- range spanning more than that silently stops adding NEW year slots
+//--- (existing ones keep accumulating) rather than crashing - the same
+//--- bounded-capacity, documented-cap philosophy as GZ_MAX_EXPERIMENT_
+//--- WARNINGS (GZ_ExperimentTypes.mqh).
+#define GZ_BREAKDOWN_YEAR_MAX         20
 
 //+------------------------------------------------------------------+
 //| One population's Trade Metrics (Roadmap Phase 8 "Trade Metrics"   |
@@ -188,6 +200,32 @@ struct GZ_BehaviorStats
   };
 
 //+------------------------------------------------------------------+
+//| One calendar year's bucket - like GZ_BreakdownBucket but also      |
+//| carries its OWN drawdown/streak (computed on just that year's own  |
+//| chronological R-subsequence, via the SAME ComputeRisk() formula    |
+//| the overall population uses - see GZ_MetricsEngine.mqh), since a   |
+//| multi-year run's overall drawdown/streak numbers alone don't show  |
+//| which year actually produced them.                                 |
+//+------------------------------------------------------------------+
+struct GZ_YearBucket
+  {
+   int             year;              // 0 = unused slot; calendar year (e.g. 2021) otherwise
+   GZ_TradeStats   stats;
+   double          max_drawdown_r;    // this year's own peak-to-trough (independent of other years)
+   int             max_winning_streak;
+   int             max_losing_streak;
+
+   void Clear()
+     {
+      year = 0;
+      stats.Clear();
+      max_drawdown_r     = 0.0;
+      max_winning_streak = 0;
+      max_losing_streak  = 0;
+     }
+  };
+
+//+------------------------------------------------------------------+
 //| One labeled Breakdown bucket (design note 6) - a label plus the   |
 //| same GZ_TradeStats formulas applied to just that bucket's trades. |
 //+------------------------------------------------------------------+
@@ -257,6 +295,12 @@ struct GZ_MetricsSummary
    GZ_BreakdownBucket   by_hour[GZ_BREAKDOWN_HOUR_COUNT];
    GZ_BreakdownBucket   by_dow[GZ_BREAKDOWN_DOW_COUNT];
    GZ_BreakdownBucket   by_month[GZ_BREAKDOWN_MONTH_COUNT];
+   //--- Per-calendar-year breakdown (see GZ_YearBucket above). Only the
+   //--- first by_year_count slots are meaningful; filled in ascending
+   //--- calendar-year order (trades are processed chronologically, so a
+   //--- new year is always first seen after every earlier one).
+   GZ_YearBucket        by_year[GZ_BREAKDOWN_YEAR_MAX];
+   int                  by_year_count;
 
    datetime             range_start;  // earliest closed-trade entry_time (0 if none)
    datetime             range_end;    // latest closed-trade exit_time (0 if none)
@@ -273,6 +317,8 @@ struct GZ_MetricsSummary
       for(int i=0;i<GZ_BREAKDOWN_HOUR_COUNT;i++)      by_hour[i].Clear();
       for(int i=0;i<GZ_BREAKDOWN_DOW_COUNT;i++)       by_dow[i].Clear();
       for(int i=0;i<GZ_BREAKDOWN_MONTH_COUNT;i++)     by_month[i].Clear();
+      for(int i=0;i<GZ_BREAKDOWN_YEAR_MAX;i++)        by_year[i].Clear();
+      by_year_count      = 0;
       range_start        = 0;
       range_end          = 0;
       closed_trade_count = 0;

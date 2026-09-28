@@ -757,6 +757,23 @@ void BuildAndEmitReport()
    report += StringFormat("By session:   INSIDE n=%d net_r=%.3f win_rate=%.1f%%  |  OUTSIDE n=%d net_r=%.3f win_rate=%.1f%%\n",
               g_metrics.by_session[0].stats.trade_count, g_metrics.by_session[0].stats.net_r, g_metrics.by_session[0].stats.win_rate*100.0,
               g_metrics.by_session[1].stats.trade_count, g_metrics.by_session[1].stats.net_r, g_metrics.by_session[1].stats.win_rate*100.0);
+   if(g_metrics.by_year_count>0)
+     {
+      report += "By year:\n";
+      report += StringFormat("  %-6s %8s %9s %10s %8s %10s %12s\n", "YEAR", "trades", "win_rate", "net_r", "PF", "max_dd(R)", "max_lose_streak");
+      for(int byi=0; byi<g_metrics.by_year_count; byi++)
+        {
+         GZ_YearBucket yb = g_metrics.by_year[byi];
+         report += StringFormat("  %-6d %8d %8.1f%% %10.3f %8s %10.3f %12d\n",
+                    yb.year, yb.stats.trade_count, yb.stats.win_rate*100.0, yb.stats.net_r,
+                    yb.stats.profit_factor_undefined ? "inf" : DoubleToString(yb.stats.profit_factor,3),
+                    yb.max_drawdown_r, yb.max_losing_streak);
+        }
+      report += "Each year's win_rate/net_r/PF are that year's OWN closed trades (entry-time year); max_dd(R) and\n";
+      report += "max_lose_streak are that year's OWN peak-to-trough and longest losing run - independent of every\n";
+      report += "other year (NOT a slice of the overall equity curve above), so a bad year is never masked by a\n";
+      report += "good one, and vice versa. Same population/formulas as every other breakdown above.\n";
+     }
    report += "Population: CLOSED trades only (an open trade contributes to no total/bucket - see\n";
    report += "GZ_MetricsTypes.mqh design note 1). All metrics are R-based, not account currency (no\n";
    report += "position-sizing/leverage model exists anywhere in Phases 1-7 - design note 2). Expectancy\n";

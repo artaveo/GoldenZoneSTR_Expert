@@ -96,6 +96,24 @@ private:
         }
      }
 
+   //--- Per-calendar-year breakdown helper: find `year`'s existing slot in
+   //--- `year_values[0..year_count-1]`, or allocate a new one if there's
+   //--- room. Returns -1 (never guessed, never crashes) when the cap is
+   //--- already full and `year` is not among the existing slots - the
+   //--- caller then simply leaves that trade out of the by-year table
+   //--- (it still counts in every other total/breakdown).
+   int FindOrAddYearIndex(int &year_values[], int &year_count, int year) const
+     {
+      for(int i=0;i<year_count;i++)
+         if(year_values[i]==year)
+            return i;
+      if(year_count>=GZ_BREAKDOWN_YEAR_MAX)
+         return -1;
+      year_values[year_count] = year;
+      year_count++;
+      return year_count-1;
+     }
+
    //--- Risk stats over the chronological (exit-order) realized-R
    //--- sequence - see GZ_MetricsTypes.mqh design note 5.
    void ComputeRisk(const double &r_sequence[], GZ_RiskStats &out) const
@@ -209,12 +227,16 @@ private:
       GZ_MetricsAccum by_hour[GZ_BREAKDOWN_HOUR_COUNT];
       GZ_MetricsAccum by_dow[GZ_BREAKDOWN_DOW_COUNT];
       GZ_MetricsAccum by_month[GZ_BREAKDOWN_MONTH_COUNT];
+      GZ_MetricsAccum by_yr[GZ_BREAKDOWN_YEAR_MAX];
+      int year_values[GZ_BREAKDOWN_YEAR_MAX];
+      int year_count = 0;
       int i;
       for(i=0;i<GZ_BREAKDOWN_DIRECTION_COUNT;i++) by_dir[i].Clear();
       for(i=0;i<GZ_BREAKDOWN_SESSION_COUNT;i++)   by_sess[i].Clear();
       for(i=0;i<GZ_BREAKDOWN_HOUR_COUNT;i++)      by_hour[i].Clear();
       for(i=0;i<GZ_BREAKDOWN_DOW_COUNT;i++)       by_dow[i].Clear();
       for(i=0;i<GZ_BREAKDOWN_MONTH_COUNT;i++)     by_month[i].Clear();
+      for(i=0;i<GZ_BREAKDOWN_YEAR_MAX;i++)        { by_yr[i].Clear(); year_values[i]=0; }
 
       double sum_mae=0.0, sum_mfe=0.0, sum_duration=0.0, sum_ttmae=0.0, sum_ttmfe=0.0;
       int closed_count=0;
@@ -230,6 +252,13 @@ private:
       // BuildFromFinalState() already uses.
       double r_sequence[];
       ArrayResize(r_sequence, 0);
+      //--- Parallel to r_sequence[] (same index, same chronological order) -
+      //--- which year-bucket slot (or -1 if the GZ_BREAKDOWN_YEAR_MAX cap
+      //--- was already full) each entry belongs to, so the per-year
+      //--- drawdown/streak pass below can filter r_sequence[] without a
+      //--- second journal scan.
+      int trade_year_idx[];
+      ArrayResize(trade_year_idx, 0);
 
       datetime range_start = 0, range_end = 0;
 
@@ -258,6 +287,9 @@ private:
          AccumulateOne(by_hour[dt.hour], r);
          AccumulateOne(by_dow[dt.day_of_week], r);
          AccumulateOne(by_month[dt.mon-1], r);
+         int yidx = FindOrAddYearIndex(year_values, year_count, dt.year);
+         if(yidx>=0)
+            AccumulateOne(by_yr[yidx], r);
 
          sum_mae      += j.mae_r;
          sum_mfe      += j.mfe_r;
@@ -271,6 +303,8 @@ private:
          int rn = ArraySize(r_sequence);
          ArrayResize(r_sequence, rn+1);
          r_sequence[rn] = r;
+         ArrayResize(trade_year_idx, rn+1);
+         trade_year_idx[rn] = yidx;
         }
 
       Finalize(total, out.trade);
@@ -302,6 +336,35 @@ private:
         {
          out.by_month[i].label = month_names[i];
          Finalize(by_month[i], out.by_month[i].stats);
+        }
+
+      //--- Per-calendar-year breakdown: finalize each year's own
+      //--- GZ_TradeStats (same Finalize() formula as every other bucket),
+      //--- then compute that year's OWN drawdown/streak by filtering the
+      //--- already-chronological r_sequence[] down to just that year's
+      //--- entries (trade_year_idx[] is aligned 1:1 with r_sequence[]) and
+      //--- running the SAME ComputeRisk() the overall population uses -
+      //--- no second formula, just a narrower input series.
+      out.by_year_count = year_count;
+      for(i=0;i<year_count;i++)
+        {
+         out.by_year[i].year = year_values[i];
+         Finalize(by_yr[i], out.by_year[i].stats);
+
+         double yr_seq[];
+         ArrayResize(yr_seq, 0);
+         for(int k=0;k<ArraySize(r_sequence);k++)
+            if(trade_year_idx[k]==i)
+              {
+               int m = ArraySize(yr_seq);
+               ArrayResize(yr_seq, m+1);
+               yr_seq[m] = r_sequence[k];
+              }
+         GZ_RiskStats yr_risk;
+         ComputeRisk(yr_seq, yr_risk);
+         out.by_year[i].max_drawdown_r     = yr_risk.max_drawdown_r;
+         out.by_year[i].max_winning_streak = yr_risk.max_winning_streak;
+         out.by_year[i].max_losing_streak  = yr_risk.max_losing_streak;
         }
 
       out.behavior.avg_mae_r               = (closed_count>0) ? sum_mae/closed_count      : 0.0;

@@ -697,4 +697,8 @@ GoldenZone STR — Implementation Roadmap v1.3
  cost-engine wiring into CGZExperimentRunner::Execute() (and Robustness/Walk-Forward/Final OOS
  report printing), the structural double-spread-charge guard, three corrected copies of a stale
  report claim, and one shared baseline-comparison function with a new NOT_APPLICABLE verdict;
- tests T269-T277, confirmed by the user in real MT5.)
+ tests T269-T277, confirmed by the user in real MT5.
+ v1.3.1: added a per-calendar-year breakdown to Phase 8's GZ_MetricsSummary (GZ_YearBucket:
+ trades/win_rate/net_r/PF plus that year's OWN drawdown/losing-streak, independent of other years),
+ printed as a "By year" table in the main report - for reading a multi-year Development-partition
+ run (e.g. 2020.07.01-2025.01.01) at a glance, one run, no code needed per year.)
