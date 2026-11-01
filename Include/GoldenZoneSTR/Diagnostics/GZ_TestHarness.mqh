@@ -74,6 +74,8 @@
 #include "..\Setup\GZ_ConcurrencyTests.mqh"
 #include "..\RewardBe\GZ_CostRSymTests.mqh"
 #include "..\Filter\GZ_HtfBiasTests.mqh"
+#include "..\Data\GZ_BarAggregatorTests.mqh"
+#include "..\Exit\GZ_EntryBarTests.mqh"
 #include "GZ_Logger.mqh"
 
 class CGZTestHarness
@@ -5751,6 +5753,24 @@ public:
         {
          GZ_TestResult htr = htf_suite.GetResult(hti);
          AddResult(htr.id, htr.passed, htr.detail);
+        }
+
+      //--- Execution Timeframe aggregation (M1 -> M5/M15): T285-T288, synthetic M1 bars only
+      CGZBarAggregatorTests agg_suite(m_logger);
+      agg_suite.RunAll();
+      for(int agi=0; agi<agg_suite.ResultCount(); agi++)
+        {
+         GZ_TestResult agr = agg_suite.GetResult(agi);
+         AddResult(agr.id, agr.passed, agr.detail);
+        }
+
+      //--- Entry-bar rule (GZ_ENTRY_BAR_SAFE): T289-T295, hand-built trades only
+      CGZEntryBarTests ebar_suite(m_logger);
+      ebar_suite.RunAll();
+      for(int ebi=0; ebi<ebar_suite.ResultCount(); ebi++)
+        {
+         GZ_TestResult ebr = ebar_suite.GetResult(ebi);
+         AddResult(ebr.id, ebr.passed, ebr.detail);
         }
      }
 

@@ -257,6 +257,7 @@ public:
       e.initial_risk       = initial_risk;
       e.tp_r_multiple_used = m_cfg.tp_r_multiple;
       e.entry_time         = trade.entry_time; // Phase 15.5 diagnostic only
+      GZEntryModelFillFlags(trade.entry_model, e.entry_bar_adverse_ok, e.entry_bar_close_ok);
 
       int n = ArraySize(m_exits);
       ArrayResize(m_exits, n+1);
@@ -292,17 +293,28 @@ public:
 
          bool bullish = (m_exits[i].direction==GZ_LEG_BULLISH);
 
+         //--- ENTRY-BAR RULE. On the bar this trade was FILLED on, OHLC cannot say
+         //--- whether the bar's favorable extreme printed before or after the
+         //--- fill. Under GZ_ENTRY_BAR_SAFE only what is provably after the fill
+         //--- is used (GZEntryBarView); every later bar - and every bar under
+         //--- GZ_ENTRY_BAR_LEGACY - uses the full high/low exactly as before.
+         double bar_high = bar.high;
+         double bar_low  = bar.low;
+         if(m_cfg.entry_bar_rule==GZ_ENTRY_BAR_SAFE && bar.time==m_exits[i].entry_time)
+            GZEntryBarView(bar, bullish, m_exits[i].entry_price,
+                           m_exits[i].entry_bar_adverse_ok, m_exits[i].entry_bar_close_ok, bar_high, bar_low);
+
          //--- Phase FCIS Step 2: a Short's SL/TP touch is checked against the
          //--- ASK of this bar (high/low + spread*point) - the same spec
          //--- Section 5.2 approximation documented in GZ_CostTypes.mqh design
          //--- note 5, now applied INSIDE the simulation itself rather than
          //--- only post-hoc. A Long's touch check stays on raw bid HL.
          bool  ask_adjust = (!bullish) && m_cfg.use_real_spread_fills;
-         double eval_high = ask_adjust ? (bar.high + (double)bar.spread*m_cfg.point) : bar.high;
-         double eval_low  = ask_adjust ? (bar.low  + (double)bar.spread*m_cfg.point) : bar.low;
+         double eval_high = ask_adjust ? (bar_high + (double)bar.spread*m_cfg.point) : bar_high;
+         double eval_low  = ask_adjust ? (bar_low  + (double)bar.spread*m_cfg.point) : bar_low;
 
-         bool touched_sl = bullish ? (bar.low<=m_exits[i].sl_price)  : (eval_high>=m_exits[i].sl_price);
-         bool touched_tp = bullish ? (bar.high>=m_exits[i].tp_price) : (eval_low<=m_exits[i].tp_price);
+         bool touched_sl = bullish ? (bar_low<=m_exits[i].sl_price)  : (eval_high>=m_exits[i].sl_price);
+         bool touched_tp = bullish ? (bar_high>=m_exits[i].tp_price) : (eval_low<=m_exits[i].tp_price);
 
          if(touched_sl || touched_tp)
            {
@@ -336,7 +348,7 @@ public:
            {
             double trigger_price = bullish ? (m_exits[i].entry_price+m_cfg.be_trigger_r*m_exits[i].initial_risk)
                                             : (m_exits[i].entry_price-m_cfg.be_trigger_r*m_exits[i].initial_risk);
-            bool armed = bullish ? (bar.high>=trigger_price) : (bar.low<=trigger_price);
+            bool armed = bullish ? (bar_high>=trigger_price) : (bar_low<=trigger_price);
             if(armed)
               {
                double new_sl;
@@ -353,7 +365,7 @@ public:
 
                //--- Phase 15.5 DIAGNOSTICS ONLY (no decision reads these; baseline behavior unchanged)
                m_exits[i].be_armed_on_entry_bar = (bar.time==m_exits[i].entry_time);
-               m_exits[i].be_arm_bar_retrace    = bullish ? (bar.low<=new_sl) : (bar.high>=new_sl);
+               m_exits[i].be_arm_bar_retrace    = bullish ? (bar_low<=new_sl) : (bar_high>=new_sl);
 
                if(m_logger!=NULL)
                   m_logger.Info("Exit", StringFormat("Trade #%d BREAK-EVEN armed: new_sl=%.5f at=%s",

@@ -65,6 +65,19 @@ enum ENUM_GZ_ENTRY_MODEL
    GZ_ENTRY_M1_CONFIRMATION      // N consecutive M1 closes beyond the entry level required
   };
 
+//--- Which parts of the FILL bar are provably after the fill, per entry model
+//--- (used by the exit engine and journal under GZ_ENTRY_BAR_SAFE, see
+//--- GZEntryBarView in GZ_ExitTypes.mqh). TOUCH/LIMIT fill the first time price
+//--- crosses the level, so the bar's adverse extreme and its close are after the
+//--- fill. The two confirmation models fill AT the bar close: nothing inside that
+//--- bar is after the fill.
+void GZEntryModelFillFlags(ENUM_GZ_ENTRY_MODEL model, bool &adverse_ok, bool &close_ok)
+  {
+   bool at_close = (model==GZ_ENTRY_CLOSE_CONFIRMATION || model==GZ_ENTRY_M1_CONFIRMATION);
+   adverse_ok = !at_close;
+   close_ok   = !at_close;
+  }
+
 //+------------------------------------------------------------------+
 //| Entry Engine configuration.                                      |
 //| confirmation_candles: Roadmap research range 1-3, used only by   |

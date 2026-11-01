@@ -92,6 +92,9 @@ struct GZ_TradeJournal
    datetime             entry_time;
    double               entry_price;
    double               initial_risk;
+   //--- what part of the FILL bar is provably after the fill (see GZEntryBarView in GZ_ExitTypes.mqh)
+   bool                 entry_bar_adverse_ok;
+   bool                 entry_bar_close_ok;
 
    bool                 is_open;
    datetime             exit_time;
@@ -118,6 +121,8 @@ struct GZ_TradeJournal
       entry_time    = 0;
       entry_price   = 0.0;
       initial_risk  = 0.0;
+      entry_bar_adverse_ok = true;
+      entry_bar_close_ok   = true;
       is_open       = true;
       exit_time     = 0;
       exit_price    = 0.0;

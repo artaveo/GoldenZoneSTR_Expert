@@ -78,6 +78,49 @@ enum ENUM_GZ_INTRABAR_CONFLICT_POLICY
    GZ_CONFLICT_TP_FIRST       // optimistic - assume the better outcome
   };
 
+//--- What the exit engine may believe about the bar a trade ENTERED on.
+//--- OHLC data cannot say WHEN inside the bar the fill happened, so the
+//--- part of the bar that came BEFORE the fill must never decide the trade:
+//---   GZ_ENTRY_BAR_LEGACY - the whole bar (high AND low) is evaluated, exactly
+//---                         like every result produced before this option
+//---                         existed. Optimistic: a favorable extreme that
+//---                         printed BEFORE the fill can hit the TP. The error
+//---                         grows with bar size (small on M1, large on M5/M15).
+//---   GZ_ENTRY_BAR_SAFE   - only what is PROVABLY after the fill is used (see
+//---                         GZEntryBarView below). The default of the EA.
+enum ENUM_GZ_ENTRY_BAR_RULE
+  {
+   GZ_ENTRY_BAR_LEGACY = 0,
+   GZ_ENTRY_BAR_SAFE   = 1
+  };
+
+//--- The view of the FILL BAR that is provably after the fill.
+//---   adverse_ok - the bar's ADVERSE extreme (low for a long, high for a short)
+//---                is after the fill. True for TOUCH/LIMIT: the fill happens the
+//---                first time price crosses the entry level on its way to that
+//---                extreme, so the extreme cannot have printed earlier.
+//---   close_ok   - the bar's CLOSE is after the fill (true for TOUCH/LIMIT).
+//---   Both false = the fill IS the bar's close (confirmation models): nothing
+//---                inside that bar is after the fill.
+//--- The FAVORABLE extreme (high for a long, low for a short) is NOT provably
+//--- after the fill (it may have printed before it), so it is never used; the
+//--- only favorable evidence allowed is the close. Every SL/TP/BE decision on
+//--- the entry bar is made on this reduced view.
+void GZEntryBarView(const MqlRates &bar, bool bullish, double entry_price,
+                    bool adverse_ok, bool close_ok, double &eff_high, double &eff_low)
+  {
+   if(bullish)
+     {
+      eff_low  = adverse_ok ? MathMin(entry_price, bar.low) : entry_price;
+      eff_high = close_ok   ? MathMax(entry_price, bar.close) : entry_price;
+     }
+   else
+     {
+      eff_high = adverse_ok ? MathMax(entry_price, bar.high) : entry_price;
+      eff_low  = close_ok   ? MathMin(entry_price, bar.close) : entry_price;
+     }
+  }
+
 //--- Exit reason (Roadmap Phase 6 list) -----------------------------------
 enum ENUM_GZ_EXIT_REASON
   {
@@ -127,6 +170,10 @@ struct GZ_ExitConfig
    //--- the relevant M1 candle; a Long's close (Sell) is unaffected.
    bool                 use_real_spread_fills;
    double               point;
+   //--- Entry-bar rule (see ENUM_GZ_ENTRY_BAR_RULE). Default() keeps LEGACY so every
+   //--- existing synthetic test and any caller that does not set it is unchanged;
+   //--- the EA input InpEntryBarExitRule (default SAFE) sets the real value.
+   ENUM_GZ_ENTRY_BAR_RULE entry_bar_rule;
 
    void Default()
      {
@@ -141,6 +188,7 @@ struct GZ_ExitConfig
 
       use_real_spread_fills    = false;
       point                    = 0.01;
+      entry_bar_rule           = GZ_ENTRY_BAR_LEGACY;
      }
   };
 
@@ -178,6 +226,10 @@ struct GZ_TradeExit
    //--- changing the baseline behavior documented in GZ_ExitEngine.mqh.
    datetime             entry_time;            // trade's own entry time (copy of GZ_Trade.entry_time)
    bool                 be_armed_on_entry_bar; // BE armed on the SAME M1 candle the trade entered on
+   //--- what part of the FILL bar is provably after the fill (set once by OnTradeEntered from the
+   //--- entry model, read only under GZ_ENTRY_BAR_SAFE - see GZEntryBarView)
+   bool                 entry_bar_adverse_ok;
+   bool                 entry_bar_close_ok;
    bool                 be_arm_bar_retrace;    // on the BE-arming candle, the candle's own range ALSO reached the new
                                                // BE stop level (true intrabar order unknown; engine applies the new stop from the NEXT candle)
 
@@ -187,6 +239,8 @@ struct GZ_TradeExit
       setup_id            = 0;
       direction           = GZ_LEG_BULLISH;
       entry_price         = 0.0;
+      entry_bar_adverse_ok = true;
+      entry_bar_close_ok   = true;
       sl_model_used       = GZ_SL_STRUCTURE;
       sl_price            = 0.0;
       tp_price            = 0.0;

@@ -106,6 +106,7 @@ private:
       CGZEntryEngine        entry_engine(m_logger);  entry_engine.Init(cfg.entry_config);
       CGZExitEngine         exit_engine(m_logger);   exit_engine.Init(cfg.exit_config);
       CGZJournalEngine      journal_engine(m_logger);journal_engine.Init();
+      journal_engine.SetEntryBarSafe(cfg.exit_config.entry_bar_rule==GZ_ENTRY_BAR_SAFE);
       CGZEventLedger        event_ledger(m_logger);  event_ledger.Init();
       CGZTimeEngine         time_engine(m_logger);   time_engine.Configure(cfg.time_config);
       CGZSessionEngine      session_engine;

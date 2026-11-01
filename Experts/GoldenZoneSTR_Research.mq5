@@ -124,6 +124,7 @@
 #include <GoldenZoneSTR\Dataset\GZ_ResearchRange.mqh>
 #include <GoldenZoneSTR\Dataset\GZ_HistoricalDataset.mqh>
 #include <GoldenZoneSTR\Dataset\GZ_Partition.mqh>
+#include <GoldenZoneSTR\Data\GZ_BarAggregator.mqh>
 #include <GoldenZoneSTR\Cost\GZ_CostTypes.mqh>
 #include <GoldenZoneSTR\Cost\GZ_CostEngine.mqh>
 #include <GoldenZoneSTR\Cost\GZ_SpreadHourReport.mqh>
@@ -150,6 +151,7 @@ input bool                InpSessionInclude     = true;
 
 input bool                InpVerboseLogging     = false;
 input bool                InpLoadM15            = false;
+input ENUM_GZ_EXEC_TF     InpExecutionTimeframe = GZ_EXEC_M1;
 
 //--- Phase 2: M5 Structure Engine ---------------------------------------------
 input int                 InpPivotStrength      = 2;
@@ -181,6 +183,7 @@ input double               InpBeTriggerR         = 0.0;
 input ENUM_GZ_BE_LEVEL_MODE InpBeLevelMode       = GZ_BE_LEVEL_ENTRY;
 input double               InpBeLevelOffsetR     = 0.0;
 input ENUM_GZ_INTRABAR_CONFLICT_POLICY InpIntrabarConflictPolicy = GZ_CONFLICT_SL_FIRST;
+input ENUM_GZ_ENTRY_BAR_RULE InpEntryBarExitRule = GZ_ENTRY_BAR_SAFE;
 input bool                 InpForceSessionExit   = false;
                                                              // price moves outside the session window (independent of
                                                              // InpApplySessionFilter, which only governs Phase 4 setup
@@ -481,6 +484,7 @@ string                   g_p157_na_notes = "";
 datetime                 g_res_start = 0;      // EFFECTIVE research range actually handed to the engines
 datetime                 g_res_end   = 0;
 int                      g_p157_slice_m1 = 0;
+int                      g_exec_tf_minutes = 1;        // execution bar size actually used (1 = M1, the baseline)
 int                      g_p157_slice_m5 = 0;
 datetime                 g_p157_slice_first = 0;
 datetime                 g_p157_slice_last  = 0;
@@ -692,6 +696,24 @@ void BuildAndEmitReport()
    report += "--- Phase 5: Entry Engine + Historical Trade Simulator ---\n";
    report += StringFormat("EntryModel=%s FibRatio=%.3f ConfirmationCandles=%d PenetrationAtrMult=%.2f\n",
               EnumToString(InpEntryModel), InpEntryFibRatio, InpConfirmationCandles, InpEntryPenetrationAtrMult);
+   report += StringFormat("ExecutionTimeframe=%s (InpExecutionTimeframe) | structure timeframe=M5\n", GZExecTfLabel(g_exec_tf_minutes));
+   report += StringFormat("EntryBarExitRule=%s (InpEntryBarExitRule)\n", EnumToString(InpEntryBarExitRule));
+   if(InpEntryBarExitRule==GZ_ENTRY_BAR_SAFE)
+     {
+      report += "SAFE: on the bar a trade is FILLED on, only what is provably after the fill decides it - the adverse extreme\n";
+      report += "(low for a long, high for a short) and the close. The favorable extreme may have printed BEFORE the fill, so it is\n";
+      report += "never credited (no TP/BE-arming/MFE from it). Confirmation models fill AT the close: that bar is skipped entirely.\n";
+     }
+   else
+      report += "LEGACY: the whole fill bar (high AND low) is evaluated - optimistic, error grows with bar size (M1 small, M5/M15 large).\n";
+   if(g_exec_tf_minutes>1)
+     {
+      report += "NOTE: entries/exits are replayed on COARSER bars than the M1 baseline. Each execution bar aggregates the\n";
+      report += "validated M1 bars (spread = max M1 spread inside the bar); a bar sees structure only as of BEFORE its open, so\n";
+      report += "coarser bars react to new setups later, never earlier. Intrabar ambiguity (SL and TP inside one bar) is larger -\n";
+      report += "see InpIntrabarConflictPolicy. TOUCH fills at the execution bar's extreme (bar low/high), which is MORE optimistic on\n";
+      report += "bigger bars - prefer InpEntryModel=GZ_ENTRY_LIMIT when comparing timeframes. 'M1 confirmation' means execution-bar closes.\n";
+     }
    report += StringFormat("Trades=%d  Setups ENTERED=%d  Setups CANCELLED(INVALID_PENETRATION)=%d\n",
               g_trade_count, g_setup_sm.CountByState(GZ_SETUP_ENTERED),
               g_setup_sm.CountTerminalByReason(GZ_CANCEL_INVALID_PENETRATION));
@@ -1763,8 +1785,8 @@ void EmitPhase158Report()
                      GZPartDate(g_partition.oos_start), GZPartDate(g_partition.oos_end), GZPartDate(g_partition.leg_start), GZPartDate(g_partition.leg_end));
    s += StringFormat("executed range: kind=%s label=%s effective %s -> %s | partition class=%s | gate label=%s\n", GZRangeKindToString(g_res_range.kind), g_res_range.label,
                      TimeToString(g_res_range.eff_start, TIME_DATE|TIME_MINUTES), TimeToString(g_res_range.eff_end, TIME_DATE|TIME_MINUTES), GZPartClassToString(g_gate.part_class), g_gate.label);
-   s += StringFormat("config: TP=%.2fR BE trigger=%.2fR (0=OFF) SL=%s entry=%s pivot=%d break=%s buffer=%.2fATR | experiment IDs: see the experiment_id column of GZ_Phase155_Matrix_<label>.csv\n",
-                     InpTpRMultiple, InpBeTriggerR, EnumToString(InpSlModel), EnumToString(InpEntryModel), InpPivotStrength, EnumToString(InpBreakMode), InpBreakBufferAtrMult);
+   s += StringFormat("config: TP=%.2fR BE trigger=%.2fR (0=OFF) SL=%s entry=%s exec_tf=M%d pivot=%d break=%s buffer=%.2fATR | experiment IDs: see the experiment_id column of GZ_Phase155_Matrix_<label>.csv\n",
+                     InpTpRMultiple, InpBeTriggerR, EnumToString(InpSlModel), EnumToString(InpEntryModel), g_exec_tf_minutes, InpPivotStrength, EnumToString(InpBreakMode), InpBreakBufferAtrMult);
    string hole = (g_res_range.status==GZ_RSTATUS_OK) ? GZAcceptedHoleNote(g_res_range.eff_start, g_res_range.eff_end) : "";
    s += "accepted data-hole note: " + (StringLen(hole)>0 ? hole : "none (the executed range does not contain the accepted hole)") + "\n";
    s += "(The hole 2022-08-31 23:59 -> 2022-09-05 01:00 is part of the DEVELOPMENT partition identity: any range containing it carries that caveat.)\n\n";
@@ -2239,6 +2261,26 @@ int OnInit()
       g_fcis_step1_text = "Step 1 - Hourly spread diagnostic: SKIPPED (no M1 data loaded in this attachment).\n";
    g_logger.Info("FCIS-Step1", g_fcis_step1_text);
 
+   //--- Execution timeframe (InpExecutionTimeframe). Everything ABOVE this
+   //--- point (data validation, the M1/M5 sync check, the FCIS hourly spread
+   //--- diagnostic) has already used the TRUE M1 series. From here on `m1`
+   //--- is the EXECUTION series the trade simulator, the exit engine, the
+   //--- cost engine and every research phase (9-15.5) replay against the M5
+   //--- structure. M1 (the default) leaves it untouched; M5/M15 aggregate the
+   //--- SAME validated M1 bars (GZ_BarAggregator.mqh) - structure is not
+   //--- changed and no data is fabricated.
+   g_exec_tf_minutes = (int)InpExecutionTimeframe;
+   if(g_exec_tf_minutes>1 && n1>0)
+     {
+      MqlRates exec_bars[];
+      int n_exec = GZAggregateBars(m1, g_exec_tf_minutes, exec_bars);
+      g_logger.Info("ExecTF", StringFormat("Execution timeframe %s: %d M1 bars aggregated into %d %s execution bars (structure stays M5; bar spread = max M1 spread in the bar).",
+                    GZExecTfLabel(g_exec_tf_minutes), n1, n_exec, GZExecTfLabel(g_exec_tf_minutes)));
+      ArrayFree(m1);
+      ArrayCopy(m1, exec_bars);
+      n1 = n_exec;
+     }
+
    //--- Phase 2: M5 Structure Engine (swing/pivot detection) ------------------
    // Diagnostic only - detects swings over the already-loaded, already-
    // validated M5 range and logs a summary. No leg/break/fib/entry/exit
@@ -2336,10 +2378,12 @@ int OnInit()
    exit_cfg.be_level_offset_r       = InpBeLevelOffsetR;
    exit_cfg.intrabar_conflict_policy= InpIntrabarConflictPolicy;
    exit_cfg.use_real_spread_fills   = InpUseRealSpreadFills;
+   exit_cfg.entry_bar_rule          = InpEntryBarExitRule;
    exit_cfg.point                   = g_cost_cfg.point;
    g_exit_engine.Init(exit_cfg);
 
    g_journal_engine.Init();
+   g_journal_engine.SetEntryBarSafe(InpEntryBarExitRule==GZ_ENTRY_BAR_SAFE);
    g_event_ledger.Init();
 
    g_leg_count = 0;
@@ -2909,6 +2953,16 @@ int OnInit()
          else
             oos_i5.AddError("No M5 data returned for the Final OOS range.");
          oos_i5.Finalize();
+
+         //--- Same execution timeframe as the Development series above (the OOS M1
+         //--- bars were validated as true M1 just before this point).
+         if(g_exec_tf_minutes>1 && g_oos_m1_bars>0)
+           {
+            MqlRates oos_exec[];
+            GZAggregateBars(oos_m1, g_exec_tf_minutes, oos_exec);
+            ArrayFree(oos_m1);
+            ArrayCopy(oos_m1, oos_exec);
+           }
 
          GZ_ExperimentConfig oos_cfg = exp_cfg;   // the frozen configuration - same base Phases 9-14 used
          string oos_prefix = StringFormat("%s_FINALOOS", InpSymbol);

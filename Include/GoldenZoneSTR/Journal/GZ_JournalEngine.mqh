@@ -37,6 +37,7 @@ class CGZJournalEngine
 private:
    CGZLogger        *m_logger;
    GZ_TradeJournal   m_journals[];
+   bool              m_entry_bar_safe;   // GZ_ENTRY_BAR_SAFE: the fill bar contributes only what is provably after the fill
 
    int FindByTradeId(long trade_id) const
      {
@@ -48,7 +49,11 @@ private:
      }
 
 public:
-                     CGZJournalEngine(CGZLogger *logger=NULL) { m_logger=logger; }
+                     CGZJournalEngine(CGZLogger *logger=NULL) { m_logger=logger; m_entry_bar_safe=false; }
+
+   //--- Must match CGZExitEngine's entry_bar_rule so MAE/MFE/Reach never credit an extreme
+   //--- that printed BEFORE the fill. Default false = every pre-existing caller unchanged.
+   void              SetEntryBarSafe(bool on) { m_entry_bar_safe = on; }
 
    void              Init()
      {
@@ -79,6 +84,7 @@ public:
       j.entry_time   = trade.entry_time;
       j.entry_price  = trade.entry_price;
       j.initial_risk = initial_risk;
+      GZEntryModelFillFlags(trade.entry_model, j.entry_bar_adverse_ok, j.entry_bar_close_ok);
       j.mae_price    = trade.entry_price;
       j.mfe_price    = trade.entry_price;
       j.time_to_mae  = trade.entry_time;
@@ -106,8 +112,14 @@ public:
 
          bool bullish = (m_journals[i].direction==GZ_LEG_BULLISH);
 
-         double favorable_price = bullish ? bar.high : bar.low;
-         double adverse_price   = bullish ? bar.low  : bar.high;
+         double bar_high = bar.high;
+         double bar_low  = bar.low;
+         if(m_entry_bar_safe && bar.time==m_journals[i].entry_time)
+            GZEntryBarView(bar, bullish, m_journals[i].entry_price,
+                           m_journals[i].entry_bar_adverse_ok, m_journals[i].entry_bar_close_ok, bar_high, bar_low);
+
+         double favorable_price = bullish ? bar_high : bar_low;
+         double adverse_price   = bullish ? bar_low  : bar_high;
 
          double favorable_move = bullish ? (favorable_price-m_journals[i].entry_price)
                                           : (m_journals[i].entry_price-favorable_price);
